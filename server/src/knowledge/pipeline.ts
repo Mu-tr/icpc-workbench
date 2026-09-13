@@ -30,9 +30,18 @@ export const PIPELINE_CODE_VERSION = 4;
  * 把 rules.json 的 version 真正接入差量重跑依据，消灭「改了规则忘了 bump 版本 → 静默不重跑」，
  * 同时让此前零引用的 rulesVersion() 有了唯一消费方。
  * 例：代码版本 4、rules.json version 1 → 4001。
+ *
+ * ⚠️ 必须是**函数**，不能在模块加载期算成常量 —— 这是踩过的坑（nightly af38ae8 启动即崩）：
+ * SEA 单文件 exe 把 rules.json **内嵌**在 exe 里、磁盘上没有该文件，由 `sea.ts` 调用
+ * `setRulesJson()` 注入；而模块加载（import 求值）必然早于 `sea.ts` 里的注入语句。
+ * 若在加载期调用 `rulesVersion()`，它只能去读磁盘 → `ENOENT: ...\rules.json` → 程序起不来。
+ * 决策点：谁在加载期求值，谁就要为之付出「磁盘上必须存在」的代价。
+ * 改成函数后，求值推迟到真正用到时（写标注 / 跑管线），那时注入早已完成。
  */
-export const PIPELINE_VERSION = PIPELINE_CODE_VERSION * 1000 + rulesVersion();
-setCurrentPipelineVersion(PIPELINE_VERSION);
+export function pipelineVersion(): number {
+  return PIPELINE_CODE_VERSION * 1000 + rulesVersion();
+}
+setCurrentPipelineVersion(pipelineVersion);
 
 export interface L1RunResult {
   scanned: number;
@@ -206,7 +215,7 @@ export function runRulePass(
            )
            ORDER BY p.id LIMIT ?`,
         )
-        .all(PIPELINE_VERSION, taxonomyVersion, limit) as unknown as ProblemRow[])
+        .all(pipelineVersion(), taxonomyVersion, limit) as unknown as ProblemRow[])
     : (db
         .prepare(
           `SELECT p.platform, p.problem_key, p.title, p.tags FROM problems p

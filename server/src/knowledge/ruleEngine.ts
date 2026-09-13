@@ -69,8 +69,21 @@ export function loadRules(): CompiledRule[] {
 
 let versionCache: number | null = null;
 
-/** 规则表版本（rules.json version 字段），用于管线版本联动与审计。缓存避免每轮重跑反复读盘 */
+/**
+ * 规则表版本（rules.json version 字段），用于管线版本联动与审计。
+ *
+ * ⚠️ override 存在时必须**优先**用它，绝不能回落到磁盘读取：
+ * SEA（单文件 exe）分发时 `RULES_PATH` 解析到 exe 所在目录，那里没有 rules.json，
+ * 一旦回落就是启动即崩（`ENOENT: ... \rules.json`）。
+ * 这个坑真实发生过：`pipeline.ts` 在**模块加载期**就要算 `PIPELINE_VERSION`（会调本函数），
+ * 而 `sea.ts` 注入 override 与模块加载的先后由 bundler 的求值顺序决定 ——
+ * 只要有一次求值早于注入，缓存就被磁盘结果污染，或直接抛错。
+ * 因此这里不给「先读磁盘、后注入」留任何窗口。
+ */
 export function rulesVersion(): number {
+  if (jsonOverride !== null) {
+    return (JSON.parse(jsonOverride) as { version: number }).version;
+  }
   if (versionCache === null) versionCache = readRulesFile().version;
   return versionCache;
 }

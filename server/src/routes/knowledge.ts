@@ -14,7 +14,7 @@ import {
   setConfidenceThreshold,
   setManualKeypoints,
 } from '../knowledge/store.ts';
-import { PIPELINE_CODE_VERSION, PIPELINE_VERSION, pendingAiCount, retryFailedQueue, runRulePass } from '../knowledge/pipeline.ts';
+import { PIPELINE_CODE_VERSION, pendingAiCount, pipelineVersion, retryFailedQueue, runRulePass } from '../knowledge/pipeline.ts';
 import { loadRules, rulesVersion } from '../knowledge/ruleEngine.ts';
 import { exportQueuePackage, importAiResults, runAiPass } from '../knowledge/aiClassify.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
@@ -173,7 +173,7 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
   r.get('/meta', (_req, res) => {
     res.json({
       taxonomyVersion: loadTaxonomy().version,
-      pipelineVersion: PIPELINE_VERSION,
+      pipelineVersion: pipelineVersion(),
       pipelineCodeVersion: PIPELINE_CODE_VERSION,
       rulesVersion: rulesVersion(),
       rules: loadRules().length,

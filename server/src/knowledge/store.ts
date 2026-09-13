@@ -39,7 +39,7 @@ export function tombstoneLine(platform: string, problemKey: string, source: Know
     problemKey,
     knowledgePoints: [],
     taxonomyVersion: loadTaxonomy().version,
-    pipelineVersion: CURRENT_PIPELINE_VERSION,
+    pipelineVersion: currentPipelineVersion(),
     annotatedAt: new Date().toISOString(),
     writeSource: source,
   };
@@ -292,7 +292,7 @@ export function writeAnnotationsToDb(
         w.source,
         p.method,
         taxonomyVersion,
-        CURRENT_PIPELINE_VERSION,
+        currentPipelineVersion(),
         w.title ?? null,
         now,
       );
@@ -303,7 +303,7 @@ export function writeAnnotationsToDb(
       problemKey: w.problemKey,
       knowledgePoints: points,
       taxonomyVersion,
-      pipelineVersion: CURRENT_PIPELINE_VERSION,
+      pipelineVersion: currentPipelineVersion(),
       annotatedAt: now,
       writeSource: w.source,
       ...(w.title !== undefined ? { annotatedTitle: w.title } : {}),
@@ -313,10 +313,26 @@ export function writeAnnotationsToDb(
   return { lines, written, skippedManual };
 }
 
-/** 由 pipeline.ts 在模块加载时设定（避免循环依赖） */
-let CURRENT_PIPELINE_VERSION = 1;
-export function setCurrentPipelineVersion(v: number): void {
-  CURRENT_PIPELINE_VERSION = v;
+/**
+ * 当前管线版本 —— **惰性求值**，不要在模块加载期算。
+ *
+ * 由 pipeline.ts 在模块加载时注册一个 getter（避免循环依赖），首次写入标注时才真正求值。
+ * 为什么必须惰性：SEA 单文件 exe 把 rules.json 内嵌在 exe 里，靠 sea.ts 注入；
+ * 而模块加载早于注入，加载期求值会去读磁盘 → ENOENT → 启动即崩
+ * （nightly af38ae8 的真实故障，见 GitHub issue #15）。
+ */
+let versionGetter: (() => number) | null = null;
+let fallbackVersion = 1;
+
+/** 由 pipeline.ts 在模块加载时注册（只注册 getter，不在此时调用它） */
+export function setCurrentPipelineVersion(v: number | (() => number)): void {
+  if (typeof v === 'function') versionGetter = v;
+  else fallbackVersion = v;
+}
+
+/** 取当前管线版本：有 getter 时惰性求值，否则回退到注册值（默认 1） */
+function currentPipelineVersion(): number {
+  return versionGetter === null ? fallbackVersion : versionGetter();
 }
 
 /** L3 人工校正：整题覆盖写 source=manual（重跑管线不覆盖 manual） */
@@ -464,7 +480,7 @@ export function getCoverage(db: Db): KnowledgeCoverage {
     bySource,
     uncovered: total - annotated,
     taxonomyVersion: loadTaxonomy().version,
-    pipelineVersion: CURRENT_PIPELINE_VERSION,
+    pipelineVersion: currentPipelineVersion(),
     rulesVersion: rulesVersion(),
     threshold: t,
   };
