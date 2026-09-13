@@ -2,6 +2,7 @@ import type { PlatformId } from '../../../shared/src/index.ts';
 import { fetchWithChallenge, luoguDifficultyToRating } from './luogu.ts';
 import { leetcodeDifficultyToRating } from './leetcode.ts';
 import { jisuankeDifficultyToRating } from './jisuanke.ts';
+import { asHttpClient, sleep, type HttpInit } from './http.ts';
 
 /** 题库题目（无提交记录，仅供扩充待选池） */
 export interface BankProblem {
@@ -38,7 +39,6 @@ const DAIMAYUAN_BASE = 'https://bs.daimayuan.top';
 const LUOGU_PER_PAGE = 50;
 const NOWCODER_PER_PAGE = 50;
 const DAIMAYUAN_PER_PAGE = 100;
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 洛谷 ----------
 
@@ -58,7 +58,7 @@ interface LuoguListProblem {
  * 服务端按难度升序返回，翻页至难度超限或页空终止。
  */
 export async function fetchLuoguBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 2000;
@@ -69,7 +69,7 @@ export async function fetchLuoguBank(
 
   for (let page = 1; page <= 200; page += 1) {
     const url = `${LUOGU_API}/problem/list?page=${page}&type=P&difficulty=${minDiff}`;
-    const res = await fetchWithChallenge(fetchFn, url, '', undefined, {
+    const res = await fetchWithChallenge(asHttpClient(fetchFn), url, '', undefined, {
       'x-lentille-request': 'content-only',
       Accept: 'application/json',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -123,10 +123,10 @@ export async function fetchLuoguBank(
 }
 
 /** 洛谷 tag id → 名称字典（/_lfe/tags，匿名可访问；失败降级为空字典，仅丢失标签） */
-async function fetchLuoguTagDict(fetchFn: typeof fetch): Promise<Map<number, string>> {
+async function fetchLuoguTagDict(fetchFn: HttpInit): Promise<Map<number, string>> {
   const dict = new Map<number, string>();
   try {
-    const res = await fetchWithChallenge(fetchFn, `${LUOGU_API}/_lfe/tags`, '', undefined, {
+    const res = await fetchWithChallenge(asHttpClient(fetchFn), `${LUOGU_API}/_lfe/tags`, '', undefined, {
       Accept: 'application/json',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       Referer: `${LUOGU_API}/`,
@@ -156,7 +156,7 @@ interface NcBankRow {
  * 页面无服务端难度筛选（前端 JS 过滤），按 orderById 顺序翻页。
  */
 export async function fetchNowcoderBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 2000;
@@ -166,12 +166,11 @@ export async function fetchNowcoderBank(
 
   for (let page = 1; page <= 200; page += 1) {
     const url = `${NOWCODER_API}/acm/problem/list?queryType=all&orderById=true&page=${page}`;
-    const res = await fetchFn(url, {
+    const res = await asHttpClient(fetchFn).fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         Referer: `${NOWCODER_API}/acm/problem/list`,
       },
-      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
       throw new Error(`牛客题库页 HTTP ${res.status}，请稍后重试`);
@@ -241,17 +240,16 @@ interface CfProblemsetProblem {
  * 无 contestId 的条目（acmsguru 等）不在 /contest/{id}/problem/ 链接体系内，跳过。
  */
 export async function fetchCodeforcesBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 20000;
-  const res = await fetchFn(`${CODEFORCES_API}/problemset.problems`, {
+  const res = await asHttpClient(fetchFn).fetch(`${CODEFORCES_API}/problemset.problems`, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       Accept: 'application/json',
     },
-    signal: AbortSignal.timeout(30000),
-  });
+  }, { timeoutMs: 30000 }); // 单次返回约 1 万题的全量题库，放宽超时
   if (!res.ok) {
     throw new Error(`Codeforces 题库接口 HTTP ${res.status}，请稍后重试`);
   }
@@ -313,7 +311,7 @@ const LEETCODE_BANK_QUERY = `query problemsetQuestionList($limit: Int, $skip: In
  * （TAG_ALIAS_TO_CANONICAL 负责归并到中文知识点）。付费题（paidOnly）跳过。
  */
 export async function fetchLeetcodeBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 2000;
@@ -321,7 +319,7 @@ export async function fetchLeetcodeBank(
   let total: number | null = null;
 
   for (let skip = 0; skip < 10000; skip += LEETCODE_BANK_PAGE) {
-    const res = await fetchFn(LEETCODE_GRAPHQL, {
+    const res = await asHttpClient(fetchFn).fetch(LEETCODE_GRAPHQL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -332,8 +330,7 @@ export async function fetchLeetcodeBank(
         query: LEETCODE_BANK_QUERY,
         variables: { limit: LEETCODE_BANK_PAGE, skip },
       }),
-      signal: AbortSignal.timeout(30000),
-    });
+    }, { timeoutMs: 30000 });
     if (!res.ok) {
       throw new Error(`力扣题库接口 HTTP ${res.status}，请稍后重试`);
     }
@@ -392,7 +389,7 @@ interface KenkoooModel {
  * difficulty 经四舍五入后统一到 CF rating 标尺；负值（极简题）钳到 800（CF 实际下限）。
  */
 export async function fetchAtcoderBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 5000;
@@ -402,15 +399,14 @@ export async function fetchAtcoderBank(
   };
 
   // kenkoooo 要求请求间隔 >= 1s：顺序请求 + sleep，不并发（原 Promise.all 违反间隔要求）
-  const probRes = await fetchFn(`${KENKOOOO_API}/resources/problems.json`, {
+  // 两份资源都是全量快照（problems 数千条 / models 上万条），放宽超时到 30s
+  const probRes = await asHttpClient(fetchFn).fetch(`${KENKOOOO_API}/resources/problems.json`, {
     headers,
-    signal: AbortSignal.timeout(30000),
-  });
+  }, { timeoutMs: 30000 });
   await sleep(1000);
-  const modelRes = await fetchFn(`${KENKOOOO_API}/resources/problem-models.json`, {
+  const modelRes = await asHttpClient(fetchFn).fetch(`${KENKOOOO_API}/resources/problem-models.json`, {
     headers,
-    signal: AbortSignal.timeout(30000),
-  });
+  }, { timeoutMs: 30000 });
   if (!probRes.ok) {
     throw new Error(`AtCoder 题库接口 HTTP ${probRes.status}，请稍后重试`);
   }
@@ -475,7 +471,7 @@ interface DmyBankRow {
  * 总数从 <p>{N} problems</p> 提取；翻页至空页或达到 max 终止。
  */
 export async function fetchDaimayuanBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 2000;
@@ -485,12 +481,11 @@ export async function fetchDaimayuanBank(
 
   for (let page = 1; page <= 50; page += 1) {
     const url = `${DAIMAYUAN_BASE}/p?page=${page}`;
-    const res = await fetchFn(url, {
+    const res = await asHttpClient(fetchFn).fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         Referer: `${DAIMAYUAN_BASE}/p`,
       },
-      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
       throw new Error(`代码源题库页 HTTP ${res.status}，请稍后重试`);
@@ -617,7 +612,7 @@ function parseJisuankeTags(v: unknown): string[] {
  * 题号 problemIdentifier（如 T1001）即 problemKey，题目页 /problem/{identifier}。
  */
 export async function fetchJisuankeBank(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   opts: BankFetchOptions = {},
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 2000;
@@ -625,13 +620,12 @@ export async function fetchJisuankeBank(
   let total: number | null = null;
 
   for (let page = 1; page <= 200; page += 1) {
-    const res = await fetchFn(`${JISUANKE_BASE}/api/problems?page=${page}`, {
+    const res = await asHttpClient(fetchFn).fetch(`${JISUANKE_BASE}/api/problems?page=${page}`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         Accept: 'application/json',
         Referer: `${JISUANKE_BASE}/problems`,
       },
-      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
       throw new Error(`计蒜客题库接口 HTTP ${res.status}，请稍后重试`);

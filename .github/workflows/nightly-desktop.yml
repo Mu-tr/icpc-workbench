@@ -1,5 +1,8 @@
 # 桌面版 nightly 自动构建：每次 push 到 master 构建全平台安装包并发布/覆盖 nightly 预发布版。
 # 应用内「检查更新」会把它作为提交通道，感知未打 tag 的新提交并支持一键更新（Windows）。
+# 门禁：build/publish 均 `needs` 复用 ci.yml 的 check job（同一 workflow 调用）。
+# 两个 workflow 由同一 push 事件并行触发，若不显式依赖，master 上测试失败也会照常构建
+# 并覆盖 nightly 预发布版，用户拉到的可能是坏包。
 # 平台覆盖：
 #   - Windows：NSIS 安装程序 + 便携版双 exe
 #   - macOS（Apple Silicon）：.dmg 安装镜像（未签名，首开需右键打开，见 release notes）
@@ -18,7 +21,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 质量门禁：与 ci.yml 的 check job 同源（typecheck / lint / test）。
+  # 跨 workflow 的 `needs` 不受支持，故此处内联同一组命令作为本 workflow 的前置 job。
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: Typecheck (server + client)
+        run: npm run typecheck
+
+      - name: Lint (client)
+        run: npm run lint
+
+      - name: Test (server + client)
+        run: npm test
+
   build-windows:
+    needs: [gate]
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -54,6 +83,7 @@ jobs:
           if-no-files-found: error
 
   build-mac:
+    needs: [gate]
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -88,7 +118,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build-windows, build-mac]
+    needs: [gate, build-windows, build-mac]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

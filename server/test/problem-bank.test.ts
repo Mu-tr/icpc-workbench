@@ -346,9 +346,9 @@ test('daimayuan bank: HTTP failure throws', async () => {
 // ---------- 入库服务 ----------
 
 test('upsertBankProblems: inserts new, updates existing, keeps manual difficulty', () => {
-  // 预置一道已存在题（手动导入途径，difficulty=1800）
+  // 预置一道已存在题（手动导入途径，difficulty=1800 且标为 manual 来源）
   db.prepare(
-    "INSERT INTO problems (platform, problem_key, title, difficulty, url, tags) VALUES ('luogu', 'P1001', '旧标题', 1800, 'https://x', '[]')",
+    "INSERT INTO problems (platform, problem_key, title, difficulty, difficulty_source, url, tags) VALUES ('luogu', 'P1001', '旧标题', 1800, 'manual', 'https://x', '[]')",
   ).run();
   const r = upsertBankProblems(db, [
     { platform: 'luogu', problemKey: 'P1001', title: '新标题', difficulty: 1300, url: 'https://www.luogu.com.cn/problem/P1001', tags: ['dp'] },
@@ -361,14 +361,29 @@ test('upsertBankProblems: inserts new, updates existing, keeps manual difficulty
     .prepare('SELECT problem_key, title, difficulty, tags FROM problems ORDER BY problem_key')
     .all() as Array<{ problem_key: string; title: string; difficulty: number; tags: string }>;
   assert.equal(rows.length, 2);
-  // 已存在：标题更新、难度保留手动值（1800）、标签更新
+  // 已存在：标题更新、难度保留手动值（1800，来源优先级 manual(4) > bank(1)）、标签写入即净化
   assert.equal(rows[0].problem_key, 'P1001');
   assert.equal(rows[0].title, '新标题');
   assert.equal(rows[0].difficulty, 1800);
-  assert.deepEqual(JSON.parse(rows[0].tags), ['dp']);
+  assert.deepEqual(JSON.parse(rows[0].tags), ['动态规划']); // 'dp' 写入即归并为规范名
   // 新增
   assert.equal(rows[1].problem_key, 'P2002');
   assert.equal(rows[1].difficulty, 1700);
+});
+
+test('upsertBankProblems: 题库难度不覆盖同步来的难度（bank(1) < sync(2)）', () => {
+  db.prepare(
+    "INSERT INTO problems (platform, problem_key, title, difficulty, difficulty_source, url, tags) VALUES ('luogu', 'P3003', '旧标题', 2000, 'sync', 'https://x', '[]')",
+  ).run();
+  upsertBankProblems(db, [
+    { platform: 'luogu', problemKey: 'P3003', title: '新标题', difficulty: 1200, url: null, tags: [] },
+  ]);
+  const row = db.prepare("SELECT difficulty, difficulty_source FROM problems WHERE problem_key = 'P3003'").get() as {
+    difficulty: number;
+    difficulty_source: string;
+  };
+  assert.equal(row.difficulty, 2000);
+  assert.equal(row.difficulty_source, 'sync');
 });
 
 test('upsertBankProblems: empty tags do not overwrite existing tags', () => {
@@ -579,4 +594,166 @@ test('POST /api/problems/bank: upstream failure returns 502 with message', async
     const body = (await res.json()) as { error: string };
     assert.match(body.error, /HTTP 403/);
   }, fetchFn);
+});
+
+// ---------- 服务端分页与分面（P0-2 / P1-2） ----------
+
+interface PageBody {
+  items: Array<{ problem_key: string; difficulty: number | null; status: string; tags: string[] }>;
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+/** 造 n 道有提交记录的题：难度 800..800+n-1（键唯一，供分页/分桶测试用） */
+function seedMany(db: Db, n: number): void {
+  const subs: NormalizedSubmission[] = Array.from({ length: n }, (_, i) =>
+    sub(`PG${i}`, 800 + i, `pg-${i}`),
+  );
+  insertNormalized(db, 1, subs);
+}
+
+test('GET /api/problems/page: 分页返回总数，且各页无重叠无遗漏', async () => {
+  await withServer(
+    async (base) => {
+      const p1 = (await (await fetch(`${base}/page?page=1&pageSize=10`)).json()) as PageBody;
+      assert.equal(p1.total, 25);
+      assert.equal(p1.items.length, 10);
+      assert.equal(p1.page, 1);
+      assert.equal(p1.hasMore, true);
+
+      const p3 = (await (await fetch(`${base}/page?page=3&pageSize=10`)).json()) as PageBody;
+      assert.equal(p3.items.length, 5);
+      assert.equal(p3.hasMore, false);
+
+      // 三页并集 = 全集，且互不重叠（游标稳定：ORDER BY 带 p.id 兜底，无重复/漏行）
+      const p2 = (await (await fetch(`${base}/page?page=2&pageSize=10`)).json()) as PageBody;
+      const keys = [...p1.items, ...p2.items, ...p3.items].map((i) => i.problem_key);
+      assert.equal(new Set(keys).size, 25);
+    },
+    undefined,
+    (d) => seedMany(d, 25),
+  );
+});
+
+test('GET /api/problems/page: total 与状态过滤口径一致（ac/tried/none）', async () => {
+  // 10 题：4 AC / 3 仅尝试 / 3 无提交（无提交者需 bank=1 才在候选集内）
+  await withServer(
+    async (base) => {
+      const ac = (await (await fetch(`${base}/page?status=ac&pageSize=50`)).json()) as PageBody;
+      assert.equal(ac.total, 4);
+      assert.ok(ac.items.every((i) => i.status === 'ac'));
+
+      const tried = (await (await fetch(`${base}/page?status=tried&pageSize=50`)).json()) as PageBody;
+      assert.equal(tried.total, 3);
+      assert.ok(tried.items.every((i) => i.status === 'tried'));
+
+      // none 需要 bank=1 才可能命中（无提交的题缺省不可见）
+      const noneBank = (await (await fetch(`${base}/page?status=none&bank=1&pageSize=50`)).json()) as PageBody;
+      assert.equal(noneBank.total, 3);
+      assert.ok(noneBank.items.every((i) => i.status === 'none'));
+
+      // 与旧数组路径交叉核对：不带 status 时总数一致（口径未漂移）
+      const all = (await (await fetch(`${base}/page?bank=1&pageSize=50`)).json()) as PageBody;
+      assert.equal(all.total, 10);
+    },
+    undefined,
+    (d) => {
+      const subs: NormalizedSubmission[] = [];
+      for (let i = 0; i < 4; i += 1) subs.push(sub(`AC${i}`, 900 + i, `ac-${i}`, 'AC'));
+      for (let i = 0; i < 3; i += 1) subs.push(sub(`TRIED${i}`, 1500 + i, `tried-${i}`, 'WA'));
+      insertNormalized(d, 1, subs);
+      // 3 道纯题库题（无提交记录）
+      upsertBankProblems(d, Array.from({ length: 3 }, (_, i) => ({
+        platform: 'luogu' as const,
+        problemKey: `NONE${i}`,
+        title: `未做题 ${i}`,
+        difficulty: 1200,
+        url: `https://www.luogu.com.cn/problem/NONE${i}`,
+        tags: [],
+      })));
+    },
+  );
+});
+
+test('GET /api/problems/page: 难度分桶与区间过滤下推到 SQL（含「未知」桶）', async () => {
+  await withServer(
+    async (base) => {
+      // 造数难度 800..822，全部落在 <1200 桶内
+      const low = (await (await fetch(`${base}/page?difficulty=${encodeURIComponent('<1200')}&pageSize=50`)).json()) as PageBody;
+      assert.equal(low.total, 23);
+      assert.ok(low.items.every((i) => (i.difficulty ?? 0) < 1200));
+
+      // 显式区间：800..1000 闭区间
+      const range = (await (await fetch(`${base}/page?diffMin=800&diffMax=1000&pageSize=50`)).json()) as PageBody;
+      assert.equal(range.total, 23);
+      assert.ok(range.items.every((i) => i.difficulty !== null && i.difficulty >= 800 && i.difficulty <= 1000));
+
+      // 空桶
+      const high = (await (await fetch(`${base}/page?difficulty=${encodeURIComponent('1200-1399')}&pageSize=50`)).json()) as PageBody;
+      assert.equal(high.total, 0);
+
+      // 「未知」桶只含 difficulty IS NULL 的题（1 道题库题）
+      const unknown = (await (await fetch(`${base}/page?difficulty=${encodeURIComponent('未知')}&bank=1&pageSize=50`)).json()) as PageBody;
+      assert.equal(unknown.total, 1);
+      assert.equal(unknown.items[0].difficulty, null);
+    },
+    undefined,
+    (d) => {
+      seedMany(d, 23);
+      upsertBankProblems(d, [
+        { platform: 'luogu', problemKey: 'NODIFF', title: '无难度题', difficulty: null, url: 'https://www.luogu.com.cn/problem/NODIFF', tags: [] },
+      ]);
+    },
+  );
+});
+
+test('GET /api/problems/page: tag 筛选命中同义别名（与旧数组路径同口径）', async () => {
+  await withServer(
+    async (base) => {
+      const cfSub = sub('1001A', 1500, 'e-pg-alias');
+      cfSub.problem.tags = ['binary search'];
+      const byCn = (await (await fetch(`${base}/page?tag=${encodeURIComponent('二分')}`)).json()) as PageBody;
+      assert.equal(byCn.total, 1);
+      assert.equal(byCn.items[0].problem_key, '1001A');
+    },
+    undefined,
+    (d) => {
+      const cfSub = sub('1001A', 1500, 'e-pg-alias');
+      cfSub.problem.tags = ['binary search'];
+      insertNormalized(d, 1, [cfSub]);
+    },
+  );
+});
+
+test('GET /api/problems/facets: 返回难度/平台/标签分面计数（标签已归并规范名）', async () => {
+  await withServer(
+    async (base) => {
+      const f = (await (await fetch(`${base}/facets`)).json()) as {
+        total: number;
+        difficulty: Record<string, number>;
+        platforms: Array<{ id: string; count: number }>;
+        tags: Array<{ tag: string; count: number }>;
+      };
+      assert.equal(f.total, 3);
+      assert.equal(f.difficulty['<1200'], 2);
+      assert.equal(f.difficulty['1400-1599'], 1);
+      assert.equal(f.platforms.find((p) => p.id === 'codeforces')?.count, 3);
+      // dp → 动态规划 归并计数；噪声标签（年份）不出现
+      assert.equal(f.tags.find((t) => t.tag === '动态规划')?.count, 2);
+      assert.equal(f.tags.find((t) => t.tag === 'dp'), undefined);
+      assert.equal(f.tags.find((t) => t.tag === '2026'), undefined);
+    },
+    undefined,
+    (d) => {
+      const a = sub('F1', 900, 'f-1');
+      a.problem.tags = ['dp', '2026']; // dp → 动态规划；2026 为噪声标签
+      const b = sub('F2', 1000, 'f-2');
+      b.problem.tags = ['动态规划']; // 与 a 归并到同一规范名
+      const c = sub('F3', 1500, 'f-3');
+      c.problem.tags = ['greedy']; // greedy → 贪心
+      insertNormalized(d, 1, [a, b, c]);
+    },
+  );
 });

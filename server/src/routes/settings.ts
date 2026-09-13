@@ -14,6 +14,32 @@ import { chatUrl } from '../ai/provider.ts';
 
 const DEFAULT_REMINDER_TIME = '20:00';
 
+/**
+ * 秘密打码用于回显：让用户能确认「已填的是哪个密钥」，但不把原文回传给渲染层。
+ * <12 字符全遮（短值露头尾即泄露大半）；长值露前 4 后 4，中间固定 6 个点不泄露长度。
+ */
+export function maskSecret(s: unknown): string {
+  const v = typeof s === 'string' ? s.trim() : '';
+  if (!v) return '';
+  if (v.length < 12) return '••••••••';
+  return `${v.slice(0, 4)}••••••${v.slice(-4)}`;
+}
+
+/** Cookie 头逐对打码（name=value; ...），保留 name 便于前端按名回填各输入框；无 = 的裸值整体打码 */
+function maskCookieHeader(raw: string): string {
+  return raw
+    .split(';')
+    .map((pair) => {
+      const p = pair.trim();
+      if (!p) return '';
+      const i = p.indexOf('=');
+      if (i < 0) return maskSecret(p);
+      return `${p.slice(0, i)}=${maskSecret(p.slice(i + 1))}`;
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
 function readReminder(db: Db): { enabled: boolean; time: string } {
   const get = (key: string): string | undefined =>
     (db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined)
@@ -63,11 +89,13 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
   // GET /api/settings → AI 配置 + 平台账号 + 适配器开关 + Cookie 配置 + 打卡提醒
   r.get('/', (_req, res) => {
     const savedAi = aiConfigFromDb(db, config);
-    // 秘密只用于服务端请求上游，不能通过读取设置接口回传给 WebView/浏览器。
+    // 秘密原文只用于服务端请求上游，不回传给 WebView/浏览器；只回传打码版供界面回显。
     const ai = {
       ...savedAi,
       apiKey: '',
       searchApiKey: '',
+      apiKeyMasked: maskSecret(savedAi.apiKey),
+      searchApiKeyMasked: maskSecret(savedAi.searchApiKey),
       hasApiKey: Boolean(savedAi.apiKey),
       hasSearchApiKey: Boolean(savedAi.searchApiKey),
     };
@@ -90,7 +118,7 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
         .prepare('SELECT value FROM settings WHERE key = ?')
         .get(`csrf.${p.id}`) as { value: string } | undefined;
       if (c || csrf) {
-        cookies[p.id] = { configured: true };
+        cookies[p.id] = { configured: true, ...(c?.value ? { masked: maskCookieHeader(c.value) } : {}) };
       }
     }
     res.json({
@@ -225,9 +253,17 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
       ...(b.searchEngine === 'tavily' || b.searchEngine === 'brave' ? { searchEngine: b.searchEngine } : {}),
       ...(typeof b.searchApiKey === 'string' ? { searchApiKey: b.searchApiKey } : {}),
     });
-    // 与 GET 一致：保存后的响应同样不能把秘密回传给前端。
+    // 与 GET 一致：保存后的响应同样不回传秘密原文，只回传打码版。
     const saved = aiConfigFromDb(db, config);
-    res.json({ ...saved, apiKey: '', searchApiKey: '', hasApiKey: Boolean(saved.apiKey), hasSearchApiKey: Boolean(saved.searchApiKey) });
+    res.json({
+      ...saved,
+      apiKey: '',
+      searchApiKey: '',
+      apiKeyMasked: maskSecret(saved.apiKey),
+      searchApiKeyMasked: maskSecret(saved.searchApiKey),
+      hasApiKey: Boolean(saved.apiKey),
+      hasSearchApiKey: Boolean(saved.searchApiKey),
+    });
   });
 
   // POST /api/settings/ai/test  body: { baseURL?, apiKey?, model? }

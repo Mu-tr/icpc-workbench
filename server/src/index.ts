@@ -13,6 +13,7 @@ import { contestsRoutes } from './routes/contests.ts';
 import { aiRoutes } from './routes/ai.ts';
 import { exportRoutes } from './routes/export.ts';
 import { importRoutes } from './routes/import.ts';
+import { knowledgeRoutes } from './routes/knowledge.ts';
 import { listsRoutes } from './routes/lists.ts';
 import { plansRoutes } from './routes/plans.ts';
 import { problemsRoutes } from './routes/problems.ts';
@@ -25,6 +26,7 @@ import { todayRoutes } from './routes/today.ts';
 import { updateRoutes, APP_VERSION } from './routes/update.ts';
 import { widgetRoutes } from './routes/widget.ts';
 import { PLATFORMS } from '../../shared/src/index.ts';
+import { initKnowledgeStore, loadAnnotationsIntoDb } from './knowledge/store.ts';
 
 const config = loadConfig();
 // 恢复点回滚：必须在 createDb 之前应用（覆盖数据库文件）
@@ -32,6 +34,16 @@ applyPendingRestore(config.dbPath);
 const db = createDb(config.dbPath);
 seedBuiltinBank(db); // 内置题库播种：版本变化时 upsert 一次，日常启动零开销
 initAdapters(config.dataDir);
+// 知识点管线：JSONL 源真相 → SQLite 索引幂等重建（无 JSONL 时零开销）
+initKnowledgeStore(config.dataDir);
+try {
+  const loaded = loadAnnotationsIntoDb(db, config.dataDir);
+  if (loaded.lines > 0) {
+    console.log(`[knowledge] 已从 JSONL 重建索引: ${loaded.inserted} 条标注 / ${loaded.problems} 题（跳过未知 code ${loaded.skippedUnknownCode}）`);
+  }
+} catch (e) {
+  console.error(`[knowledge] JSONL 索引重建失败（不影响启动）: ${(e as Error).message}`);
+}
 // 每日首次启动自动备份（settings 键幂等）；失败不阻塞启动
 try {
   const daily = maybeDailyBackup(db);
@@ -50,6 +62,7 @@ app.use('/api/stats', statsRoutes(db));
 app.use('/api/plans', plansRoutes(db, () => aiConfigFromDb(db, config)));
 app.use('/api/ai', aiRoutes(db, () => aiConfigFromDb(db, config)));
 app.use('/api/lists', listsRoutes(db, () => aiConfigFromDb(db, config)));
+app.use('/api/knowledge', knowledgeRoutes(db, () => aiConfigFromDb(db, config)));
 app.use('/api/export', exportRoutes(db));
 app.use('/api/problems', problemsRoutes(db));
 app.use('/api/reviews', reviewsRoutes(db));

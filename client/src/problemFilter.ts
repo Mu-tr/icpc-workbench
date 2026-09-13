@@ -26,6 +26,27 @@ export function buildTagAliasSet(tags: string[]): Set<string> {
   return aliases
 }
 
+export interface DifficultyBucket {
+  key: string
+  min: number | null
+  max: number | null
+}
+
+/**
+ * 难度分桶。与后端 `server/src/routes/problems.ts` 的 `DIFFICULTY_BUCKETS`
+ * 以及 `analysis/stats.bucketForDifficulty` 必须同口径——改一处要三处同步。
+ * min/max 均为 null 表示「未知难度」桶。
+ */
+export const DIFFICULTY_BUCKETS: DifficultyBucket[] = [
+  { key: '<1200', min: 0, max: 1199 },
+  { key: '1200-1399', min: 1200, max: 1399 },
+  { key: '1400-1599', min: 1400, max: 1599 },
+  { key: '1600-1899', min: 1600, max: 1899 },
+  { key: '1900-2199', min: 1900, max: 2199 },
+  { key: '2200+', min: 2200, max: null },
+  { key: '未知', min: null, max: null },
+]
+
 /**
  * 判断一题是否通过过滤：
  * - 标签：逻辑或，任一所选标签的同义别名命中即通过；空选择 = 不限

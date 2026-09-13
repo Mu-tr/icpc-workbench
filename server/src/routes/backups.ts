@@ -14,6 +14,7 @@ export function backupsRoutes(db: Db): Router {
         reason: b.reason,
         createdAtMs: b.createdAtMs,
         size: b.size,
+        knowledge: b.knowledge,
       })),
     });
   });

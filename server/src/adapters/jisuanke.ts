@@ -5,6 +5,7 @@ import type {
 } from '../../../shared/src/index.ts';
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
+import { asHttpClient, sleep, type HttpInit } from './http.ts';
 
 /**
  * 计蒜客（www.jisuanke.com，原 nanti.jisuanke.com 竞赛 OJ）适配器。
@@ -179,15 +180,14 @@ interface FetchJsonSkip {
 
 /** 带 Cookie 的 GET → JSON；302 视为未登录，403 视为无权限（跳过该比赛） */
 async function fetchJson(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   url: string,
   cookie: string,
 ): Promise<FetchJsonOk | FetchJsonSkip> {
-  const res = await fetchFn(url, {
+  const res = await asHttpClient(fetchFn).fetch(url, {
     headers: { Cookie: cookie, 'User-Agent': UA, Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
     redirect: 'manual', // 未登录时平台 302 跳登录页，不跟随
-    signal: AbortSignal.timeout(20000),
-  });
+  }, { timeoutMs: 20000 });
   if (res.status === 302 || res.status === 401) return { ok: false, unauthorized: true };
   if (res.status === 403 || res.status === 404) return { ok: false, unauthorized: false };
   if (!res.ok) throw new Error(`计蒜客返回 HTTP ${res.status}，请稍后重试`);
@@ -200,7 +200,7 @@ async function fetchJson(
  * 首页未登录（302）→ 抛 ManualImportRequiredError（否则过期 Cookie 会被误报成「没有比赛」）；
  * 空页 / 返回内容与之前重复（分页到头）→ 结束。 */
 export async function fetchParticipatedContests(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   cookie: string,
   pageDelayMs: number = PAGE_DELAY_MS,
 ): Promise<JisuankeContestRow[]> {
@@ -239,7 +239,8 @@ export async function fetchParticipatedContests(
   return out;
 }
 
-export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAdapter {
+export function createJisuankeAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
+  const http = asHttpClient(fetchFn);
   const requireCookie = (opts?: FetchOptions): string => {
       const cookie = opts?.cookie?.trim();
       if (!cookie) {
@@ -275,10 +276,10 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
       let rowCapped = false;
       let caughtUp = false; // 增量模式：整场提交全部已知 → 更早的比赛都在库中
       // 限速等待累计到 opts.waitedMs（同步层写入 sync_runs.waited_ms 供同步中心展示）
-      const sleep = async (ms: number): Promise<void> => {
+      const sleepTracked = async (ms: number): Promise<void> => {
         if (ms > 0) {
           if (opts) opts.waitedMs = (opts.waitedMs ?? 0) + ms;
-          await new Promise((r) => setTimeout(r, ms));
+          await sleep(ms);
         }
       };
 
@@ -374,7 +375,7 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
           break;
         }
         if (rowCapped) break;
-        await sleep(PAGE_DELAY_MS);
+        await sleepTracked(PAGE_DELAY_MS);
       }
 
       // 截断判定：触及新增上限，或比赛数预算耗尽（未自然扫完/未增量早停）且有新增
@@ -395,11 +396,10 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
      *  带 X-Requested-With 让未登录返回 401 JSON 而非 302 跳转页 */
     async checkAuth({ cookie }) {
       try {
-        const res = await fetchFn(`${BASE}/api/user/info`, {
+        const res = await http.fetch(`${BASE}/api/user/info`, {
           headers: { Cookie: cookie, 'User-Agent': UA, Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
           redirect: 'manual',
-          signal: AbortSignal.timeout(15000),
-        });
+        }, { timeoutMs: 15000 });
         if (res.status === 302 || res.status === 401) {
           return { ok: false, message: 'Cookie 未通过登录校验：需要 s 与 JSKUSS 两项会话 Cookie，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 按名复制）' };
         }

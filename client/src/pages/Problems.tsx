@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   Checkbox,
@@ -13,19 +13,55 @@ import {
   Tabs,
   Tag,
   Tooltip,
+  TreeSelect,
   Upload,
 } from 'antd'
-import { ClearOutlined, CloudDownloadOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
+import type { TreeSelectProps } from 'antd'
+import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, EditOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useSearchParams } from 'react-router-dom'
-import type { PlatformId } from '../../../shared/src/index.ts'
+import type { KnowledgeCoverage, KnowledgePointEntry, PlatformId } from '../../../shared/src/index.ts'
 import { PLATFORMS } from '../../../shared/src/index.ts'
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
 import { difficultyColor, PLATFORM_COLOR, tagColor } from '../ui'
-import { buildTagAliasSet, matchesProblemFilters } from '../problemFilter'
-import { canonicalTag, filterNoiseTags } from '../../../shared/src/index.ts'
-import { get, post } from '../api'
+import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
+import { get, post, put } from '../api'
+import { saveUrlAsFile } from '../download'
+
+/** GET /api/knowledge/taxonomy 响应（服务端 taxonomy.json 结构） */
+interface TaxonomyDoc {
+  version: number
+  categories: Array<{
+    key: string
+    name: string
+    points: Array<{ code: string; name: string; fullName?: string }>
+  }>
+}
+
+/** POST /api/knowledge/build 响应（L1/L2 摘要 + 最新覆盖率） */
+interface BuildResp {
+  mode: string
+  l1?: { scanned: number; annotated: number; enqueued: number; skippedManual: number }
+  l2?: {
+    skipped?: string
+    pending?: number
+    batches?: number
+    annotated?: number
+    uncertain?: number
+    failedBatch?: string
+    /** 失败批中已推到队尾待重试的题数 */
+    retried?: number
+    /** 失败批中达到重试上限、转 failed 出队的题数 */
+    gaveUp?: number
+    /** 整批无法定位题目（标识歧义）而提前收手 */
+    stalled?: boolean
+    /** 纠正重试仍无法定位、整批转存疑（人工校正池）出队的题数 */
+    demoted?: number
+    remaining?: number
+  }
+  coverage: KnowledgeCoverage
+}
 
 /** POST /api/import/preview 响应：变更预览（不写库） */
 interface ImportPreviewResp {
@@ -57,6 +93,26 @@ interface ProblemRow {
 
 type StatusFilter = 'all' | 'ac' | 'tried' | 'none'
 
+/** 服务端分页响应（GET /api/problems/page） */
+interface ProblemsPage {
+  items: ProblemRow[]
+  total: number
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
+
+/**
+ * 分面统计（GET /api/problems/facets）：难度分桶 / 平台分布 / 标签计数。
+ * 由服务端聚合，前端不再持有全量行——原先侧边栏统计要求 1.9 万行全在内存里。
+ */
+interface ProblemsFacets {
+  total: number
+  difficulty: Record<string, number>
+  platforms: Array<{ id: string; name: string; count: number }>
+  tags: Array<{ tag: string; count: number }>
+}
+
 const STATUS_TABS: Array<{ key: StatusFilter; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'ac', label: '已 AC' },
@@ -64,24 +120,22 @@ const STATUS_TABS: Array<{ key: StatusFilter; label: string }> = [
   { key: 'none', label: '未做' },
 ]
 
-/** 难度分桶（右侧概览「难度分布」共用） */
-const DIFF_BUCKETS: Array<{ key: string; min: number | null; max: number | null }> = [
-  { key: '<1200', min: 0, max: 1199 },
-  { key: '1200-1399', min: 1200, max: 1399 },
-  { key: '1400-1599', min: 1400, max: 1599 },
-  { key: '1600-1899', min: 1600, max: 1899 },
-  { key: '1900-2199', min: 1900, max: 2199 },
-  { key: '2200+', min: 2200, max: null },
-  { key: '未知', min: null, max: null },
-]
-
 const TAXONOMY_MAX = 60
+
+/** 每页条数（服务端分页） */
+const PAGE_SIZE = 50
 
 export default function Problems() {
   // React 19 下 antd 静态 message/Modal.confirm 静默失效，必须用 App 上下文实例
   const { message, modal } = AntdApp.useApp()
   const [searchParams] = useSearchParams()
   const [rows, setRows] = useState<ProblemRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  // 全部题目的分面（右侧「难度/平台分布」用）与当前筛选后的分面（侧边栏标签计数用）
+  const [facets, setFacets] = useState<ProblemsFacets | null>(null)
+  const [unfilteredFacets, setUnfilteredFacets] = useState<ProblemsFacets | null>(null)
+  const loadRef = useRef<() => void>(() => {})
   const [loading, setLoading] = useState(false)
   const [platform, setPlatform] = useState<string>()
   // 所选标签按「逻辑或」组合；支持从其它页面带 ?tag= 跳入（如掌握度地图「查看全部」）
@@ -105,22 +159,290 @@ export default function Problems() {
   const [importOpen, setImportOpen] = useState(false)
   const [cleaning, setCleaning] = useState(false)
   const [manualForm] = Form.useForm()
+  // 知识点管线（P4）：覆盖率 + 批跑/无 Key 导出入口
+  const [pipelineOpen, setPipelineOpen] = useState(false)
+  const [coverage, setCoverage] = useState<KnowledgeCoverage | null>(null)
+  const [pipelineBusy, setPipelineBusy] = useState(false)
+  const [aiImportRaw, setAiImportRaw] = useState('')
+  // 批跑后抽检清单（GET /api/knowledge/sample）
+  const [sample, setSample] = useState<{ sampleSize: number; items: Array<{ platform: string; problemKey: string; code: string; name: string; confidence: number; source: string; method: string }> } | null>(null)
+  // 导出数据包题数（无 Key 通道；单次 AI 对话建议 100-200，大包自行拆分喂多轮）
+  const [exportLimit, setExportLimit] = useState(200)
+  // 单题知识点人工校正（L3）
+  const [kpEditRow, setKpEditRow] = useState<ProblemRow | null>(null)
+  const [kpTree, setKpTree] = useState<NonNullable<TreeSelectProps['treeData']>>([])
+  const [kpCodes, setKpCodes] = useState<string[]>([])
+  const [kpSaving, setKpSaving] = useState(false)
 
-  const load = useCallback(() => {
-    setLoading(true)
+  // 过滤条件 → 查询串（服务端过滤；分页参数单独拼，便于翻页时复用同一组条件）
+  const buildFilterParams = useCallback(() => {
     const params = new URLSearchParams()
     if (platform) params.set('platform', platform)
     if (q) params.set('q', q)
     if (includeBank) params.set('bank', '1')
-    get<ProblemRow[]>(`/api/problems?${params.toString()}`)
-      .then(setRows)
+    if (statusFilter !== 'all') params.set('status', statusFilter)
+    // 难度：命中某个分桶时用桶名下发（「未知」桶 = difficulty IS NULL），否则用显式区间
+    const bucket = DIFF_BUCKETS.find((b) => b.min === (diffMin ?? null) && b.max === (diffMax ?? null))
+    if (diffMin === undefined && diffMax === undefined) {
+      /* 不限难度 */
+    } else if (bucket) {
+      params.set('difficulty', bucket.key)
+    } else {
+      if (diffMin != null) params.set('diffMin', String(diffMin))
+      if (diffMax != null) params.set('diffMax', String(diffMax))
+    }
+    // 标签多选按「或」：重复 tag 参数，服务端展开同义别名后取并集
+    for (const t of tagFilters) params.append('tag', t)
+    return params
+  }, [platform, q, includeBank, statusFilter, diffMin, diffMax, tagFilters])
+
+  const load = useCallback((nextPage: number) => {
+    setLoading(true)
+    const params = buildFilterParams()
+    params.set('page', String(nextPage))
+    params.set('pageSize', String(PAGE_SIZE))
+    get<ProblemsPage>(`/api/problems/page?${params.toString()}`)
+      .then((res) => {
+        setRows(res.items)
+        setTotal(res.total)
+        setPage(res.page)
+      })
       .catch((e: Error) => message.error(e.message))
       .finally(() => setLoading(false))
-  }, [platform, q, includeBank])
+  }, [buildFilterParams, message])
+
+  // 当前生效条件（翻页/变更都按它取数）；loadRef 让事件回调始终调用最新版本
+  const queryKey = buildFilterParams().toString()
+  loadRef.current = () => load(page)
+
+  // 条件变化 → 回到第 1 页重新取数
+  useEffect(() => {
+    load(1)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryKey])
+
+  // 分面统计：侧边栏标签计数随筛选联动；右侧分布图始终按全部题目口径
+  const reloadFacets = useCallback(() => {
+    const params = buildFilterParams()
+    get<ProblemsFacets>(`/api/problems/facets?${params.toString()}`)
+      .then(setFacets)
+      .catch(() => { /* 服务端未升级时静默：分面缺失仅影响侧栏计数 */ })
+  }, [buildFilterParams])
 
   useEffect(() => {
-    load()
-  }, [load])
+    reloadFacets()
+  }, [reloadFacets])
+
+  // 右侧分布图用「不带筛选、但同样遵守『含题库未做题』开关」的口径。
+  // 必须与列表的候选集一致：服务端缺省只显示做过的题，若这里漏掉 bank=1，
+  // 分布合计会与「共 N 题」对不上（默认 includeBank=true，差异约 1.8 万）。
+  useEffect(() => {
+    get<ProblemsFacets>(`/api/problems/facets${includeBank ? '?bank=1' : ''}`)
+      .then(setUnfilteredFacets)
+      .catch(() => { /* 同上 */ })
+  }, [includeBank])
+
+  // ---------- 知识点管线 ----------
+
+  const loadCoverage = useCallback(() => {
+    get<KnowledgeCoverage>('/api/knowledge/coverage')
+      .then(setCoverage)
+      .catch(() => { /* 服务端未升级时静默 */ })
+  }, [])
+
+  useEffect(() => {
+    loadCoverage()
+  }, [loadCoverage])
+
+  /** 把 attempts 超限转 failed 的题捞回 L2 队列（修好 Key / 网络后据此续跑，否则它们永久停摆） */
+  const retryFailed = async () => {
+    setPipelineBusy(true)
+    try {
+      const r = await post<{ ok: boolean; requeued: number; coverage: KnowledgeCoverage }>('/api/knowledge/retry-failed', {})
+      message.success(`已把 ${r.requeued} 道放弃的题捞回 L2 队列`)
+      setCoverage(r.coverage)
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setPipelineBusy(false)
+    }
+  }
+
+  /** 跑管线：L1 规则批跑 / 版本差量重跑（单请求，秒级） */
+  const runPipeline = async (body: { mode: 'l1'; rerun?: boolean }) => {
+    setPipelineBusy(true)
+    try {
+      const r = await post<BuildResp>('/api/knowledge/build', body)
+      if (r.l1) {
+        message.success(
+          `L1 扫描 ${r.l1.scanned} 题：命中落库 ${r.l1.annotated}，入 L2 队列 ${r.l1.enqueued}` +
+            (r.l1.skippedManual ? `，跳过人工标注 ${r.l1.skippedManual}` : ''),
+        )
+      }
+      setCoverage(r.coverage)
+      loadRef.current()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setPipelineBusy(false)
+    }
+  }
+
+  /**
+   * 跑全量管线（L1 + L2）：L2 每 25 题一批、单批可能耗时数分钟，
+   * 客户端按 5 批（125 题）一轮循环请求，避免单请求挂几十分钟被环境掐断、
+   * 且每轮落库可见进度；任一轮失败保留队列，下次点按钮断点续跑。
+   */
+  const runFullPipeline = async () => {
+    setPipelineBusy(true)
+    const PROGRESS_KEY = 'kp-l2-progress'
+    let totalAnnotated = 0
+    let totalUncertain = 0
+    let totalDemoted = 0
+    try {
+      // 先跑 L1（增量）
+      const r1 = await post<BuildResp>('/api/knowledge/build', { mode: 'l1' })
+      if (r1.l1) {
+        message.info(`L1 完成：命中落库 ${r1.l1.annotated} 题，L2 队列 ${r1.l1.enqueued} 题，开始 L2 批跑…`)
+      }
+      setCoverage(r1.coverage)
+
+      // L2 分轮循环（每轮 5 批 = 125 题）
+      for (;;) {
+        const r = await post<BuildResp>('/api/knowledge/build', { mode: 'l2', maxBatches: 5 })
+        const l2 = r.l2
+        if (!l2) break
+        if (l2.skipped) {
+          message.warning(`L2 未执行：${l2.skipped}`)
+          break
+        }
+        totalAnnotated += l2.annotated ?? 0
+        totalUncertain += l2.uncertain ?? 0
+        totalDemoted += l2.demoted ?? 0
+        setCoverage(r.coverage)
+        if (l2.failedBatch) {
+          const extra =
+            (l2.gaveUp ?? 0) > 0
+              ? `本轮 ${l2.gaveUp} 题已达重试上限被移出队列（可用下方「重试已放弃的 N 题」捞回）`
+              : '这一批已挪到队列末尾，下次续跑会从别的批开始'
+          message.error(
+            `L2 批次失败已中止：${l2.failedBatch}。本轮前已落库 ${totalAnnotated} 题不会丢失；${extra}；剩余 ${l2.remaining ?? 0} 题可再次点击续跑`,
+            10,
+          )
+          break
+        }
+        if (l2.stalled) {
+          message.warning(
+            `L2 中止：这一批题无法唯一定位（模型没回抄「平台|题号」前缀），已记入审计日志待人工校正；剩余 ${l2.remaining ?? 0} 题`,
+            10,
+          )
+          break
+        }
+        if ((l2.batches ?? 0) === 0 || (l2.remaining ?? 0) === 0) {
+          message.success(
+            `L2 全部完成：落库 ${totalAnnotated} 题、存疑 ${totalUncertain} 题` +
+              (totalDemoted > 0 ? `（含 ${totalDemoted} 题因模型未回抄「平台|题号」整批转入人工校正，见审计日志）` : ''),
+          )
+          break
+        }
+        message.loading({
+          content: `L2 批跑中：已落库 ${totalAnnotated} 题（存疑 ${totalUncertain}），剩余 ${l2.remaining ?? 0} 题…`,
+          key: PROGRESS_KEY,
+          duration: 0,
+        })
+      }
+    } catch (e) {
+      message.error(`管线中断：${(e as Error).message}。已落库 ${totalAnnotated} 题不会丢失，可再次点击续跑`, 10)
+    } finally {
+      message.destroy(PROGRESS_KEY)
+      setPipelineBusy(false)
+      loadCoverage()
+      loadRef.current()
+    }
+  }
+
+  /** 批跑后随机抽检 1%：生成核对清单，人工复核驱动规则迭代 */
+  const loadSample = async () => {
+    setPipelineBusy(true)
+    try {
+      setSample(
+        await get<{ sampleSize: number; items: Array<{ platform: string; problemKey: string; code: string; name: string; confidence: number; source: string; method: string }> }>(
+          '/api/knowledge/sample',
+        ),
+      )
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setPipelineBusy(false)
+    }
+  }
+
+  /** 无 Key 通道：粘贴 AI 返回的标注 JSON 导入 */
+  const importAiAnnotations = async () => {
+    setPipelineBusy(true)
+    try {
+      const r = await post<{ annotated: number; uncertain: number; droppedHallucinations: number }>(
+        '/api/knowledge/import',
+        { raw: aiImportRaw },
+      )
+      message.success(
+        `导入完成：落库 ${r.annotated} 题、存疑 ${r.uncertain} 题` +
+          (r.droppedHallucinations ? `，丢弃幻觉 code ${r.droppedHallucinations} 条（已记审计日志）` : ''),
+      )
+      setAiImportRaw('')
+      loadCoverage()
+      loadRef.current()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setPipelineBusy(false)
+    }
+  }
+
+  /** 打开单题知识点校正弹窗：首次加载体系树，再取当前标注预填 */
+  const openKpEditor = async (r: ProblemRow) => {
+    setKpEditRow(r)
+    setKpCodes([])
+    try {
+      if (kpTree.length === 0) {
+        const doc = await get<TaxonomyDoc>('/api/knowledge/taxonomy')
+        setKpTree(
+          doc.categories.map((c) => ({
+            title: c.name,
+            value: `cat:${c.key}`,
+            selectable: false,
+            children: c.points.map((p) => ({
+              title: p.fullName && p.fullName !== p.name ? `${p.name}（${p.fullName}）` : p.name,
+              value: p.code,
+            })),
+          })),
+        )
+      }
+      const cur = await get<{ knowledgePoints: KnowledgePointEntry[] }>(
+        `/api/knowledge/problem/${r.platform}/${encodeURIComponent(r.problem_key)}`,
+      )
+      setKpCodes(cur.knowledgePoints.map((p) => p.code))
+    } catch (e) {
+      message.error((e as Error).message)
+    }
+  }
+
+  /** 保存人工标注：整题覆盖写 source=manual，重跑管线不覆盖 */
+  const saveKp = async () => {
+    if (!kpEditRow) return
+    setKpSaving(true)
+    try {
+      await put(`/api/knowledge/${kpEditRow.platform}/${encodeURIComponent(kpEditRow.problem_key)}`, { codes: kpCodes })
+      message.success('已保存人工标注（重跑管线不会覆盖）')
+      setKpEditRow(null)
+      loadCoverage()
+      loadRef.current()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setKpSaving(false)
+    }
+  }
 
   // 一键标签清洗：归并英文别名为中文规范名 + 清除噪声标签（写入数据库，全站生效）
   const cleanTags = () => {
@@ -142,7 +464,7 @@ export default function Problems() {
               ? `清洗完成：${r.problemsCleaned} 道题的标签已更新，共清除/归并 ${r.tagsRemoved} 个标签`
               : `所有 ${r.total} 道题的标签已经是干净的，无需清洗`,
           )
-          load()
+          loadRef.current()
         } catch (e) {
           message.error((e as Error).message)
         } finally {
@@ -152,24 +474,13 @@ export default function Problems() {
     })
   }
 
-  // 标签计数：基于当前服务端筛选结果统计（侧边栏取前 60，过滤面板下拉用全量）
-  // 过滤噪声标签（年份/赛事/省份等）+ 归并英文别名到中文规范名（dp → 动态规划）
-  const tagCountEntries = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const r of rows)
-      for (const t of filterNoiseTags(r.tags).map((tag) => canonicalTag(tag)))
-        m.set(t, (m.get(t) ?? 0) + 1)
-    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-  }, [rows])
-  const tagCounts = useMemo(() => tagCountEntries.slice(0, TAXONOMY_MAX), [tagCountEntries])
-
-  // 标签 / 状态 / 难度区间为客户端过滤（平台、搜索仍走服务端）；
-  // 标签按「逻辑或」组合：命中任一所选标签（含同义别名，二分 ↔ binary search）即保留
-  const tagAliases = useMemo(() => buildTagAliasSet(tagFilters), [tagFilters])
-  const filtered = useMemo(
-    () => rows.filter((r) => matchesProblemFilters(r, { tagAliases, diffMin, diffMax, status: statusFilter })),
-    [rows, tagAliases, diffMin, diffMax, statusFilter],
+  // 标签计数由服务端分面给出（已按同口径滤噪声 + 归并规范名），前端不再遍历全量行。
+  // facets 随当前筛选联动，语义与改版前「基于 rows 统计」一致，但不需要把整库放进内存。
+  const tagCountEntries = useMemo<Array<[string, number]>>(
+    () => (facets?.tags ?? []).map((t) => [t.tag, t.count] as [string, number]),
+    [facets],
   )
+  const tagCounts = useMemo(() => tagCountEntries.slice(0, TAXONOMY_MAX), [tagCountEntries])
 
   // 已生效的面板条件数（用于面板收起时的角标提示）
   const activeFilterCount = tagFilters.length + (diffMin != null || diffMax != null ? 1 : 0)
@@ -202,30 +513,42 @@ export default function Problems() {
   const toggleSidebarTag = (t: string) =>
     setTagFilters((arr) => (arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]))
 
-  // 概览面板：难度 / 平台分布（随当前数据集联动）
+  // 概览面板：难度 / 平台分布（全部题目口径，由服务端分面聚合；点击分桶即设难度区间）
   const diffDist = useMemo(
     () =>
       DIFF_BUCKETS.map((b) => ({
         ...b,
-        count: rows.filter((r) =>
-          b.min == null
-            ? r.difficulty == null
-            : r.difficulty != null && r.difficulty >= b.min && (b.max == null || r.difficulty <= b.max),
-        ).length,
+        count: unfilteredFacets?.difficulty[b.key] ?? 0,
       })).map((b) => ({
         ...b,
         color: b.min == null ? '#8993a2' : difficultyColor((b.min + (b.max ?? b.min + 199)) / 2),
       })),
-    [rows],
+    [unfilteredFacets],
   )
 
   const platDist = useMemo(
     () =>
-      PLATFORMS.map((p) => ({ id: p.id, name: p.name, count: rows.filter((r) => r.platform === p.id).length }))
+      PLATFORMS.map((p) => ({
+        id: p.id,
+        name: p.name,
+        count: unfilteredFacets?.platforms.find((x) => x.id === p.id)?.count ?? 0,
+      }))
         .filter((x) => x.count > 0)
         .sort((a, b) => b.count - a.count),
-    [rows],
+    [unfilteredFacets],
   )
+
+  /** 点难度分桶 = 把该桶区间设为筛选条件（再点一次取消）；「未知」桶走难度未知分支 */
+  const toggleDiffBucket = (b: DifficultyBucket) => {
+    const isActive = b.min == null ? false : diffMin === b.min && (diffMax ?? null) === b.max
+    if (isActive) {
+      setDiffMin(undefined)
+      setDiffMax(undefined)
+      return
+    }
+    setDiffMin(b.min ?? undefined)
+    setDiffMax(b.max ?? undefined)
+  }
 
   const resetFilters = () => {
     setPlatform(undefined)
@@ -257,7 +580,7 @@ export default function Problems() {
         ],
       })
       message.success(`已标记 ${r.problem_key} 为 AC`)
-      load()
+      loadRef.current()
     } catch (e) {
       message.error((e as Error).message)
     }
@@ -317,7 +640,7 @@ export default function Problems() {
               await post(endpoint, body)
               message.success('导入成功')
               setImportOpen(false)
-              load()
+              loadRef.current()
             },
           })
         } catch (e) {
@@ -388,6 +711,9 @@ export default function Problems() {
           <Tooltip title="加入复习队列（间隔复习）">
             <Button size="small" type="text" icon={<ReadOutlined />} onClick={() => addToReview(r)} />
           </Tooltip>
+          <Tooltip title="人工校正知识点（L3，重跑管线不覆盖）">
+            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => void openKpEditor(r)} />
+          </Tooltip>
         </Space>
       ),
     },
@@ -403,6 +729,11 @@ export default function Problems() {
         description="管理和导入你在各平台的刷题记录"
         extra={
           <Space>
+            <Tooltip title="自建知识点管线：L1 规则 + L2 AI 标注，替代题源 tag 统计口径">
+              <Button icon={<ApartmentOutlined />} onClick={() => { setPipelineOpen(true); loadCoverage() }}>
+                知识点管线{coverage && coverage.pending > 0 ? `（待标注 ${coverage.pending}）` : ''}
+              </Button>
+            </Tooltip>
             <Tooltip title="归并英文别名为中文规范名，清除噪声标签（写入数据库）">
               <Button icon={<TagsOutlined />} loading={cleaning} onClick={cleanTags}>
                 合并与过滤
@@ -420,7 +751,7 @@ export default function Problems() {
         <aside className="taxonomy-panel">
           <div className="section-label">
             算法标签
-            <span className="section-label-count">{rows.length} 题</span>
+            <span className="section-label-count">{facets?.total ?? total} 题</span>
           </div>
           <div className="taxonomy-list">
             <button
@@ -430,7 +761,7 @@ export default function Problems() {
             >
               <span className="taxonomy-item__marker" style={{ background: '#86a8ff' }} />
               <span className="taxonomy-item__name">全部标签</span>
-              <span className="taxonomy-item__count">{rows.length}</span>
+              <span className="taxonomy-item__count">{facets?.total ?? total}</span>
             </button>
             {tagCounts.map(([t, n]) => (
               <button
@@ -462,7 +793,7 @@ export default function Problems() {
               </h2>
             </div>
             <span className="result-count">
-              共 <strong>{filtered.length}</strong> 题
+              共 <strong>{total}</strong> 题
             </span>
           </div>
           <div className="filter-row">
@@ -591,8 +922,16 @@ export default function Problems() {
               size="small"
               loading={loading}
               columns={cols}
-              dataSource={filtered}
-              pagination={{ pageSize: 20, showSizeChanger: false }}
+              dataSource={rows}
+              // 服务端分页：当前页 50 行由后端过滤 + LIMIT 得出，前端不再持有全量数据
+              pagination={{
+                current: page,
+                pageSize: PAGE_SIZE,
+                total,
+                showSizeChanger: false,
+                showTotal: (t) => `共 ${t} 题`,
+                onChange: (next) => load(next),
+              }}
             />
           </div>
         </section>
@@ -603,13 +942,19 @@ export default function Problems() {
             <div className="section-label">难度分布</div>
             <div className="dist-list">
               {diffDist.map((d) => (
-                <div className="dist-row" key={d.key}>
+                <button
+                  type="button"
+                  className={`dist-row${diffMin === d.min && (diffMax ?? null) === d.max ? ' is-active' : ''}`}
+                  key={d.key}
+                  onClick={() => toggleDiffBucket(d)}
+                  title="点击按该难度区间筛选（再点一次取消）"
+                >
                   <span className="dist-row__label mono">{d.key}</span>
                   <span className="dist-row__track">
                     <i style={{ width: `${(d.count / diffDistMax) * 100}%`, background: d.color }} />
                   </span>
                   <span className="dist-row__count mono">{d.count}</span>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -645,12 +990,12 @@ export default function Problems() {
             {
               key: 'sync',
               label: '平台同步',
-              children: <SyncTab onDone={() => { setImportOpen(false); load() }} />,
+              children: <SyncTab onDone={() => { setImportOpen(false); loadRef.current() }} />,
             },
             {
               key: 'bank',
               label: '拉取题库',
-              children: <BankTab onDone={() => { setImportOpen(false); load() }} />,
+              children: <BankTab onDone={() => { setImportOpen(false); loadRef.current() }} />,
             },
             {
               key: 'file',
@@ -690,7 +1035,7 @@ export default function Problems() {
                       message.success('录入成功')
                       manualForm.resetFields()
                       setImportOpen(false)
-                      load()
+                      loadRef.current()
                     } catch (e) {
                       message.error((e as Error).message)
                     }
@@ -719,6 +1064,152 @@ export default function Problems() {
               ),
             },
           ]}
+        />
+      </Modal>
+
+      {/* 知识点管线面板：覆盖率 + 批跑 + 无 Key 导出/导入闭环 */}
+      <Modal title="知识点管线" open={pipelineOpen} onCancel={() => setPipelineOpen(false)} footer={null} width={660}>
+        {coverage && (
+          <div style={{ marginBottom: 12 }}>
+            <Space wrap size={16}>
+              <span>
+                覆盖 <strong>{coverage.annotated}</strong> / {coverage.total} 题（{coverage.coverage.toFixed(1)}%）
+              </span>
+              <span>
+                L2 待标注 <strong>{coverage.pending}</strong>
+                {coverage.retrying > 0 ? `（重试中 ${coverage.retrying}）` : ''}
+                {coverage.failed > 0 ? `（已放弃 ${coverage.failed}）` : ''}
+              </span>
+              <span>
+                规则 {coverage.bySource.rule ?? 0} · AI {coverage.bySource.ai ?? 0} · 人工 {coverage.bySource.manual ?? 0}
+              </span>
+            </Space>
+            <p style={{ margin: '8px 0 0', color: '#8993a2', fontSize: 12 }}>
+              taxonomy v{coverage.taxonomyVersion} · pipeline v{coverage.pipelineVersion}
+              {coverage.rulesVersion ? `（规则表 v${coverage.rulesVersion}）` : ''} · 统计阈值 {coverage.threshold}
+              {coverage.lowConfidenceOnly > 0 ? ` · ${coverage.lowConfidenceOnly} 题仅有低置信标注` : ''}
+            </p>
+          </div>
+        )}
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Button type="primary" loading={pipelineBusy} onClick={() => void runPipeline({ mode: 'l1' })}>
+            跑 L1 规则
+          </Button>
+          <Tooltip title="L1 + L2 分批跑（每轮 125 题，实时进度，中断可续跑）">
+            <Button loading={pipelineBusy} onClick={() => void runFullPipeline()}>
+              跑全量管线（L1+L2）
+            </Button>
+          </Tooltip>
+          <Tooltip title="只重扫规则/体系版本过期、或标题已修复的标注，人工校正不受影响">
+            <Button loading={pipelineBusy} onClick={() => void runPipeline({ mode: 'l1', rerun: true })}>
+              版本差量重跑
+            </Button>
+          </Tooltip>
+          {(coverage?.failed ?? 0) > 0 && (
+            <Tooltip title={`${coverage!.failed} 道题连续失败已达上限被移出队列；修好配置后可在这次操作里捞回`}>
+              <Button danger loading={pipelineBusy} onClick={() => void retryFailed()}>
+                重试已放弃的 {coverage!.failed} 题
+              </Button>
+            </Tooltip>
+          )}
+          <InputNumber
+            min={10}
+            max={1000}
+            step={50}
+            value={exportLimit}
+            onChange={(v) => setExportLimit(v ?? 200)}
+            addonAfter="题/包"
+            style={{ width: 130 }}
+          />
+          <Button
+            onClick={() =>
+              void saveUrlAsFile({
+                url: `/api/knowledge/export-queue?limit=${exportLimit}`,
+                filename: `knowledge-queue-${exportLimit}.md`,
+                successText: '数据包已导出（喂给任意 AI 后，把返回 JSON 粘贴到下方导入）',
+                message,
+              })
+            }
+          >
+            导出待标注数据包
+          </Button>
+          <Tooltip title="随机抽 1% 已标注题生成核对清单，复核后在题目行内校正">
+            <Button loading={pipelineBusy} onClick={() => void loadSample()}>
+              生成抽检清单
+            </Button>
+          </Tooltip>
+        </Space>
+        <p style={{ color: '#8993a2', fontSize: 12 }}>
+          L2 需在「设置」配置 AI Key；每 25 题一批、一批约数十秒到数分钟，队列很大时建议改用离线脚本
+          <span className="mono"> npx tsx scripts/gen-knowledge.ts --l2 </span>
+          跑（不占页面，同样断点续跑）。没有 Key 时用「导出待标注数据包」手动喂任意 AI，把返回的 JSON 粘贴到下面导入；
+          导出总是取队列最前面的题，导入成功后下次导出自动取下一批（单次 AI 对话建议 100-200 题，大包可自行拆分喂多轮）。
+        </p>
+        <Input.TextArea
+          rows={6}
+          placeholder='粘贴 AI 返回的标注 JSON（[{"problemKey":"P1001","knowledgePoints":[{"code":"basic.binary-search","confidence":0.9}]}, ...]）'
+          value={aiImportRaw}
+          onChange={(e) => setAiImportRaw(e.target.value)}
+        />
+        <div style={{ marginTop: 8, textAlign: 'right' }}>
+          <Button type="primary" disabled={!aiImportRaw.trim()} loading={pipelineBusy} onClick={() => void importAiAnnotations()}>
+            导入 AI 标注
+          </Button>
+        </div>
+        {sample && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ marginBottom: 4, fontWeight: 600 }}>抽检清单（{sample.sampleSize} 题）</div>
+            <div style={{ maxHeight: 260, overflow: 'auto', border: '1px solid #2a323d', borderRadius: 6, padding: 8 }}>
+              {Object.entries(
+                sample.items.reduce<Record<string, typeof sample.items>>((acc, it) => {
+                  const k = `${it.platform}/${it.problemKey}`
+                  ;(acc[k] ||= []).push(it)
+                  return acc
+                }, {}),
+              ).map(([k, pts]) => (
+                <div key={k} style={{ marginBottom: 6 }}>
+                  <span className="mono" style={{ marginRight: 8 }}>{k}</span>
+                  {pts.map((p) => (
+                    <Tag key={p.code} style={{ marginBottom: 2 }}>
+                      {p.name} {p.confidence.toFixed(2)}
+                      <span style={{ opacity: 0.6 }}>（{p.source === 'rule' ? p.method : p.source}）</span>
+                    </Tag>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <p style={{ color: '#8993a2', fontSize: 12, marginBottom: 0 }}>
+              发现错标：关闭本面板，在题目列表对应行的「校正知识点」中修正（人工标注永久置顶）。
+            </p>
+          </div>
+        )}
+      </Modal>
+
+      {/* 单题知识点人工校正（L3）：体系树多选，保存为 manual 永久置顶 */}
+      <Modal
+        title={kpEditRow ? `校正知识点：${kpEditRow.problem_key} ${kpEditRow.title}` : '校正知识点'}
+        open={kpEditRow !== null}
+        onCancel={() => setKpEditRow(null)}
+        onOk={() => void saveKp()}
+        confirmLoading={kpSaving}
+        okText="保存为人工标注"
+        width={560}
+      >
+        <p style={{ color: '#8993a2', fontSize: 12 }}>
+          从知识点体系选择（可多选；清空保存 = 人工确认「无知识点」）。人工标注永久置顶，重跑管线不会覆盖。
+        </p>
+        <TreeSelect
+          treeData={kpTree}
+          value={kpCodes}
+          onChange={(v) => setKpCodes(v as string[])}
+          multiple
+          treeDefaultExpandAll
+          showSearch
+          allowClear
+          placeholder="选择知识点"
+          style={{ width: '100%' }}
+          maxTagCount={8}
+          filterTreeNode={(input, node) => String(node?.title ?? '').toLowerCase().includes(input.toLowerCase())}
         />
       </Modal>
     </div>

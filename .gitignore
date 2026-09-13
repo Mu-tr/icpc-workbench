@@ -19,5 +19,13 @@ server/certs/
 # 临时验证脚本
 server/tmp-*
 
+# 工具链残留：某些工具在路径变量取值为空时会把字面量 "undefined" 当作目录名，
+# 生成 <workspace>/undefined/temp/tsx-* 编译缓存（相对路径解析失败所致），非源码
+undefined/
+
 # 本地录屏/视频素材，不入库
 videos/
+
+# 本地 AI 代理工具的会话上传/记忆目录，非项目源码
+.dsh-uploads/
+.workbuddy/

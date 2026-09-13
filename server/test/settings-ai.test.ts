@@ -89,32 +89,49 @@ test('POST /ai/models returns sorted deduped ids and forwards api key', async ()
 
 test('GET /api/settings reports secret presence without returning secret values', async () => {
   await withServer(async (db, base) => {
-    saveAiConfig(db, DEFAULT_CONFIG, { apiKey: 'ai-secret', searchApiKey: 'search-secret' });
-    db.prepare("INSERT INTO settings (key, value) VALUES ('cookie.luogu', 'session=secret')").run();
+    saveAiConfig(db, DEFAULT_CONFIG, { apiKey: 'ai-secret', searchApiKey: 'search-secret-key' });
+    db.prepare("INSERT INTO settings (key, value) VALUES ('cookie.luogu', 'session=short')").run();
+    db.prepare("INSERT INTO settings (key, value) VALUES ('cookie.daimayuan', 'sid=a-very-long-session-token-here')").run();
     const res = await fetch(base);
     const body = (await res.json()) as {
-      ai: { apiKey: string; searchApiKey: string; hasApiKey: boolean; hasSearchApiKey: boolean };
-      cookies: Record<string, { configured: boolean }>;
+      ai: { apiKey: string; searchApiKey: string; hasApiKey: boolean; hasSearchApiKey: boolean; apiKeyMasked: string; searchApiKeyMasked: string };
+      cookies: Record<string, { configured: boolean; masked?: string }>;
     };
     assert.equal(body.ai.apiKey, '');
     assert.equal(body.ai.searchApiKey, '');
     assert.equal(body.ai.hasApiKey, true);
     assert.equal(body.ai.hasSearchApiKey, true);
-    assert.deepEqual(body.cookies.luogu, { configured: true });
-    assert.doesNotMatch(JSON.stringify(body), /secret/);
+    // 打码版回显：短值（<12 字符）全遮，长值露前 4 后 4
+    assert.equal(body.ai.apiKeyMasked, '••••••••');
+    assert.equal(body.ai.searchApiKeyMasked, 'sear••••••-key');
+    assert.deepEqual(body.cookies.luogu, { configured: true, masked: 'session=••••••••' });
+    assert.equal(body.cookies.daimayuan.masked, 'sid=a-ve••••••here');
+    assert.doesNotMatch(JSON.stringify(body), /secret|short|a-very-long/);
 
-    // 保存响应同样不能回传秘密；空密钥提交（不传字段）不覆盖已保存值
+    // 保存响应同样不回传秘密原文，只回传打码版；空密钥提交（不传字段）不覆盖已保存值
     const save = await fetch(`${base}/ai`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ enabled: true, baseURL: 'https://ai.example.com', model: 'm1' }),
     });
-    const savedBody = (await save.json()) as { apiKey: string; searchApiKey: string; hasApiKey: boolean };
+    const savedBody = (await save.json()) as { apiKey: string; searchApiKey: string; hasApiKey: boolean; apiKeyMasked: string };
     assert.equal(savedBody.apiKey, '');
     assert.equal(savedBody.searchApiKey, '');
     assert.equal(savedBody.hasApiKey, true);
+    assert.equal(savedBody.apiKeyMasked, '••••••••');
     assert.doesNotMatch(JSON.stringify(savedBody), /secret/);
   });
+});
+
+test('maskSecret masks short values fully and reveals only 4+4 of long values', async () => {
+  const { maskSecret } = await import('../src/routes/settings.ts');
+  assert.equal(maskSecret(''), '');
+  assert.equal(maskSecret('  '), '');
+  assert.equal(maskSecret('short'), '••••••••');
+  assert.equal(maskSecret('exactly-11c'), '••••••••');
+  assert.equal(maskSecret('sk-1234567890abcdef'), 'sk-1••••••cdef');
+  // 中间固定 6 个点，不泄露原文长度
+  assert.equal(maskSecret('a'.repeat(40)), 'aaaa••••••aaaa');
 });
 
 test('POST /ai/test succeeds via /models and reports configured model', async () => {

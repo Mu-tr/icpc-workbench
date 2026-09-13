@@ -18,15 +18,12 @@ const RULES: Array<{ id: string; patterns: RegExp[] }> = [
 
 export const TOPIC_PIPELINE_VERSION = 'title-rules-v1';
 
-/**
- * 统计/推荐读取路径的知识点来源：已有管线标注的题用标注结果，
- * 未标注的题回退题源 tags（仅作审计的字段），保证管线覆盖不足时统计不中断。
- * 注意：所有调用处的题目表别名必须是 p。
- */
-export const TOPIC_TAGS_SQL =
-  'CASE WHEN EXISTS (SELECT 1 FROM problem_topics pt WHERE pt.problem_id = p.id) ' +
-  'THEN (SELECT json_group_array(ptx.topic_id) FROM problem_topics ptx WHERE ptx.problem_id = p.id) ' +
-  'ELSE p.tags END AS tags';
+// 注：本模块是知识点标注的 v1 遗留实现（12 词粗词表），已被 knowledge/ 下的
+// 「L1 规则 + L2 AI + L3 人工」三级管线取代，仅在用户手动触发
+// POST /api/problems/topics/rebuild 时写入 problem_topics 表。
+// 该表作为统计读取链路的第 2 优先级回退（problem_keypoints → problem_topics → problems.tags），
+// 对应的 CASE WHEN 表达式**只有一处实现**：knowledge/store.ts 的 knowledgeTagsSql()。
+// 此处原先另有一份零引用的 TOPIC_TAGS_SQL 副本，已删除——两份拷贝各改各的正是口径漂移的来源。
 
 export interface TopicAnnotation {
   topicId: string;

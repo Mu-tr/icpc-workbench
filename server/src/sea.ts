@@ -28,6 +28,7 @@ import { checkinsRoutes } from './routes/checkins.ts';
 import { contestsRoutes } from './routes/contests.ts';
 import { exportRoutes } from './routes/export.ts';
 import { importRoutes } from './routes/import.ts';
+import { knowledgeRoutes } from './routes/knowledge.ts';
 import { listsRoutes } from './routes/lists.ts';
 import { plansRoutes } from './routes/plans.ts';
 import { problemsRoutes } from './routes/problems.ts';
@@ -44,6 +45,9 @@ import { setBuiltinBankJson, seedBuiltinBank } from './db/builtinBank.ts';
 import { setPromptTemplate } from './plans/planService.ts';
 import { aiRoutes, setAssistantPromptTemplate } from './routes/ai.ts';
 import { PLATFORMS } from '../../shared/src/index.ts';
+import { setTaxonomyJson } from './knowledge/taxonomy.ts';
+import { setRulesJson } from './knowledge/ruleEngine.ts';
+import { initKnowledgeStore, loadAnnotationsIntoDb } from './knowledge/store.ts';
 
 const CLIENT_DIST_PREFIX = 'client-dist/';
 const WIDGET_FILES = ['widget.html'];
@@ -56,10 +60,22 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   setPromptTemplate(readTextAsset('src/ai/plan-prompt.md'));
   setAssistantPromptTemplate(readTextAsset('src/ai/assistant-prompt.md'));
   setBuiltinBankJson(readTextAsset('src/data/bank-builtin.json'));
+  setTaxonomyJson(readTextAsset('src/knowledge/taxonomy.json'));
+  setRulesJson(readTextAsset('src/knowledge/rules.json'));
 
   const db = createDb(config.dbPath);
   seedBuiltinBank(db); // 内置题库播种：版本变化时 upsert 一次，日常启动零开销
   initAdapters(config.dataDir);
+  // 知识点管线：JSONL 源真相 → SQLite 索引幂等重建（无 JSONL 时零开销）
+  initKnowledgeStore(config.dataDir);
+  try {
+    const loaded = loadAnnotationsIntoDb(db, config.dataDir);
+    if (loaded.lines > 0) {
+      console.log(`[knowledge] 已从 JSONL 重建索引: ${loaded.inserted} 条标注 / ${loaded.problems} 题`);
+    }
+  } catch (e) {
+    console.error(`[knowledge] JSONL 索引重建失败（不影响启动）: ${(e as Error).message}`);
+  }
 
   const app = express();
   app.use(express.json({ limit: '2mb' }));
@@ -71,6 +87,7 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   app.use('/api/plans', plansRoutes(db, () => aiConfigFromDb(db, config)));
   app.use('/api/ai', aiRoutes(db, () => aiConfigFromDb(db, config)));
   app.use('/api/lists', listsRoutes(db, () => aiConfigFromDb(db, config)));
+  app.use('/api/knowledge', knowledgeRoutes(db, () => aiConfigFromDb(db, config)));
   app.use('/api/export', exportRoutes(db));
   app.use('/api/problems', problemsRoutes(db));
   app.use('/api/reviews', reviewsRoutes(db));

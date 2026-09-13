@@ -1769,11 +1769,14 @@ body {
   transition:
     box-shadow 0.2s ease,
     border-color 0.2s ease,
-    opacity 0.2s ease;
+    opacity 0.2s ease,
+    transform 0.2s ease;
 }
 
 .task-card:hover {
   border-color: rgba(134, 168, 255, 0.3);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
 }
 
 /* 左侧类型指示条 */
@@ -1847,9 +1850,14 @@ body {
   font-size: 12px;
 }
 
-/* 已打卡：整体降透明度 + 标题划线 */
+/* 已打卡：绿染 + 标题划线（仍可点击撤销） */
 .task-done {
-  opacity: 0.72;
+  opacity: 0.78;
+  background: rgba(105, 215, 165, 0.05);
+}
+
+.task-done:hover {
+  border-color: rgba(105, 215, 165, 0.3);
 }
 
 .task-done .task-title {
@@ -1861,6 +1869,7 @@ body {
 
 /* ============================================================
    日历打卡
+   签名元素：完成度圆环 —— 弧线绕日期数字转，绿弧即全勤
    ============================================================ */
 
 @keyframes pulseBorder {
@@ -1884,81 +1893,160 @@ body {
 .calendar-cell {
   display: flex;
   flex-direction: column;
-  padding: 4px 7px 7px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 4px 7px;
   height: 100%;
-  min-height: 68px;
-  border-radius: 8px;
+  min-height: 76px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   position: relative;
   border: 1px solid transparent;
-  transition: all 0.2s ease;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    transform 0.18s ease;
 }
 
 .calendar-cell:hover {
   border-color: rgba(134, 168, 255, 0.35);
   background: var(--brand-soft);
+  transform: translateY(-1px);
 }
 
 .calendar-cell-selected {
   background: var(--brand-soft);
-  border-color: rgba(134, 168, 255, 0.45);
+  border-color: rgba(134, 168, 255, 0.55);
 }
 
 .calendar-cell-done {
-  background: rgba(105, 215, 165, 0.08);
+  background: rgba(105, 215, 165, 0.07);
 }
 
-.calendar-cell-done::after {
-  content: '✓';
-  position: absolute;
-  top: 2px;
-  right: 6px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--green);
+.calendar-cell-done:hover {
+  border-color: rgba(105, 215, 165, 0.4);
+  background: rgba(105, 215, 165, 0.11);
 }
 
 /* 非本月日期弱化 */
 .calendar-cell-muted {
-  opacity: 0.35;
+  opacity: 0.3;
+}
+
+/* 圆环 + 居中日期数字 */
+.cell-ring-wrap {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cell-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.cell-ring-track {
+  fill: none;
+  stroke: var(--surface-3);
+  stroke-width: 2.5;
+}
+
+.cell-ring-value {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.45s ease;
+}
+
+.cell-ring-done {
+  stroke: var(--green);
 }
 
 .cell-date {
+  position: relative;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
-.cell-foot {
-  margin-top: auto;
+.calendar-cell-done .cell-date {
+  color: var(--green);
 }
 
 .cell-count {
-  display: block;
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
 
-.cell-bar {
-  display: block;
-  margin-top: 3px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--overlay-3);
-  overflow: hidden;
+.calendar-cell-done .cell-count {
+  color: var(--green);
 }
 
-.cell-bar > i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: linear-gradient(90deg, #f2b75b, #f2c46d);
-  transition: width 0.4s ease;
+.cell-count-check {
+  font-weight: 700;
 }
 
-.calendar-cell-done .cell-bar > i {
-  background: linear-gradient(90deg, #69d7a5, #8ee7c0);
+/* 图例 + 卡片头摘要 */
+.calendar-legend {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.calendar-legend .lg {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--surface-3);
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
+.calendar-legend .lg-part {
+  border-color: var(--brand);
+}
+
+.calendar-legend .lg-done {
+  border-color: var(--green);
+  background: rgba(105, 215, 165, 0.35);
+}
+
+.calendar-extra {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.calendar-extra b {
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .calendar-today {
+    animation: none;
+  }
+
+  .calendar-cell,
+  .cell-ring-value,
+  .task-card {
+    transition: none;
+  }
 }
 
 /* ============================================================

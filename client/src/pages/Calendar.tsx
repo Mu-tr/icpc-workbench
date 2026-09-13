@@ -3,8 +3,6 @@ import { Button, Calendar, Card, Col, Empty, Row, Space, Spin, Tag, App as AntdA
 import { CheckOutlined, FieldTimeOutlined, FireOutlined, TrophyOutlined } from '@ant-design/icons'
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
-import 'dayjs/locale/zh-cn'
-import zhCN from 'antd/locale/zh_CN'
 import PageHeader from '../components/PageHeader'
 import StatStrip from '../components/StatStrip'
 import { get, post, del } from '../api'
@@ -84,12 +82,23 @@ export default function CalendarPage() {
 
   const today = dayjs().format('YYYY-MM-DD')
 
+  // 本月全勤摘要（卡片头展示）
+  const monthInfos = Object.values(monthData).filter((i) => i.total > 0)
+  const doneDays = monthInfos.filter((i) => i.checked === i.total).length
+
+  // 完成度圆环几何：r=15.5 在 36×36 视图里留出 stroke 呼吸空间
+  const RING_R = 15.5
+  const RING_CIRC = 2 * Math.PI * RING_R
+
   const renderCell = (date: Dayjs) => {
     const key = date.format('YYYY-MM-DD')
     const info = monthData[key]
     const isSelected = key === selected
-    const done = info && info.total > 0 && info.checked === info.total
-    const pct = info && info.total > 0 ? Math.round((info.checked / info.total) * 100) : 0
+    const hasTasks = Boolean(info && info.total > 0)
+    const done = hasTasks && info.checked === info.total
+    const pct = hasTasks ? Math.round((info.checked / info.total) * 100) : 0
+    // 有任务的日期弧线至少显示 8%：0/N 未开打也要有蓝色标识，否则与「无任务」无法区分
+    const arcPct = done ? 100 : Math.max(pct, 8)
     const cellCls = [
       'calendar-cell',
       isSelected ? 'calendar-cell-selected' : '',
@@ -100,16 +109,26 @@ export default function CalendarPage() {
       .filter(Boolean)
       .join(' ')
     return (
-      <div className={cellCls}>
-        <span className="cell-date">{date.date()}</span>
-        {info && info.total > 0 && (
-          <span className="cell-foot" title={`${info.checked}/${info.total} 已打卡`}>
-            <span className="cell-count">
-              {info.checked}/{info.total}
-            </span>
-            <span className="cell-bar">
-              <i style={{ width: `${pct}%` }} />
-            </span>
+      <div className={cellCls} title={hasTasks ? `${info.checked}/${info.total} 已打卡` : undefined}>
+        <span className="cell-ring-wrap">
+          <svg className="cell-ring" viewBox="0 0 36 36" aria-hidden>
+            <circle className="cell-ring-track" cx="18" cy="18" r={RING_R} />
+            {hasTasks && (
+              <circle
+                className={`cell-ring-value${done ? ' cell-ring-done' : ''}`}
+                cx="18"
+                cy="18"
+                r={RING_R}
+                strokeDasharray={`${((arcPct / 100) * RING_CIRC).toFixed(2)} ${RING_CIRC.toFixed(2)}`}
+              />
+            )}
+          </svg>
+          <span className="cell-date">{date.date()}</span>
+        </span>
+        {hasTasks && (
+          <span className="cell-count">
+            {done && <span className="cell-count-check">✓ </span>}
+            {info.checked}/{info.total}
           </span>
         )}
       </div>
@@ -160,13 +179,31 @@ export default function CalendarPage() {
       </div>
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={16}>
-          <Card title="训练日历 —— 点击日期查看当天计划并打卡" size="small">
+          <Card
+            title="训练日历"
+            extra={
+              <span className="calendar-extra">
+                点击日期查看当天计划并打卡 · 本月 <b>{doneDays}</b>/{monthInfos.length} 天全勤
+              </span>
+            }
+            size="small"
+          >
             <Calendar
-              locale={zhCN as never}
               onSelect={(d: Dayjs) => setSelected(d.format('YYYY-MM-DD'))}
               onPanelChange={(d: Dayjs) => setMonth(d.format('YYYY-MM'))}
               dateFullCellRender={renderCell}
             />
+            <div className="calendar-legend" aria-hidden>
+              <span>
+                <i className="lg lg-none" />无任务
+              </span>
+              <span>
+                <i className="lg lg-part" />进行中
+              </span>
+              <span>
+                <i className="lg lg-done" />全部完成
+              </span>
+            </div>
           </Card>
         </Col>
         <Col xs={24} xl={8}>

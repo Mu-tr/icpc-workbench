@@ -6,6 +6,7 @@ import type {
   Verdict,
 } from '../../../shared/src/index.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
+import { asHttpClient, sleep, type HttpInit } from './http.ts';
 
 const API = 'https://kenkoooo.com/atcoder';
 const RESOURCES_TTL_MS = 24 * 3600 * 1000;
@@ -47,13 +48,11 @@ interface KenkoooSubmission {
  */
 export function createAtcoderAdapter(
   cacheDir?: string,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: HttpInit = fetch,
 ): PlatformAdapter {
+  const http = asHttpClient(fetchFn);
   let problems: Map<string, { title?: string }> | null = null;
   let models: Map<string, { difficulty?: number | null }> | null = null;
-
-  const sleep = (ms: number): Promise<void> =>
-    new Promise((r) => setTimeout(r, ms));
 
   async function cachedJson(
     url: string,
@@ -66,7 +65,7 @@ export function createAtcoderAdapter(
         return JSON.parse(fs.readFileSync(cachePath, 'utf8'));
       }
     }
-    const res = await fetchFn(url, { signal: AbortSignal.timeout(20000) });
+    const res = await http.fetch(url, {}, { timeoutMs: 20000 });
     if (!res.ok) {
       throw new Error(`AtCoder resources HTTP ${res.status}`);
     }
@@ -116,7 +115,7 @@ export function createAtcoderAdapter(
 
       for (let page = 0; page < budget; page += 1) {
         const url = `${API}/atcoder-api/v3/user/submissions?user=${encodeURIComponent(handle)}&from_second=${fromSecond}`;
-        const res = await fetchFn(url, { signal: AbortSignal.timeout(20000) });
+        const res = await http.fetch(url, {}, { timeoutMs: 20000 });
         if (!res.ok) {
           throw new Error(`AtCoder API HTTP ${res.status}`);
         }

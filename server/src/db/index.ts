@@ -56,6 +56,16 @@ function migrate(db: Db): void {
   const accountCols = columnsOf('platform_accounts');
   if (!accountCols.has('sync_truncated')) db.exec('ALTER TABLE platform_accounts ADD COLUMN sync_truncated INTEGER NOT NULL DEFAULT 0');
   if (!accountCols.has('backfill_page')) db.exec('ALTER TABLE platform_accounts ADD COLUMN backfill_page INTEGER');
+  // v0.5.2: 知识点标注记录「标注当时的标题」，标题被修复后可触发重跑（差量重跑依据之一）
+  const keypointCols = columnsOf('problem_keypoints');
+  if (!keypointCols.has('annotated_title')) db.exec('ALTER TABLE problem_keypoints ADD COLUMN annotated_title TEXT');
+  // v0.5.2: 难度来源标记，消除「题库 upsert 保留旧值 / 同步 upsert 采用新值」的相反优先级
+  const problemCols = columnsOf('problems');
+  if (!problemCols.has('difficulty_source')) {
+    db.exec('ALTER TABLE problems ADD COLUMN difficulty_source TEXT');
+    // 历史行来源未知：按 'sync' 视之（优先级 2），保持既有行为不变
+    db.exec("UPDATE problems SET difficulty_source = 'sync' WHERE difficulty IS NOT NULL");
+  }
   mergeSlashedCfKeys(db);
   // v0.4.5 数据修复：洛谷秒级时间戳曾被按毫秒解析（见 fixLuoguTimestamps）
   fixLuoguTimestamps(db);

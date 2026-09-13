@@ -262,73 +262,23 @@ export interface ContestInfo {
 // ---------- 知识点掌握度地图（刷题数据 × 模板课程联动） ----------
 
 /**
- * 平台英文标签 → 课程大纲中文规范名。
- * CF 等平台同步的算法标签是英文（如 binary search），与课程大纲的中文 tag
- * （二分）精确匹配不上，会把同一知识点拆成两个掌握度点。只收录与课程大纲
- * tag 明确对应的映射；没有把握的一律保持原样（宁可两个点也不错误归并）。
+ * 标签 → 规范名的同义词体系（含可选的 taxonomy code 锚定）。
+ *
+ * 实现已移至 `./tags.ts`：把「平台英文标签 / 课程中文 tag / 常见别名」组织为同义词组，
+ * 带 code 的组名严格等于 taxonomy 的 name，从结构上消除「归并目标名不存在」导致的
+ * 同一知识点分裂（历史缺陷：'binary search' → 「二分」，而体系里叫「二分查找」）。
+ * 此处仅做 re-export，保持既有 import 路径（'.../shared/src/index.ts'）不变。
  */
-export const TAG_ALIAS_TO_CANONICAL: Record<string, string> = {
-  'binary search': '二分',
-  'two pointers': '双指针',
-  dp: '动态规划',
-  greedy: '贪心',
-  math: '数学',
-  'data structures': '数据结构',
-  graphs: '图论',
-  trees: '树上算法',
-  strings: '字符串',
-  sortings: '排序',
-  'number theory': '数论',
-  combinatorics: '组合计数',
-  bitmasks: '位运算',
-  dsu: '并查集',
-  'shortest paths': '最短路',
-  'divide and conquer': '分治',
-  probabilities: '概率期望',
-  hashing: '哈希',
-  games: '博弈论',
-  matrices: '矩阵',
-  geometry: '计算几何',
-  flows: '网络流',
-  fft: 'FFT',
-  '2-sat': '2-SAT',
-  'meet-in-the-middle': '折半搜索',
-  'dfs and similar': 'DFS',
-  'graph matchings': '二分图',
-  // LeetCode topic tags（适配器统一转小写后入库；与 CF 同一套英文标签归并规则）
-  'dynamic programming': '动态规划',
-  'hash table': '哈希',
-  'depth-first search': 'DFS',
-  graph: '图论',
-  tree: '树上算法',
-  string: '字符串',
-  'bit manipulation': '位运算',
-  bitmask: '位运算',
-  'union find': '并查集',
-  'shortest path': '最短路',
-  'probability and statistics': '概率期望',
-  'game theory': '博弈论',
-  matrix: '矩阵',
-};
-
-/** 标签的规范名：有别名映射则归并到中文知识点，否则原样返回 */
-export function canonicalTag(tag: string): string {
-  return TAG_ALIAS_TO_CANONICAL[tag] ?? tag;
-}
-
-/**
- * 标签的同义集合（含自身）：用于题目筛选时「中文 tag 命中英文标签的题」及反向。
- * 例：expandTag('二分') → ['二分', 'binary search']。
- */
-export function expandTag(tag: string): string[] {
-  const names = [tag];
-  const canonical = TAG_ALIAS_TO_CANONICAL[tag];
-  if (canonical) names.push(canonical);
-  for (const [alias, target] of Object.entries(TAG_ALIAS_TO_CANONICAL)) {
-    if (target === tag && alias !== tag) names.push(alias);
-  }
-  return names;
-}
+export {
+  TAG_SYNONYM_GROUPS,
+  TAG_ALIAS_TO_CANONICAL,
+  canonicalTag,
+  expandTag,
+  codeOfTag,
+  codeOfCanonicalName,
+  coarseCategoryNames,
+  type TagSynonymGroup,
+} from './tags.ts';
 
 // ---------- 标签净化：过滤非算法能力维度的噪声标签 ----------
 
@@ -401,6 +351,8 @@ export interface MasteryTemplateLink {
 
 export interface MasteryPoint {
   tag: string;
+  /** 知识点 code（taxonomy 口径的点才有；tag 口径回退点无此字段） */
+  code?: string;
   solved: number;
   attempts: number;
   acRate: number;
@@ -417,6 +369,71 @@ export interface MasteryPoint {
 export interface MasteryReport {
   generatedAt: string;
   points: MasteryPoint[];
+}
+
+// ---------- 自建知识点管线（taxonomy + L1 规则 / L2 AI / L3 人工） ----------
+
+/** 标注来源：rule=L1 标题规则 / ai=L2 批量模型分类 / manual=L3 人工校正（永不被重跑覆盖） */
+export type KnowledgeSource = 'rule' | 'ai' | 'manual';
+
+/** 单题单个知识点的标注条目（problem_keypoints 行 / JSONL 内嵌结构） */
+export interface KnowledgePointEntry {
+  /** taxonomy code，如 basic.binary-search（稳定不可改） */
+  code: string;
+  /** 展示名（自 taxonomy 反规范化，启动重载时刷新） */
+  name: string;
+  confidence: number;
+  source: KnowledgeSource;
+  /** 溯源：rule#rNNN / ai:model名 / manual */
+  method: string;
+}
+
+/** JSONL 落盘格式：每行一题，源真相（可审计、可重建 SQLite 索引） */
+export interface KnowledgeAnnotation {
+  platform: PlatformId;
+  problemKey: string;
+  knowledgePoints: Array<Omit<KnowledgePointEntry, 'name'>>;
+  taxonomyVersion: number;
+  pipelineVersion: number;
+  /** ISO8601 UTC */
+  annotatedAt: string;
+}
+
+/** 覆盖率报告（GET /api/knowledge/coverage） */
+export interface KnowledgeCoverage {
+  total: number;
+  /** 有 ≥1 个达到统计阈值标注的题数 */
+  annotated: number;
+  /** 覆盖率百分数（0-100，保留 1 位小数；6.5 即 6.5%） */
+  coverage: number;
+  /** L2 待标注队列长度 */
+  pending: number;
+  /** 队列中已失败过至少一次、仍在重试的题数（可观测性：pending 不降时区分「排队」与「反复失败」） */
+  retrying: number;
+  /** 队列中已放弃（尝试次数超限）的题数；重跑前会一直停在此状态 */
+  failed: number;
+  /** 有标注但全部低于统计阈值的题数 */
+  lowConfidenceOnly: number;
+  bySource: Record<KnowledgeSource, number>;
+  /** 未标注题数（统计端回退净化 tag，计入「未覆盖」桶） */
+  uncovered: number;
+  taxonomyVersion: number;
+  /** 生效管线版本（= 代码版本 × 1000 + rules.json 版本，规则表改动即自动变化） */
+  pipelineVersion: number;
+  /** rules.json 版本 */
+  rulesVersion: number;
+  /** 统计端生效的置信度阈值（设置页可调，默认 0.6） */
+  threshold: number;
+}
+
+/** 双口径对比单项（GET /api/knowledge/compare）：tag 口径 vs 知识点口径弱项 top */
+export interface KnowledgeCompareReport {
+  generatedAt: string;
+  threshold: number;
+  tagCaliber: WeaknessItem[];
+  knowledgeCaliber: WeaknessItem[];
+  /** 知识点口径中因无标注回退 tag 的「未覆盖」桶统计（null = 全部有标注） */
+  uncovered: { attempts: number; ac: number; acRate: number } | null;
 }
 
 // ---------- 赛前提醒 ----------

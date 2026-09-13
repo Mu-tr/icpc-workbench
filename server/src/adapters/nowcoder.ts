@@ -5,6 +5,7 @@ import type {
 } from '../../../shared/src/index.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
+import { asHttpClient, type HttpInit } from './http.ts';
 
 const API = 'https://ac.nowcoder.com';
 const PAGE_SIZE = 10;
@@ -88,7 +89,8 @@ function parseTime(t: string): number {
  * - 分批防封号：单次同步受 maxSubmissions 新增上限与页数预算约束，触及即停（opts.truncated），
  *   下次同步通过 backfill 游标续拉更早历史。限速 500ms/页防反爬。
  */
-export function createNowcoderAdapter(fetchFn: typeof fetch = fetch): PlatformAdapter {
+export function createNowcoderAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
+  const http = asHttpClient(fetchFn);
   return {
     platform: 'nowcoder',
 
@@ -103,14 +105,13 @@ export function createNowcoderAdapter(fetchFn: typeof fetch = fetch): PlatformAd
         perSyncMax: PER_SYNC_MAX_PAGES,
         fetchPage: async (page) => {
           const url = `${API}/acm/contest/profile/${encodeURIComponent(handle)}/practice-coding?pageSize=${PAGE_SIZE}&search=&statusTypeFilter=-1&languageCategoryFilter=-1&orderType=DESC&page=${page}`;
-          const res = await fetchFn(url, {
+          const res = await http.fetch(url, {
             headers: {
               'User-Agent':
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
               Referer: `${API}/acm/home/${encodeURIComponent(handle)}`,
             },
-            signal: AbortSignal.timeout(20000),
-          });
+          }, { timeoutMs: 20000 });
           if (!res.ok) {
             throw new Error(`牛客页面 HTTP ${res.status}（可能触发风控，请稍后重试）`);
           }

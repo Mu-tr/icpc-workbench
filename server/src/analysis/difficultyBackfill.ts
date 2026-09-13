@@ -1,5 +1,7 @@
 import type { Db } from '../db/index.ts';
 import { fetchWithChallenge, luoguDifficultyToRating } from '../adapters/luogu.ts';
+import { purifyTags } from '../import/problemWritePolicy.ts';
+import { sleep } from '../adapters/http.ts';
 
 /** 单题回填查得的信息 */
 export interface BackfillInfo {
@@ -31,7 +33,6 @@ const LUOGU_API = 'https://www.luogu.com.cn';
 const NC_DELAY_MS = 450; // 牛客反爬较强：逐题搜索限速
 const LG_DELAY_MS = 300;
 const NC_FAIL_LIMIT = 8; // 连续失败阈值：超过视为触发风控，中止平台回填
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 牛客：题库列表页 keyword=题号 精确搜索 ----------
 
@@ -189,8 +190,12 @@ export async function backfillDifficulties(
     const getDiff = db.prepare(
       'SELECT difficulty FROM problems WHERE platform = ? AND problem_key = ?',
     );
-    const update = db.prepare(
-      'UPDATE problems SET difficulty = COALESCE(difficulty, ?), title = ?, tags = ? WHERE platform = ? AND problem_key = ?',
+    // 补上难度时一并标记来源（backfill 优先级高于 sync/bank，低于 manual）
+    const updateWithDiff = db.prepare(
+      "UPDATE problems SET difficulty = COALESCE(difficulty, ?), difficulty_source = CASE WHEN difficulty IS NULL AND ? IS NOT NULL THEN 'backfill' ELSE difficulty_source END, title = ?, tags = ? WHERE platform = ? AND problem_key = ?",
+    );
+    const updateMetaOnly = db.prepare(
+      'UPDATE problems SET title = ?, tags = ? WHERE platform = ? AND problem_key = ?',
     );
     for (const row of ncTargets) {
       if (consecutiveFails >= NC_FAIL_LIMIT) {
@@ -215,9 +220,13 @@ export async function backfillDifficulties(
       }
       consecutiveFails = 0;
       const newTitle = info.title ?? (ncTitlePolluted(row.title) ? cleanNcTitle(row.title) : row.title);
-      const newTags = info.tags ?? JSON.parse(row.tags);
+      const newTags = purifyTags(info.tags ?? (JSON.parse(row.tags) as string[]));
       const before = getDiff.get('nowcoder', row.problem_key) as { difficulty: number | null };
-      update.run(info.difficulty, newTitle, JSON.stringify(newTags), 'nowcoder', row.problem_key);
+      if (info.difficulty !== null) {
+        updateWithDiff.run(info.difficulty, info.difficulty, newTitle, JSON.stringify(newTags), 'nowcoder', row.problem_key);
+      } else {
+        updateMetaOnly.run(newTitle, JSON.stringify(newTags), 'nowcoder', row.problem_key);
+      }
       if (before.difficulty === null && info.difficulty !== null) {
         r.filled += 1;
         r.details.push({ problemKey: row.problem_key, action: 'filled', note: `难度 ${info.difficulty}` });
@@ -242,7 +251,7 @@ export async function backfillDifficulties(
     // tag 字典（/_lfe/tags 匿名可访问）：失败降级为空字典，仅丢失标签不影响难度
     const tagDict = await fetchLuoguTagDict(fetchFn);
     const update = db.prepare(
-      "UPDATE problems SET difficulty = ? WHERE platform = 'luogu' AND problem_key = ?",
+      "UPDATE problems SET difficulty = ?, difficulty_source = 'backfill' WHERE platform = 'luogu' AND problem_key = ?",
     );
     for (const { problem_key: key } of lgKeys) {
       let info: BackfillInfo | null = null;

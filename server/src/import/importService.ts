@@ -1,6 +1,7 @@
 import type { NormalizedSubmission, PlatformId } from '../../../shared/src/index.ts';
 import type { Db } from '../db/index.ts';
-import { refreshProblemTopics } from '../topics/pipeline.ts';
+import { annotateProblemsL1 } from '../knowledge/pipeline.ts';
+import { problemUpsertSql, purifyTags } from './problemWritePolicy.ts';
 
 export interface InsertResult {
   imported: number;
@@ -9,12 +10,14 @@ export interface InsertResult {
 
 /**
  * 将统一 Submission 结构写入数据库（单事务）：
- * - problems 按 (platform, problem_key) upsert（标题/难度/链接更新）
+ * - problems 按 (platform, problem_key) upsert（标题/难度/链接/tags 更新）
  * - submissions 按 (user_id, platform, external_id) INSERT OR IGNORE 去重
  * - opts.clearPlatform：先删除该平台旧提交再插入（换账号场景，保证原子性）
  * 供平台同步与手动导入共用。
- * 标签与 bankService 同语义：新值为空数组时保留库内已有标签——同步适配器
- * （nowcoder / leetcode 等）拿不到标签，若直接覆盖会把题库补全的标签清掉。
+ *
+ * 难度与标签的统一策略见 problemWritePolicy.ts：
+ * - 难度按来源优先级（manual > backfill > sync > bank）覆盖，手动导入(manual:)标记为 manual 来源
+ * - 标签**写入即净化**（噪声过滤 + 同义词归并），non-empty 覆盖空值；适配器拿不到标签时保留库内已有
  */
 export function insertNormalized(
   db: Db,
@@ -22,15 +25,8 @@ export function insertNormalized(
   subs: NormalizedSubmission[],
   opts: { clearPlatform?: PlatformId } = {},
 ): InsertResult {
-  const upsertProblem = db.prepare(
-    `INSERT INTO problems (platform, problem_key, title, difficulty, url, tags)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(platform, problem_key) DO UPDATE SET
-       title = excluded.title,
-       difficulty = COALESCE(excluded.difficulty, problems.difficulty),
-       url = COALESCE(excluded.url, problems.url),
-       tags = CASE WHEN excluded.tags != '[]' THEN excluded.tags ELSE problems.tags END`,
-  );
+  const upsertSync = db.prepare(problemUpsertSql('sync'));
+  const upsertManual = db.prepare(problemUpsertSql('manual'));
   const insertSub = db.prepare(
     `INSERT OR IGNORE INTO submissions
        (user_id, platform, problem_id, verdict, language, submitted_at, external_id)
@@ -47,6 +43,7 @@ export function insertNormalized(
 
   let imported = 0;
   let skipped = 0;
+  const newProblems: Array<{ platform: string; problemKey: string; title: string }> = [];
   db.exec('BEGIN');
   try {
     if (opts.clearPlatform) {
@@ -56,18 +53,21 @@ export function insertNormalized(
       );
     }
     for (const s of subs) {
-      upsertProblem.run(
+      const isManual = String(s.externalId).startsWith('manual:');
+      const source = isManual ? 'manual' : 'sync';
+      (isManual ? upsertManual : upsertSync).run(
         s.problem.platform,
         s.problem.problemKey,
         s.problem.title,
         s.problem.difficulty ?? null,
         s.problem.url ?? null,
-        JSON.stringify(s.problem.tags),
+        JSON.stringify(purifyTags(s.problem.tags)),
+        source,
       );
       const problem = findProblem.get(s.problem.platform, s.problem.problemKey) as { id: number; title: string };
-      refreshProblemTopics(db, problem.id, problem.title);
+      newProblems.push({ platform: s.problem.platform, problemKey: s.problem.problemKey, title: problem.title });
       // 手动导入协调：同题同结果已存在 → 跳过（不再重复计入）
-      if (String(s.externalId).startsWith('manual:')) {
+      if (isManual) {
         const dup = manualDup.get(
           userId,
           s.problem.platform,
@@ -96,6 +96,12 @@ export function insertNormalized(
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
+  }
+  // 知识点管线增量：新题跑 L1 规则标注（未命中入 L2 队列）；标注失败不影响导入结果
+  try {
+    annotateProblemsL1(db, newProblems);
+  } catch (e) {
+    console.error(`[knowledge] 导入后 L1 标注失败（不影响导入）: ${(e as Error).message}`);
   }
   return { imported, skipped };
 }

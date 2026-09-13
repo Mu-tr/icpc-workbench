@@ -5,6 +5,7 @@ import type {
 } from '../../../shared/src/index.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { ManualImportRequiredError } from './types.ts';
+import { sleep, type HttpInit, asHttpClient } from './http.ts';
 
 const API = 'https://www.luogu.com.cn';
 // 每页约 20 条。每次同步的保守页数上限：150 页 × 300ms = 45 秒
@@ -98,8 +99,6 @@ interface LuoguListResp {
   };
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 /**
  * 洛谷 submitTime 为秒级 Unix 时间戳（10 位）；历史版本曾按毫秒解析导致全部落回 1970。
  * 兼容容错：< 1e12 视为秒 ×1000，≥ 1e12 视为毫秒；缺失/非法时回退当前时间。
@@ -127,20 +126,20 @@ function requestHeaders(cookie: string, csrf?: string): Record<string, string> {
  * cookie 传空串即可匿名访问公开接口（题库列表 / 标签字典）。
  */
 export async function fetchWithChallenge(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit | typeof fetch,
   url: string,
   cookie: string,
   csrf?: string,
   extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
+  const http = asHttpClient(fetchFn as HttpInit);
   let current = cookie;
   for (let attempt = 0; attempt <= 2; attempt += 1) {
     if (attempt > 0) await sleep(300); // C3VK 重试间限速，避免毫秒级连发请求触发风控
-    const res = await fetchFn(url, {
+    const res = await http.fetch(url, {
       headers: { ...requestHeaders(current, csrf), ...extraHeaders },
       redirect: 'manual', // 不跟随：302 循环会耗尽 Node fetch 默认重定向次数（抛 fetch failed）
-      signal: AbortSignal.timeout(20000),
-    });
+    }, { timeoutMs: 20000 });
     if (![301, 302, 303].includes(res.status)) return res;
     // 尝试从 set-cookie 提取新 C3VK 并更新后重试
     const fresh = (res.headers.getSetCookie?.() ?? [])
@@ -160,7 +159,8 @@ export async function fetchWithChallenge(
  * - 题目信息（难度/标签）：GET /problem/{pid}（需 x-lentille-request: content-only 请求头，进程内缓存，并发受限）
  * - 未配置 Cookie 时抛 ManualImportRequiredError 引导配置/手动导入
  */
-export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapter {
+export function createLuoguAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
+  const http = asHttpClient(fetchFn);
   const problemCache = new Map<string, { difficulty?: number; title?: string; tags: string[] }>();
   // tag id → 名称字典（/_lfe/tags，无需登录；进程内缓存，失败 5 分钟退避）
   const tagDict = new Map<number, string>();
@@ -177,7 +177,7 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
     if (Date.now() - tagDictFailedAt < 5 * 60 * 1000) return;
     tagDictPromise = (async () => {
       try {
-        const res = await fetchWithChallenge(fetchFn, `${API}/_lfe/tags`, cookie);
+        const res = await fetchWithChallenge(http, `${API}/_lfe/tags`, cookie);
         if (res.ok) {
           const d = (await res.json()) as { tags?: Array<{ id: number; name: string }> };
           for (const t of d.tags ?? []) tagDict.set(t.id, t.name);
@@ -202,7 +202,7 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
     try {
       // 洛谷题目页已迁移到 LentilleDataResponse 管线：需请求头 x-lentille-request: content-only
       // （_contentOnly=1 参数已失效）；响应 tags 为 tag id 数组，经 /_lfe/tags 字典转名称
-      const res = await fetchWithChallenge(fetchFn, `${API}/problem/${pid}`, cookie, csrf, {
+      const res = await fetchWithChallenge(http, `${API}/problem/${pid}`, cookie, csrf, {
         'x-lentille-request': 'content-only',
         Accept: 'application/json',
         Referer: `${API}/problem/${pid}`,
@@ -282,7 +282,7 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
       for (let page = startPage, n = 0; n < budget; page += 1, n += 1) {
         reachedPage = page;
         const url = `${API}/record/list?user=${encodeURIComponent(handle)}&page=${page}`;
-        const res = await fetchWithChallenge(fetchFn, url, cookie, opts?.csrf, {
+        const res = await fetchWithChallenge(http, url, cookie, opts?.csrf, {
           'x-lentille-request': 'content-only',
           Accept: 'application/json',
         });
@@ -413,7 +413,7 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
           return { ok: false, message: 'Cookie 中缺少 _uid：请重新复制包含 _uid 与 __client_id 的完整 Cookie' };
         }
         const res = await fetchWithChallenge(
-          fetchFn,
+          http,
           `${API}/record/list?user=${encodeURIComponent(uid)}&page=1`,
           opts.cookie,
           opts.csrf,

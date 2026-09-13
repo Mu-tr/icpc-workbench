@@ -3,7 +3,7 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { safeTags } from '../analysis/stats.ts';
 import { intervalDaysForStage, scheduleNext } from '../reviews/schedule.ts';
-import { TOPIC_TAGS_SQL } from '../topics/pipeline.ts';
+import { knowledgeTagsSql } from '../knowledge/store.ts';
 import type { ReviewItem } from '../../../shared/src/index.ts';
 
 interface RawReviewRow {
@@ -39,9 +39,9 @@ function toReviewItem(r: RawReviewRow): ReviewItem {
   };
 }
 
-const SELECT_SQL = `
+const selectSql = (db: Db): string => `
   SELECT ri.id, p.platform, p.problem_key, p.title, p.difficulty, p.url,
-         ${TOPIC_TAGS_SQL},
+         ${knowledgeTagsSql(db)},
          ri.stage, ri.note, ri.added_at, ri.last_reviewed_at, ri.next_due_on
     FROM review_items ri
     JOIN problems p ON p.id = ri.problem_id
@@ -70,7 +70,7 @@ export function reviewsRoutes(db: Db): Router {
 
   // GET /api/reviews?due=1 → 复习队列（due=1 只看到期与逾期）
   r.get('/', (req, res) => {
-    let sql = SELECT_SQL;
+    let sql = selectSql(db);
     const params: Array<string | number> = [DEFAULT_USER_ID];
     if (req.query.due === '1') {
       sql += ' AND ri.next_due_on <= ?';

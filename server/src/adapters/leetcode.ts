@@ -6,6 +6,7 @@ import type {
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
+import { asHttpClient, type HttpInit } from './http.ts';
 
 /**
  * 力扣（leetcode.cn）适配器（GraphQL，无官方公开 API）。
@@ -84,11 +85,12 @@ const UA_HEADERS = {
 
 /** 力扣 GraphQL POST：带 Cookie 时自动附加 x-csrftoken；GraphQL errors 转为显式错误 */
 async function gql(
-  fetchFn: typeof fetch,
+  fetchFn: HttpInit,
   query: string,
   variables: Record<string, unknown> = {},
   opts: { cookie?: string } = {},
 ): Promise<Record<string, unknown>> {
+  const http = asHttpClient(fetchFn);
   const headers: Record<string, string> = { ...UA_HEADERS };
   const cookie = opts.cookie?.trim();
   if (cookie) {
@@ -96,12 +98,11 @@ async function gql(
     const csrf = extractCookieValue(cookie, 'csrftoken');
     if (csrf) headers['x-csrftoken'] = csrf;
   }
-  const res = await fetchFn(`${BASE}/graphql`, {
+  const res = await http.fetch(`${BASE}/graphql`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ query, variables }),
-    signal: AbortSignal.timeout(20000),
-  });
+  }, { timeoutMs: 20000 });
   if (res.status === 401 || res.status === 403) {
     throw new ManualImportRequiredError(
       'leetcode',
@@ -138,7 +139,7 @@ interface LcSubmission {
   url?: string;
 }
 
-export function createLeetcodeAdapter(fetchFn: typeof fetch = fetch): PlatformAdapter {
+export function createLeetcodeAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
   return {
     platform: 'leetcode',
     knownIdsFilter: true,

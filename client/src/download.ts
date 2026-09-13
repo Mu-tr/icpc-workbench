@@ -82,7 +82,9 @@ export async function saveUrlAsFile({
         message?.info('已取消导出')
         return
       }
-      throw e
+      // WebView2 / 内嵌 iframe 等平台 showSaveFilePicker 存在但 createWritable 被拒
+      // （NotSupportedError）→ 不报错，降级为 Blob 下载
+      saveViaBlob(filename, text, mime)
     }
     if (successText !== false) message?.success(successText)
   } catch (e) {

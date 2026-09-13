@@ -46,11 +46,12 @@ icpc-workbench/
 │   ├── adapters/    # Platform adapters (CF/AtCoder auto; Luogu/Nowcoder/Daimayuan/LeetCode/Jisuanke limited) + incremental sync
 │   ├── analysis/    # Aggregate stats / weakness profile / weekly trends
 │   ├── ai/          # OpenAI-compatible provider + plan-prompt.md / assistant-prompt.md templates + function calling tools (fetch-url / pdf-parse / web search) + document converters (Word/Excel/PPT/HTML/CSV/JSON/XML/EPub → Markdown)
-│   ├── contests/    # Four-platform contest aggregation (CF/AtCoder/Luogu/Nowcoder, auto-degrade on source failure)
+│   ├── contests/    # Five-platform contest aggregation (CF/AtCoder/Luogu/Nowcoder/Jisuanke, auto-degrade on source failure)
 │   ├── plans/       # Plan generation (AI-first, fallback to template on failure/no config) + persistence
 │   ├── import/      # Manual import (JSON/CSV/form) + transactional persistence
+│   ├── knowledge/   # Self-built knowledge pipeline (L1 title rules + L2 AI labeling + JSONL source of truth / SQLite index)
 │   ├── updater.ts   # One-click self-update (download/SHA256 verify/in-place replace)
-│   └── routes/      # REST API (stats/problems/plans/ai/lists/reviews/today/templates/contests/checkins/settings/export/sync/import/update)
+│   └── routes/      # REST API (stats/problems/plans/ai/lists/reviews/today/templates/contests/checkins/settings/export/sync/import/update/knowledge/backups)
 ├── client/          # React + Vite + Ant Design (dashboard/today/AI assistant/templates/problem lists/plans/reviews/problem management/mastery map/calendar/contests/settings)
 ├── desktop/         # Tauri desktop shell (app: main native window + Node service sidecar)
 └── shared/          # Cross-platform shared types and platform metadata
@@ -210,7 +211,7 @@ PATCH /api/templates/:id/note     # Study note (body: { note })
 GET  /api/reviews                 # Review queue | POST /api/reviews create new review
 GET  /api/reviews/due-count       # Due review count
 POST /api/reviews/:id/feedback    # Review feedback (remembered/forgotten → schedules next review)
-GET  /api/contests                # Four-platform contest aggregation (?type=upcoming|finished&platform=&limit=)
+GET  /api/contests                # Five-platform contest aggregation (CF/AtCoder/Luogu/Nowcoder/Jisuanke; ?type=upcoming|finished&platform=&limit=)
 GET  /api/plans | POST /api/plans/generate | POST /api/plans/import | GET /api/plans/:id | DELETE /api/plans/:id
                                    # generate body: { days?, startDate?, dailyTasks?, requirements? } ← requirements = user-written training requirements, injected into AI prompt and prioritized
                                    # import body: { raw, startDate?, days? } ← any AI-returned plan JSON text

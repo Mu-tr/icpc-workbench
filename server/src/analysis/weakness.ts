@@ -21,6 +21,8 @@ export type { DifficultyWeakness, WeaknessItem, WeaknessProfile };
 export interface WeaknessOptions {
   minAttempts?: number;
   topN?: number;
+  /** 覆盖 tags 列来源（双口径对比：'p.tags AS tags' = tag 口径；缺省 = 知识点口径） */
+  tagsSql?: string;
 }
 
 /**
@@ -35,7 +37,7 @@ export function computeWeakness(
 ): WeaknessProfile {
   const minAttempts = opts.minAttempts ?? 5;
   const topN = opts.topN ?? 10;
-  const rows = fetchRows(db, userId);
+  const rows = fetchRows(db, userId, {}, opts.tagsSql);
   const totalAc = rows.filter((r) => r.verdict === 'AC').length;
   const avgAcRate = rate(rows.length, totalAc);
 

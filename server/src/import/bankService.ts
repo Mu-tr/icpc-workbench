@@ -1,6 +1,7 @@
 import type { PlatformId } from '../../../shared/src/index.ts';
 import type { Db } from '../db/index.ts';
-import { refreshProblemTopics } from '../topics/pipeline.ts';
+import { annotateProblemsL1 } from '../knowledge/pipeline.ts';
+import { problemUpsertSql, purifyTags } from './problemWritePolicy.ts';
 
 /** 纯题目批量入库结果 */
 export interface BankImportResult {
@@ -14,8 +15,9 @@ export interface BankImportResult {
 /**
  * 将公开题库题目批量写入 problems 表（不产生 submissions，不污染刷题统计）。
  * - 按 (platform, problem_key) upsert：已有题（含手动导入/同步得来的）只更新元信息
- * - difficulty 保留库内已有值（用户手动标定的优先，题库值仅补空）：COALESCE(旧, 新)
- * - tags 仅在新值为非空数组时覆盖（题库来源的标签通常比手动录入的更全）
+ * - 难度按来源优先级覆盖（见 problemWritePolicy.ts）：题库来源 bank(1) 优先级最低，
+ *   不会覆盖同步(2)/回填(3)/手动(4)得到的难度，与 importService 共用同一段 SQL
+ * - tags 写入即净化（噪声过滤 + 同义词归并），非空才覆盖
  * 注：SQLite ON CONFLICT DO UPDATE 的 changes 恒为 1，无法区分新增/更新，
  * 故先按平台统计库内已有 key 数，upsert 后用差值计算。
  */
@@ -37,15 +39,7 @@ export function upsertBankProblems(
     byPlatform.set(r.platform, keys);
   }
 
-  const stmt = db.prepare(
-    `INSERT INTO problems (platform, problem_key, title, difficulty, url, tags)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(platform, problem_key) DO UPDATE SET
-       title = CASE WHEN excluded.title != '' THEN excluded.title ELSE problems.title END,
-       difficulty = COALESCE(problems.difficulty, excluded.difficulty),
-       url = COALESCE(excluded.url, problems.url),
-       tags = CASE WHEN excluded.tags != '[]' THEN excluded.tags ELSE problems.tags END`,
-  );
+  const stmt = db.prepare(problemUpsertSql('bank'));
   const findProblem = db.prepare('SELECT id, title FROM problems WHERE platform = ? AND problem_key = ?');
 
   db.exec('BEGIN');
@@ -62,6 +56,7 @@ export function upsertBankProblems(
       }
       existedByPlatform.set(platform, existed);
     }
+    const newProblems: Array<{ platform: string; problemKey: string; title: string }> = [];
     for (const r of rows) {
       stmt.run(
         r.platform,
@@ -69,12 +64,19 @@ export function upsertBankProblems(
         r.title || r.problemKey,
         r.difficulty,
         r.url,
-        JSON.stringify(r.tags ?? []),
+        JSON.stringify(purifyTags(r.tags ?? [])),
+        'bank',
       );
       const problem = findProblem.get(r.platform, r.problemKey) as { id: number; title: string };
-      refreshProblemTopics(db, problem.id, problem.title);
+      newProblems.push({ platform: r.platform, problemKey: r.problemKey, title: problem.title });
     }
     db.exec('COMMIT');
+    // 知识点管线增量：新题跑 L1 规则标注（未命中入 L2 队列）；标注失败不影响入库结果
+    try {
+      annotateProblemsL1(db, newProblems);
+    } catch (e) {
+      console.error(`[knowledge] 题库入库后 L1 标注失败（不影响入库）: ${(e as Error).message}`);
+    }
     return [...byPlatform.entries()].map(([platform, keys]) => {
       const existed = existedByPlatform.get(platform) ?? 0;
       // 同批内重复 key 只算一次存在

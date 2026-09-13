@@ -282,13 +282,14 @@ export function aiRoutes(
     }),
   );
 
-  // POST /api/ai/chat  body: { messages, planId? }
+  // POST /api/ai/chat  body: { messages, planId?, listId? }
   // 通用 AI 助手：注入练习数据汇总（含问题分布统计）+ 弱项画像 + 能力值；
-  // planId 给定时附带计划上下文（支持 plan-modify 修改计划）。
+  // planId 给定时附带计划上下文（支持 plan-modify 修改计划）；
+  // listId 给定时附带题单上下文（AI 可基于题单内容分析、建议练习）。
   // user 消息可携带 attachments（Files API 上传后的 file_id 列表），服务端转换为
   // OpenAI 多模态内容块（file 引用 + 文本）后调用上游。
   r.post('/chat', asyncHandler(async (req, res) => {
-    const { messages, planId } = req.body ?? {};
+    const { messages, planId, listId } = req.body ?? {};
     const turns = Array.isArray(messages) ? (messages as IncomingTurn[]) : [];
     const BAD_MSGS = 'messages 必填：1-60 条 {role: user|assistant, content} 轮次';
     if (turns.length === 0 || turns.length > 60) {
@@ -409,6 +410,15 @@ export function aiRoutes(
       }
     }
 
+    let listSection = '（未关联题单：用户提到题单整理时请引导其先在本页右上角下拉关联题单）';
+    if (Number.isInteger(listId)) {
+      try {
+        listSection = `## 关联的题单\n${renderListContext(db, Number(listId), DEFAULT_USER_ID)}`;
+      } catch {
+        listSection = '（关联的题单不存在）';
+      }
+    }
+
     // 近 14 天赛事日历（赛事源各自有 30 分钟缓存，失败降级为空，不阻断对话）
     let upcomingContests = '（赛事数据暂不可用）';
     try {
@@ -441,6 +451,7 @@ export function aiRoutes(
       abilityOverrideNote: overrideNote,
       abilityEvidence: renderAbilityEvidence(db, DEFAULT_USER_ID, summary),
       planSection,
+      listSection,
       upcomingContests,
       // 模板库写入（template-add 块）可选的课程分类清单，跟内置课程大纲保持同步
       templateCategories: CURRICULUM.map((c) => `${c.key}（${c.name}）`).join('、'),
@@ -640,4 +651,44 @@ export function aiRoutes(
   }));
 
   return r;
+}
+
+/** 题单上下文渲染：题单元信息 + 按分类分组的题目清单（供 AI 基于题单内容分析与建议） */
+function renderListContext(db: Db, listId: number, userId: number): string {
+  const list = db
+    .prepare('SELECT id, title, source_url FROM problem_lists WHERE id = ? AND user_id = ?')
+    .get(listId, userId) as { id: number; title: string; source_url: string | null } | undefined;
+  if (!list) throw new Error('题单不存在');
+  const items = db
+    .prepare(
+      `SELECT platform, problem_key, title, url, category
+         FROM problem_list_items
+        WHERE list_id = ?
+        ORDER BY category, position, id`,
+    )
+    .all(listId) as Array<{
+    platform: string;
+    problem_key: string;
+    title: string | null;
+    url: string | null;
+    category: string;
+  }>;
+  const byCategory = new Map<string, number>();
+  for (const it of items) byCategory.set(it.category, (byCategory.get(it.category) ?? 0) + 1);
+  const categoryLine = [...byCategory.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([c, n]) => `${c}×${n}`)
+    .join('、');
+  return [
+    `- 标题：${list.title}`,
+    `- 来源：${list.source_url ?? '（手动整理）'}`,
+    `- 共 ${items.length} 题${categoryLine ? `，分类：${categoryLine}` : ''}`,
+    '',
+    '| 平台 | 题号 | 标题 | 分类 | 链接 |',
+    '| --- | --- | --- | --- | --- |',
+    ...items.map(
+      (it) =>
+        `| ${it.platform} | ${it.problem_key} | ${it.title ?? ''} | ${it.category} | ${it.url ?? ''} |`,
+    ),
+  ].join('\n');
 }

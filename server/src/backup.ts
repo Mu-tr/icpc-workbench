@@ -9,6 +9,13 @@ import type { Db } from './db/index.ts';
  * - 恢复采用「标记 + 重启生效」：进程内热恢复会与打开中的连接/WAL 冲突，
  *   因此只写 restore-pending.json，两个启动入口在 createDb 前调用
  *   applyPendingRestore 完成覆盖。
+ *
+ * 知识点源真相同步快照（关键）：
+ *   知识点标注的源真相是 data/knowledge/annotations.jsonl，启动时 loadAnnotationsIntoDb
+ *   会用它重建 problem_keypoints 表。因此「只回滚 .db 不回滚 JSONL」等于没回滚——
+ *   更晚的 JSONL 会在下次启动时把标注整表覆盖回来。所以 createBackup 同时把
+ *   annotations.jsonl 逐字节快照成同名 .knowledge.json，applyPendingRestore 一起回滚。
+ *   audit.jsonl 有意不纳入：它是追加型审计日志而非状态，回滚它只会白丢排查线索。
  */
 
 export type BackupReason = 'manual' | 'daily' | 'pre-upgrade' | 'pre-import' | 'pre-reset';
@@ -24,14 +31,28 @@ const KEEP_PER_REASON: Record<BackupReason, number> = {
 /** 所有备份的总上限（兜底，防止磁盘无限膨胀） */
 const KEEP_TOTAL = 30;
 
-const FILE_RE = /^icpc-(\d{8}-\d{6})-([a-z-]+)\.db$/;
+/**
+ * 备份文件名：icpc-<UTC 时间戳>-<reason>.db
+ * 尾部 `-<毫秒>` 是同一秒内连续备份时的退避后缀（见 createBackup）。
+ * 必须把它纳入匹配，否则这些文件对 listBackupFiles 不可见 →
+ * 永远进不了保留策略的清理集合（用户连点几下「立即备份」就留下永不回收的垃圾）。
+ */
+const FILE_RE = /^icpc-(\d{8}-\d{6})-([a-z-]+?)(?:-\d{1,3})?\.db$/;
 
 interface BackupMeta {
   file: string;
   reason: BackupReason;
   createdAtMs: number;
   size: number;
+  /** 是否带有配套的知识点 JSONL 快照（无此快照的旧备份只能回滚数据库） */
+  knowledge: boolean;
 }
+
+// ---------- 知识点 JSONL 伴生快照 ----------
+
+const KNOWLEDGE_SNAPSHOT_SUFFIX = '.knowledge.json';
+/** 标注源真相相对 dataDir 的路径（与 knowledge/store.ts 的 annotationsPath 一致） */
+const ANNOTATIONS_REL = path.join('knowledge', 'annotations.jsonl');
 
 /** 从数据库句柄推导备份目录（数据库同级的 backups/）；内存库无文件路径 → 必须传 dir */
 export function backupDirFor(db: Db, dir?: string): string {
@@ -42,6 +63,25 @@ export function backupDirFor(db: Db, dir?: string): string {
   return path.join(path.dirname(main.file), 'backups');
 }
 
+/** 备份 `xxx.db` 的伴生快照路径：`xxx.knowledge.json` */
+function knowledgeSnapshotPath(backupDir: string, dbFile: string): string {
+  return path.join(backupDir, dbFile.replace(/\.db$/, KNOWLEDGE_SNAPSHOT_SUFFIX));
+}
+
+/** 写出标注 JSONL 的伴生快照；源文件不存在时返回 false（新库尚无标注） */
+function writeKnowledgeSnapshot(backupDir: string, dbFile: string): boolean {
+  const source = path.join(path.dirname(backupDir), ANNOTATIONS_REL);
+  if (!fs.existsSync(source)) return false;
+  const payload = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    file: 'annotations.jsonl',
+    content: fs.readFileSync(source, 'utf8'),
+  };
+  fs.writeFileSync(knowledgeSnapshotPath(backupDir, dbFile), JSON.stringify(payload), 'utf8');
+  return true;
+}
+
 function listBackupFiles(dir: string): BackupMeta[] {
   if (!fs.existsSync(dir)) return [];
   const out: BackupMeta[] = [];
@@ -50,7 +90,13 @@ function listBackupFiles(dir: string): BackupMeta[] {
     if (!m) continue;
     const stat = fs.statSync(path.join(dir, f));
     if (!stat.isFile()) continue;
-    out.push({ file: f, reason: m[2] as BackupReason, createdAtMs: stat.mtimeMs, size: stat.size });
+    out.push({
+      file: f,
+      reason: m[2] as BackupReason,
+      createdAtMs: stat.mtimeMs,
+      size: stat.size,
+      knowledge: fs.existsSync(knowledgeSnapshotPath(dir, f)),
+    });
   }
   return out.sort((a, b) => b.createdAtMs - a.createdAtMs);
 }
@@ -72,6 +118,13 @@ export function createBackup(db: Db, reason: BackupReason, dir?: string): { file
   const target = path.join(backupDir, file);
   // VACUUM INTO 要求目标不存在；路径中的单引号需要转义（SQL 字面量）
   db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
+  // 伴生快照：把标注源真相与数据库锁在同一时间点。失败不阻塞主备份（数据库快照仍有效），
+  // 但要明确告警——这种备份恢复后知识点会从更晚的 JSONL 重建，恢复点对标注无效。
+  try {
+    writeKnowledgeSnapshot(backupDir, file);
+  } catch (e) {
+    console.error(`[backup] 知识点快照写入失败（数据库备份仍有效，但恢复点不含标注回滚）: ${(e as Error).message}`);
+  }
   pruneBackups(db, reason, dir);
   return { file, size: fs.statSync(target).size };
 }
@@ -88,6 +141,8 @@ export function pruneBackups(db: Db, reason: BackupReason, dir?: string): void {
   for (const f of doomed) {
     try {
       fs.unlinkSync(path.join(backupDir, f));
+      // 伴生快照必须同生共死，否则备份目录里会堆无主的 .knowledge.json
+      fs.rmSync(knowledgeSnapshotPath(backupDir, f), { force: true });
     } catch {
       // 清理失败不阻塞备份主流程
     }
@@ -141,6 +196,26 @@ export function applyPendingRestore(dbPath: string, dataDir?: string): string | 
     fs.copyFileSync(source, dbPath);
     for (const suffix of ['-wal', '-shm']) {
       fs.rmSync(dbPath + suffix, { force: true });
+    }
+    // 同步回滚标注源真相：否则下次启动 loadAnnotationsIntoDb 会用更新的 JSONL
+    // 把 problem_keypoints 整表重建回来，知识点上的「恢复」形同虚设。
+    const snapshot = knowledgeSnapshotPath(backupDir, file);
+    if (fs.existsSync(snapshot)) {
+      try {
+        const payload = JSON.parse(fs.readFileSync(snapshot, 'utf8')) as { file?: string; content?: string };
+        if (payload.file === 'annotations.jsonl' && typeof payload.content === 'string') {
+          const targetAnnotations = path.join(path.dirname(dbPath), ANNOTATIONS_REL);
+          fs.mkdirSync(path.dirname(targetAnnotations), { recursive: true });
+          fs.writeFileSync(targetAnnotations, payload.content, 'utf8');
+          console.log('[backup] 已同步回滚知识点源真相 knowledge/annotations.jsonl（与数据库同一时间点）');
+        }
+      } catch (e) {
+        console.error(
+          `[backup] 知识点快照回滚失败（数据库已回滚；标注将由现有 JSONL 重建）: ${(e as Error).message}`,
+        );
+      }
+    } else {
+      console.warn('[backup] 该备份不含知识点快照：数据库已回滚，但标注不会回退（会从现有 JSONL 重建）');
     }
     console.log(`[backup] 已恢复备份 ${file}，数据库回滚到该时间点`);
     return file;

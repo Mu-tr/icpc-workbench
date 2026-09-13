@@ -4,17 +4,24 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { AiProvider } from '../ai/provider.ts';
-import { canonicalTag, TAG_ALIAS_TO_CANONICAL, type PlatformId } from '../../../shared/src/index.ts';
+import { canonicalTag, coarseCategoryNames, TAG_ALIAS_TO_CANONICAL, type PlatformId } from '../../../shared/src/index.ts';
 import { getAdapter } from '../adapters/registry.ts';
 import { parseProblemListText } from '../problems/parseProblemList.ts';
+import { classifyTitle } from '../knowledge/ruleEngine.ts';
+import { nameOfCode } from '../knowledge/taxonomy.ts';
+import { getConfidenceThreshold } from '../knowledge/store.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
 import { buildPracticeSummary, renderSummaryForPrompt } from '../analysis/summary.ts';
 import { effectiveAbility } from '../today/ability.ts';
 import { renderTemplate } from '../plans/planService.ts';
 
-/** 分类体系：与掌握度地图同一套知识点归并（canonical tag）+ 兜底「其他」 */
+/**
+ * 分类体系：与掌握度地图同一套知识点归并（canonical tag = taxonomy 名）+ 粗粒度兜底。
+ * 注意：对象值即规范名（taxonomy 名），例如「二分查找」而非课程里的短名「二分」——
+ * 旧实现用别名映射表的**目标词**当目录，词表一改就会静默换一套分类，故改为直接取规范名。
+ */
 const TAXONOMY: string[] = [
-  ...new Set([...Object.values(TAG_ALIAS_TO_CANONICAL), '搜索', '模拟', '构造', '交互', '其他']),
+  ...new Set([...Object.values(TAG_ALIAS_TO_CANONICAL), ...coarseCategoryNames(), '其他']),
 ].sort();
 
 /** 从题库 tags 推断知识点分类：取第一个可归并的 tag 的规范名 */
@@ -30,40 +37,134 @@ function classifyByTags(tagsJson: string | null | undefined): string | null {
   return canonical ?? null;
 }
 
+interface ProblemLookup {
+  /** 解析后的平台/题号（镜像题回退到原生平台，知识点标注按此身份查询） */
+  platform: string;
+  problemKey: string;
+  tags: string | null;
+  title: string | null;
+  url: string | null;
+  difficulty: number | null;
+}
+
 /**
- * 按平台+题号在题库查题（取 tags 等分类依据）。
+ * 镜像题回退的规则说明（判定顺序见 candidateIdentities）。
  * 洛谷题单常含 CF / AtCoder 镜像题（key 形如 CF351E / at_agc018_c），这些题在洛谷库
  * 大多不存在，但同一道题以原生 key（351E / agc018_c）存于 codeforces / atcoder 库——
  * 按前缀回退到镜像源平台再查一次，否则规则分类永远查不到 tags 而全部落到「其他」。
+ *
+ * 分类口径（见 classifyItemsBatch）：已标注题直接用标注（最高置信）；未标注走 L1 标题
+ * 规则即时标注；仍无结果回退题库 tags 归并（老行为）。null 表示无法分类（保留现有分类）。
  */
-function lookupProblemTags(
-  db: Db,
-  platform: string,
-  problemKey: string,
-): { tags: string | null; title: string | null; url: string | null; difficulty: number | null } | undefined {
-  const row = db
-    .prepare('SELECT tags, title, url, difficulty FROM problems WHERE platform = ? AND problem_key = ?')
-    .get(platform, problemKey) as
-    | { tags: string | null; title: string | null; url: string | null; difficulty: number | null }
-    | undefined;
-  if (row) return row;
+
+/**
+ * 一题的候选题库身份（按序尝试）：自身 → 洛谷镜像题回退到原生平台。
+ * 与 lookupProblemTags 的判定顺序完全一致，供批量版本复用。
+ */
+function candidateIdentities(platform: string, problemKey: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [[platform, problemKey]];
   // 洛谷 CF 镜像（CF351E / CF958E2 → codeforces/351E / 958E2；后缀模式同 parseProblemList 的 CF_KEY_RE）
   if (platform === 'luogu' && /^CF\d{1,6}[A-Z][0-9]?$/.test(problemKey)) {
-    return db
-      .prepare('SELECT tags, title, url, difficulty FROM problems WHERE platform = ? AND problem_key = ?')
-      .get('codeforces', problemKey.slice(2)) as
-      | { tags: string | null; title: string | null; url: string | null; difficulty: number | null }
-      | undefined;
+    out.push(['codeforces', problemKey.slice(2)]);
   }
   // 洛谷 AtCoder 镜像（at_agc018_c / AT_agc018_c → atcoder/agc018_c）
   if (platform === 'luogu' && /^at_/i.test(problemKey)) {
-    return db
-      .prepare('SELECT tags, title, url, difficulty FROM problems WHERE platform = ? AND problem_key = ?')
-      .get('atcoder', problemKey.slice(3).toLowerCase()) as
-      | { tags: string | null; title: string | null; url: string | null; difficulty: number | null }
-      | undefined;
+    out.push(['atcoder', problemKey.slice(3).toLowerCase()]);
   }
-  return undefined;
+  return out;
+}
+
+/** 批量分组查询的 IN 占位符 */
+function placeholders(n: number): string {
+  return Array.from({ length: n }, () => '?').join(', ');
+}
+
+/**
+ * 批量版 lookupProblemTags + classifyByKnowledge。
+ *
+ * 原实现逐题查题库、再逐题查标注与分类，导入/重分类 N 题就是 2N 次往返（P1-3 N+1）。
+ * 这里把 ①题库信息 ②知识点标注 各压成**一次** IN 分组查询，再在内存里按原判定顺序
+ * 做镜像回退与分类，语义与单题版本逐字对齐。
+ */
+function classifyItemsBatch(
+  db: Db,
+  items: Array<{ platform: string; problemKey: string }>,
+): Array<{ lookup: ProblemLookup | undefined; category: string | null }> {
+  const empty = items.map(() => ({ lookup: undefined as ProblemLookup | undefined, category: null as string | null }));
+  if (items.length === 0) return empty;
+
+  const identities = items.map((it) => candidateIdentities(it.platform, it.problemKey));
+
+  // ① 题库信息：一次查询取回全部候选身份
+  const byIdentity = new Map<string, Omit<ProblemLookup, 'platform' | 'problemKey'>>();
+  const allPlatforms = [...new Set(identities.flat().map(([pf]) => pf))];
+  const allKeys = [...new Set(identities.flat().map(([, k]) => k))];
+  if (allPlatforms.length > 0 && allKeys.length > 0) {
+    const rows = db
+      .prepare(
+        `SELECT platform, problem_key, tags, title, url, difficulty FROM problems
+          WHERE platform IN (${placeholders(allPlatforms.length)})
+            AND problem_key IN (${placeholders(allKeys.length)})`,
+      )
+      .all(...allPlatforms, ...allKeys) as Array<{
+      platform: string;
+      problem_key: string;
+      tags: string | null;
+      title: string | null;
+      url: string | null;
+      difficulty: number | null;
+    }>;
+    for (const row of rows) {
+      byIdentity.set(`${row.platform}\u0000${row.problem_key}`, {
+        tags: row.tags,
+        title: row.title,
+        url: row.url,
+        difficulty: row.difficulty,
+      });
+    }
+  }
+
+  // ② 标注：一次查询取回全部候选身份的最高置信标注（与 ORDER BY confidence DESC LIMIT 1 等价）
+  const kpByKey = new Map<string, string>();
+  if (allPlatforms.length > 0 && allKeys.length > 0) {
+    const threshold = getConfidenceThreshold(db);
+    const kpRows = db
+      .prepare(
+        `SELECT platform, problem_key, name FROM (
+            SELECT platform, problem_key, name,
+                   ROW_NUMBER() OVER (PARTITION BY platform, problem_key ORDER BY confidence DESC) AS rn
+              FROM problem_keypoints
+             WHERE confidence >= ?
+               AND platform IN (${placeholders(allPlatforms.length)})
+               AND problem_key IN (${placeholders(allKeys.length)})
+          ) WHERE rn = 1`,
+      )
+      .all(threshold, ...allPlatforms, ...allKeys) as Array<{
+      platform: string;
+      problem_key: string;
+      name: string;
+    }>;
+    for (const row of kpRows) kpByKey.set(`${row.platform}\u0000${row.problem_key}`, row.name);
+  }
+
+  return items.map((_it, i) => {
+    let lookup: ProblemLookup | undefined;
+    for (const [pf, key] of identities[i]) {
+      const info = byIdentity.get(`${pf}\u0000${key}`);
+      if (info) {
+        lookup = { platform: pf, problemKey: key, ...info };
+        break;
+      }
+    }
+    if (!lookup) return { lookup, category: null };
+    const kp = kpByKey.get(`${lookup.platform}\u0000${lookup.problemKey}`);
+    if (kp !== undefined) return { lookup, category: kp };
+    if (lookup.title) {
+      const hits = classifyTitle(lookup.title);
+      if (hits.length > 0) return { lookup, category: nameOfCode(hits[0].code) };
+    }
+    return { lookup, category: classifyByTags(lookup.tags) };
+  });
 }
 
 /** 解析 AI 回复中的 JSON（围栏/前后解释文字/尾逗号容错，同 planService 思路） */
@@ -129,12 +230,17 @@ export function listsRoutes(
     try {
       db.exec('BEGIN');
       const listId = Number(ins.run(DEFAULT_USER_ID, title.trim(), typeof sourceUrl === 'string' && sourceUrl.trim() ? sourceUrl.trim() : null).lastInsertRowid);
+      // 题库信息与知识点分类一次性批量取回（原为逐题 2 次查询，题单大会明显卡顿）
+      const classified = classifyItemsBatch(
+        db,
+        parsed.map((it) => ({ platform: it.platform, problemKey: it.problemKey })),
+      );
       for (let pos = 0; pos < parsed.length; pos += 1) {
         const it = parsed[pos];
         // 题库信息回填：标题/难度/标签分类/链接兜底（含 CF/AtCoder 镜像题回退查询）
-        const p = lookupProblemTags(db, it.platform, it.problemKey);
+        const p = classified[pos].lookup;
         const finalUrl = it.url ?? p?.url ?? getAdapter(it.platform)?.problemUrl({ problemKey: it.problemKey }) ?? null;
-        const category = classifyByTags(p?.tags) ?? '未分类';
+        const category = classified[pos].category ?? '未分类';
         insItem.run(listId, it.platform, it.problemKey, it.title ?? p?.title ?? null, finalUrl, category, pos);
       }
       db.exec('COMMIT');
@@ -275,9 +381,14 @@ export function listsRoutes(
     const upd = db.prepare('UPDATE problem_list_items SET category = ? WHERE id = ?');
     let updated = 0;
     let unmatched = 0;
-    for (const it of items) {
-      const p = lookupProblemTags(db, it.platform, it.problem_key);
-      const category = classifyByTags(p?.tags);
+    // 批量取回题库 tags 后内存分类（原为逐题一次查询）
+    const lookups = classifyItemsBatch(
+      db,
+      items.map((it) => ({ platform: it.platform, problemKey: it.problem_key })),
+    );
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i];
+      const category = classifyByTags(lookups[i].lookup?.tags);
       if (category === null) {
         unmatched += 1; // 题库查不到/tags 归并不进目录：保留现有分类
         continue;
@@ -312,7 +423,7 @@ export function listsRoutes(
       { role: 'system', content: '你是算法竞赛教练，只输出严格 JSON，不加任何解释。' },
       {
         role: 'user',
-        content: `下面是题单「${list.title}」的题目列表。请给每道题归入一个知识点分类，分类只能从给定目录中选择（拿不准归"其他"）。\n\n分类目录：${TAXONOMY.join('、')}\n\n题目列表：\n${lines}\n\n只输出 JSON 数组，格式：[{"i": 0, "category": "二分"}, ...]，i 为题目的序号，每道题都必须出现一次。`,
+        content: `下面是题单「${list.title}」的题目列表。请给每道题归入一个知识点分类，分类只能从给定目录中选择（拿不准归"其他"）。\n\n分类目录：${TAXONOMY.join('、')}\n\n题目列表：\n${lines}\n\n只输出 JSON 数组，格式：[{"i": 0, "category": "${TAXONOMY[0]}"}, ...]，i 为题目的序号，每道题都必须出现一次。`,
       },
     ]);
     let arr: Array<{ i?: unknown; category?: unknown }>;

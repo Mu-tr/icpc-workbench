@@ -4,6 +4,8 @@ import type {
   Verdict,
 } from '../../../shared/src/index.ts';
 import type { PlatformAdapter } from './types.ts';
+import { asHttpClient, sleep, type HttpInit } from './http.ts';
+import { recordWait } from './pagination.ts';
 
 const API_BASE = 'https://codeforces.com/api';
 const PAGE_SIZE = 1000;
@@ -43,8 +45,6 @@ const VERDICT_MAP: Record<string, Verdict> = {
   COMPILATION_ERROR: 'CE',
 };
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 function splitKey(key: string): { contestId?: string; index: string } {
   const m = /^(\d+)(.+)$/.exec(key);
   return m ? { contestId: m[1], index: m[2] } : { index: key };
@@ -58,8 +58,9 @@ function splitKey(key: string): { contestId?: string; index: string } {
  * 下次同步通过 knownExternalIds 跳过已拉页继续向更旧补全（from 偏移天然可恢复，无需游标）。
  */
 export function createCodeforcesAdapter(
-  fetchFn: typeof fetch = fetch,
+  fetchFn: HttpInit = fetch,
 ): PlatformAdapter {
+  const http = asHttpClient(fetchFn);
   return {
     platform: 'codeforces',
     knownIdsFilter: true,
@@ -79,7 +80,11 @@ export function createCodeforcesAdapter(
       let rowCapped = false;
       for (let n = 0; n < budget; n += 1) {
         const url = `${API_BASE}/user.status?handle=${encodeURIComponent(handle)}&from=${from}&count=${PAGE_SIZE}`;
-        const res = await fetchFn(url, { signal: AbortSignal.timeout(15000) });
+        const res = await http.fetch(url, {}, {
+          timeoutMs: 15000,
+          // 退避等待计入本次同步的限速耗时（同步中心展示）
+          recordWait: (ms) => recordWait(opts, ms),
+        });
         if (!res.ok) {
           throw new Error(`Codeforces API HTTP ${res.status}`);
         }

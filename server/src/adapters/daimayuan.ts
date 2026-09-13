@@ -6,6 +6,7 @@ import type {
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
+import { asHttpClient, type HttpInit } from './http.ts';
 
 /**
  * 代码源（bs.daimayuan.top，基于 Hydro OJ 搭建）适配器。
@@ -106,7 +107,8 @@ export function parseDaimayuanJson(body: HydroRecordResponse): HydroRow[] {
   }));
 }
 
-export function createDaimayuanAdapter(fetchFn: typeof fetch = fetch): PlatformAdapter {
+export function createDaimayuanAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
+  const http = asHttpClient(fetchFn);
   return {
     platform: 'daimayuan',
     knownIdsFilter: true,
@@ -128,15 +130,14 @@ export function createDaimayuanAdapter(fetchFn: typeof fetch = fetch): PlatformA
         perSyncMax: PER_SYNC_MAX_PAGES,
         fetchPage: async (page) => {
           const url = `${BASE}/record?uidOrName=${encodeURIComponent(handle)}&page=${page}`;
-          const res = await fetchFn(url, {
+          const res = await http.fetch(url, {
             headers: {
               Cookie: cookie,
               'User-Agent': UA,
               Accept: 'application/json', // 走 Hydro 原生 JSON 内容协商，绕过 HTML 模板解析
             },
             redirect: 'manual', // 登录失效时仍可能有 302，不跟随
-            signal: AbortSignal.timeout(20000),
-          });
+          }, { timeoutMs: 20000 });
           // 302/403 = 登录态失效（非 JSON 模式的兜底路径）
           if (res.status === 302 || res.status === 403) {
             throw new ManualImportRequiredError(
@@ -200,15 +201,14 @@ export function createDaimayuanAdapter(fetchFn: typeof fetch = fetch): PlatformA
         return { ok: false, message: '请先在上方填写用户名并保存，再检测 Cookie（检测需按账号访问评测记录页）' };
       }
       try {
-        const res = await fetchFn(`${BASE}/record?uidOrName=${encodeURIComponent(handle)}`, {
+        const res = await http.fetch(`${BASE}/record?uidOrName=${encodeURIComponent(handle)}`, {
           headers: {
             Cookie: cookie,
             'User-Agent': UA,
             Accept: 'application/json',
           },
           redirect: 'manual',
-          signal: AbortSignal.timeout(15000),
-        });
+        }, { timeoutMs: 15000 });
         if (res.status === 302 || res.status === 403) {
           return { ok: false, message: 'Cookie 无效或已过期：请重新登录 bs.daimayuan.top 并复制 sid' };
         }

@@ -15,6 +15,7 @@ import {
   Col,
   Select,
   Segmented,
+  Slider,
   Space,
   Spin,
   Switch,
@@ -32,17 +33,18 @@ import PageHeader from '../components/PageHeader'
 import { saveUrlAsFile } from '../download'
 import PlatformTag from '../components/PlatformTag'
 import { get, post } from '../api'
-import { assembleCookie as assembleCookieHeader, type CookieFieldDef } from '../cookies'
+import { assembleCookie as assembleCookieHeader, extractCookieValue, type CookieFieldDef } from '../cookies'
 import { openExternal } from '../externalLinks'
 import { useTheme, type ThemePreference } from '../themeContext'
+import type { KnowledgeCompareReport, KnowledgeCoverage } from '../../../shared/src/index.ts'
 import type { ContestReminderConfig, ReminderConfig } from '../types'
 
 interface SettingsData {
-  ai: { enabled: boolean; baseURL: string; apiKey: string; model: string; timeoutMs?: number; maxTokens?: number; contextWindow?: number; searchEngine?: 'tavily' | 'brave'; searchApiKey?: string; hasApiKey?: boolean; hasSearchApiKey?: boolean }
+  ai: { enabled: boolean; baseURL: string; apiKey: string; model: string; timeoutMs?: number; maxTokens?: number; contextWindow?: number; searchEngine?: 'tavily' | 'brave'; searchApiKey?: string; hasApiKey?: boolean; hasSearchApiKey?: boolean; apiKeyMasked?: string; searchApiKeyMasked?: string }
   accounts: Array<{ platform: PlatformId; handle: string; last_sync_at: string | null; enabled: number }>
   adapterEnabled: Record<string, boolean>
   platforms: typeof PLATFORMS
-  cookies: Record<string, { configured: boolean }>
+  cookies: Record<string, { configured: boolean; masked?: string }>
   reminder: ReminderConfig
   contestReminder: ContestReminderConfig
   sync: { maxSubmissions: number }
@@ -361,7 +363,13 @@ export default function Settings() {
               <Input placeholder="https://api.deepseek.com/v1" />
             </Form.Item>
             <Form.Item name="apiKey" label="API Key">
-              <Input.Password placeholder="留空则不填（可用环境变量 AI_API_KEY）" />
+              <Input.Password
+                placeholder={
+                  data?.ai.hasApiKey
+                    ? `已配置 ${data.ai.apiKeyMasked || '••••••••'} · 留空保持不变，粘贴新值可覆盖`
+                    : '留空则不填（可用环境变量 AI_API_KEY）'
+                }
+              />
             </Form.Item>
             <Form.Item name="model" label="模型">
               <AutoComplete
@@ -400,7 +408,13 @@ export default function Settings() {
               />
             </Form.Item>
             <Form.Item name="searchApiKey" label="搜索 API Key" tooltip="Tavily：api.tavily.com 注册获取；Brave：api.search.brave.com 注册获取。留空则不启用联网搜索。">
-              <Input.Password placeholder="留空则不启用联网搜索" />
+              <Input.Password
+                placeholder={
+                  data?.ai.hasSearchApiKey
+                    ? `已配置 ${data.ai.searchApiKeyMasked || '••••••••'} · 留空保持不变，粘贴新值可覆盖`
+                    : '留空则不启用联网搜索'
+                }
+              />
             </Form.Item>
             <Space wrap>
               <Button type="primary" onClick={saveAi}>
@@ -498,14 +512,21 @@ export default function Settings() {
                     </Space>
                     {p.sync === 'cookie' && (
                       <div style={{ marginTop: 10 }}>
-                        {/* Cookie 原文不回传前端，输入框恒为空：用此标记 + placeholder 指示配置状态 */}
+                        {/* Cookie 原文不回传前端，输入框恒为空；服务端只回传逐对打码版（masked），
+                            按 cookieName 拆回各框，placeholder 显示「已配置 + 遮蔽值」供确认 */}
                         {(() => {
                           const configured = data?.cookies[p.id]?.configured === true
+                          const maskedHeader = configured ? (data?.cookies[p.id]?.masked ?? '') : ''
                           return (
                             <>
                               <Space wrap size={8}>
                                 {fields.map((f) => {
-                                  const ph = configured ? `已配置 · 粘贴新值可覆盖` : f.placeholder
+                                  const maskedVal = extractCookieValue(maskedHeader, f.cookieName)
+                                  const ph = configured
+                                    ? maskedVal
+                                      ? `已配置 ${maskedVal} · 粘贴新值可覆盖`
+                                      : `已配置 · 粘贴新值可覆盖`
+                                    : f.placeholder
                                   const input = f.password ? (
                                     <Input.Password
                                       placeholder={ph}
@@ -677,6 +698,10 @@ export default function Settings() {
         </Card>
       </Col>
 
+      <Col span={24}>
+        <KnowledgePipelineCard />
+      </Col>
+
       <ImportPlanModal open={importOpen} onClose={() => setImportOpen(false)} />
       <Col span={24}>
         <BackupCard />
@@ -782,6 +807,127 @@ interface BackupItem {
   reason: string
   createdAtMs: number
   size: number
+  /** 是否带知识点标注快照；false（升级前的旧备份）表示恢复后标注不会回退 */
+  knowledge?: boolean
+}
+
+/** 知识点管线设置卡：统计置信度阈值 + 切换期双口径对比（tag vs 知识点弱项）。 */
+function KnowledgePipelineCard() {
+  const { message } = AntdApp.useApp()
+  const [threshold, setThreshold] = useState(0.6)
+  const [saving, setSaving] = useState(false)
+  const [compareOpen, setCompareOpen] = useState(false)
+  const [compare, setCompare] = useState<KnowledgeCompareReport | null>(null)
+  const [compareLoading, setCompareLoading] = useState(false)
+
+  useEffect(() => {
+    get<KnowledgeCoverage>('/api/knowledge/coverage')
+      .then((c) => setThreshold(c.threshold))
+      .catch(() => { /* 服务端未升级时忽略 */ })
+  }, [])
+
+  const saveThreshold = async (v: number) => {
+    setSaving(true)
+    try {
+      const r = await post<{ threshold: number }>('/api/knowledge/threshold', { value: v })
+      setThreshold(r.threshold)
+      message.success(`阈值已保存：${r.threshold}（弱项/掌握度/题单统计口径即时生效）`)
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openCompare = async () => {
+    setCompareOpen(true)
+    setCompareLoading(true)
+    try {
+      setCompare(await get<KnowledgeCompareReport>('/api/knowledge/compare'))
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setCompareLoading(false)
+    }
+  }
+
+  const renderCaliber = (items: KnowledgeCompareReport['knowledgeCaliber']) => (
+    <List
+      size="small"
+      dataSource={items}
+      locale={{ emptyText: '暂无数据（提交数不足）' }}
+      renderItem={(it) => (
+        <List.Item>
+          <span style={{ flex: 1 }}>{it.tag}</span>
+          <span className="mono" style={{ color: '#8993a2' }}>
+            {it.attempts} 提交 · AC {(it.acRate * 100).toFixed(0)}% · 差 {(it.gap * 100).toFixed(0)}%
+          </span>
+        </List.Item>
+      )}
+    />
+  )
+
+  return (
+    <Card title={<span className="settings-section-title"><DatabaseOutlined />知识点管线</span>} size="small">
+      <div style={{ maxWidth: 480 }}>
+        <div style={{ marginBottom: 4 }}>
+          统计置信度阈值：<strong>{threshold.toFixed(2)}</strong>
+        </div>
+        <Slider
+          min={0}
+          max={1}
+          step={0.05}
+          marks={{ 0: '0', 0.5: '0.5', 1: '1' }}
+          value={threshold}
+          disabled={saving}
+          onChange={(v) => setThreshold(v)}
+          onChangeComplete={(v) => void saveThreshold(v)}
+        />
+      </div>
+      <Space wrap style={{ marginTop: 8 }}>
+        <Button onClick={() => void openCompare()}>双口径对比（tag vs 知识点）</Button>
+        <span className="muted-note">
+          阈值过滤低置信标注，只影响统计口径，不删标注数据；双口径对比用于切换期观察两种统计的弱项差异。
+          题库页「知识点管线」按钮可跑批跑/人工校正。
+        </span>
+      </Space>
+
+      <Modal
+        title="双口径对比：题源 tag 口径 vs 自建知识点口径（弱项 Top）"
+        open={compareOpen}
+        onCancel={() => setCompareOpen(false)}
+        footer={null}
+        width={880}
+      >
+        <Spin spinning={compareLoading}>
+          {compare && (
+            <>
+              <Row gutter={24}>
+                <Col span={12}>
+                  <div className="settings-section-title" style={{ marginBottom: 8 }}>题源 tag 口径</div>
+                  {renderCaliber(compare.tagCaliber)}
+                </Col>
+                <Col span={12}>
+                  <div className="settings-section-title" style={{ marginBottom: 8 }}>
+                    知识点口径（阈值 {compare.threshold}）
+                  </div>
+                  {renderCaliber(compare.knowledgeCaliber)}
+                </Col>
+              </Row>
+              {compare.uncovered && (
+                <Alert
+                  style={{ marginTop: 12 }}
+                  type="info"
+                  showIcon
+                  message={`未覆盖桶：${compare.uncovered.attempts} 次提交所属题目无达标知识点标注（统计端回退题源 tag），AC 率 ${(compare.uncovered.acRate * 100).toFixed(1)}%。跑管线可提高覆盖率。`}
+                />
+              )}
+            </>
+          )}
+        </Spin>
+      </Modal>
+    </Card>
+  )
 }
 
 const BACKUP_REASON_LABEL: Record<string, string> = {
@@ -835,6 +981,13 @@ function BackupCard() {
         <div style={{ fontSize: 13 }}>
           <p>数据库将回滚到 {new Date(b.createdAtMs).toLocaleString()}（{BACKUP_REASON_LABEL[b.reason] ?? b.reason}，{formatBytes(b.size)}）。</p>
           <p style={{ color: '#d4380d' }}>备份之后产生的同步、打卡、复习等数据会丢失。恢复在重启应用后生效。</p>
+          {b.knowledge === false ? (
+            <p style={{ color: '#d4380d' }}>
+              该恢复点不含知识点标注快照（升级前的旧备份）：数据库会回滚，但知识点标注不会被回退。
+            </p>
+          ) : (
+            <p style={{ color: '#8993a2' }}>数据库与知识点标注（annotations.jsonl）会一起回滚到该时间点。</p>
+          )}
         </div>
       ),
       okText: '登记恢复（重启生效）',
@@ -876,6 +1029,7 @@ function BackupCard() {
           >
             <Space size={8} wrap>
               <Tag>{BACKUP_REASON_LABEL[b.reason] ?? b.reason}</Tag>
+              {b.knowledge === false && <Tag color="warning">不含知识点快照</Tag>}
               <span style={{ fontSize: 12 }}>{new Date(b.createdAtMs).toLocaleString()}</span>
               <span style={{ color: '#8993a2', fontSize: 12 }}>{formatBytes(b.size)}</span>
             </Space>

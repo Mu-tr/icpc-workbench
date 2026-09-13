@@ -471,3 +471,43 @@ test('chat: SSE includes reasoning event when provider reports reasoning', async
     db.close();
   }
 });
+
+test('assistant: chat injects optional list context, nonexistent list falls back to note', async () => {
+  await withServer(
+    async ({ db, aiBase, providerChats }) => {
+      db.prepare(
+        "INSERT INTO problem_lists (user_id, title, source_url) VALUES (1, '二分专题题单', 'https://example.com/list')",
+      ).run();
+      const listId = (db.prepare('SELECT id FROM problem_lists').get() as { id: number }).id;
+      const insItem = db.prepare(
+        "INSERT INTO problem_list_items (list_id, platform, problem_key, title, category, position) VALUES (?, 'codeforces', ?, ?, ?, ?)",
+      );
+      insItem.run(listId, '1900C', 'C. 排序+二分', '二分', 0);
+      insItem.run(listId, '1900D', 'D. 二分答案', '二分答案', 1);
+
+      const res = await fetch(`${aiBase}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: '题单里先刷哪道？' }], listId }),
+      });
+      assert.equal(res.status, 200);
+      await readSseReply(res);
+      const system = providerChats[0]!.system;
+      assert.match(system, /关联的题单/);
+      assert.match(system, /二分专题题单/);
+      assert.match(system, /1900C/);
+      assert.match(system, /共 2 题/);
+
+      // 不存在的题单 → 回退为未关联提示，不阻断对话
+      const bad = await fetch(`${aiBase}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], listId: 999 }),
+      });
+      assert.equal(bad.status, 200);
+      await readSseReply(bad);
+      assert.match(providerChats[1]!.system, /关联的题单不存在/);
+    },
+    { enabled: true, reply: 'ok' },
+  );
+});

@@ -319,14 +319,16 @@ export interface UserLevel {
 /** 计算用户 AC 难度分位（CF rating 统一标尺）；样本不足时返回 null。 */
 export function computeUserLevel(db: Db, userId: number, minSample = 10): UserLevel {
   // 注意按"题"去重而非难度值去重：同一难度下多道 AC 题各计一次
+  // JOIN 聚合派生表而非逐行 EXISTS：原写法对每道题各跑一次 submissions 子查询，
+  // 题库 2 万题时即 2 万次子查询（P1-1）
   const diffs = (
     db
       .prepare(
         `SELECT p.difficulty AS difficulty
            FROM problems p
-          WHERE p.difficulty IS NOT NULL
-            AND EXISTS (SELECT 1 FROM submissions s
-                         WHERE s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC')`,
+           JOIN (SELECT DISTINCT problem_id FROM submissions
+                  WHERE user_id = ? AND verdict = 'AC') ac ON ac.problem_id = p.id
+          WHERE p.difficulty IS NOT NULL`,
       )
       .all(userId) as Array<{ difficulty: number }>
   )
@@ -357,34 +359,32 @@ export function recommendProblems(
 ): RecommendProblem[] {
   const limit = opts.limit ?? 80;
   const level = opts.level === undefined ? computeUserLevel(db, DEFAULT_USER_ID) : opts.level;
+  const [lo, hi] = level?.suggestedRange ?? [null, null];
 
+  // 难度区间与「未 AC」全部下推 SQL：候选集从全表 2 万题缩到实际可用范围，
+  // 避免把整库取回内存后再 filter（P1-1）
   const all = db
     .prepare(
-      `SELECT p.platform, p.problem_key, p.title, p.difficulty, p.url, p.tags,
-              EXISTS (SELECT 1 FROM submissions s
-                       WHERE s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC') AS aced
-       FROM problems p`,
+      `SELECT p.platform, p.problem_key, p.title, p.difficulty, p.url, p.tags
+         FROM problems p
+         LEFT JOIN submissions s
+           ON s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC'
+        WHERE s.id IS NULL
+          AND p.url IS NOT NULL
+          AND (? IS NULL OR p.difficulty >= ?)
+          AND (? IS NULL OR p.difficulty <= ?)`,
     )
-    .all(DEFAULT_USER_ID) as Array<{
+    .all(DEFAULT_USER_ID, lo, lo, hi, hi) as Array<{
     platform: PlatformId;
     problem_key: string;
     title: string;
     difficulty: number | null;
     url: string | null;
     tags: string;
-    aced: number;
   }>;
 
   const weakTags = new Set(profile.items.map((i) => i.tag));
-  const inRange = (d: number | null): boolean => {
-    if (!level?.suggestedRange) return true; // 样本不足：不过滤难度
-    const [lo, hi] = level.suggestedRange;
-    return d !== null && d >= lo && d <= hi;
-  };
   return all
-    .filter((p) => !p.aced)
-    .filter((p) => p.url !== null)
-    .filter((p) => inRange(p.difficulty))
     .map((p) => {
       let tags: string[] = [];
       try {
@@ -431,16 +431,21 @@ export function recommendProblemsByWeakTag(
   const minNew = opts.minNewProblems ?? 0;
   const level = opts.level === undefined ? computeUserLevel(db, DEFAULT_USER_ID) : opts.level;
 
+  // 单次 JOIN 聚合取回 AC 状态与最近 AC 时间：原实现对每道题各跑 2 次子查询
+  // （EXISTS + MAX），题库 2 万题即 4 万次子查询（P1-1）。这里 LEFT JOIN 后聚合一次。
+  // 注意 accepted_at 对应 is_ac，与 EXISTS/MAX 的判定集合一致（同一 user_id + verdict='AC'）。
   const all = db
     .prepare(
       `SELECT p.platform, p.problem_key, p.title, p.difficulty, p.url, p.tags,
-              EXISTS (SELECT 1 FROM submissions s
-                       WHERE s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC') AS aced,
-              (SELECT MAX(s.submitted_at) FROM submissions s
-                WHERE s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC') AS last_ac_at
-       FROM problems p`,
+              MAX(CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END) AS aced,
+              MAX(s.submitted_at) AS last_ac_at
+         FROM problems p
+         LEFT JOIN submissions s
+           ON s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC'
+        WHERE p.url IS NOT NULL
+        GROUP BY p.id`,
     )
-    .all(DEFAULT_USER_ID, DEFAULT_USER_ID) as Array<{
+    .all(DEFAULT_USER_ID) as Array<{
     platform: PlatformId;
     problem_key: string;
     title: string;

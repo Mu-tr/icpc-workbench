@@ -50,11 +50,12 @@ icpc-workbench/
 │   ├── adapters/    # 平台适配器（CF/AtCoder 自动；洛谷/牛客/代码源/LeetCode/计蒜客受限）+ 增量同步
 │   ├── analysis/    # 聚合统计 / 弱项画像 / 周趋势
 │   ├── ai/          # OpenAI 兼容 provider + plan-prompt.md / assistant-prompt.md 提示词模板 + function calling 工具注册（fetch-url / pdf-parse / 联网搜索）+ 文档转换器（Word/Excel/PPT/HTML/CSV/JSON/XML/EPub → Markdown）
-│   ├── contests/    # 四平台赛事聚合（CF/AtCoder/洛谷/牛客，单源失败降级）
+│   ├── contests/    # 五平台赛事聚合（CF/AtCoder/洛谷/牛客/计蒜客，单源失败降级）
 │   ├── plans/       # 计划生成（AI 优先，失败/未配置降级模板）+ 入库
 │   ├── import/      # 手动导入（JSON/CSV/表单）+ 事务入库
+│   ├── knowledge/   # 自建知识点管线（L1 标题规则 + L2 AI 标注 + JSONL 源真相 / SQLite 索引）
 │   ├── updater.ts   # 一键自更新（下载/SHA256 校验/原位替换）
-│   └── routes/      # REST API（stats/problems/plans/ai/lists/reviews/today/templates/contests/checkins/settings/export/sync/import/update）
+│   └── routes/      # REST API（stats/problems/plans/ai/lists/reviews/today/templates/contests/checkins/settings/export/sync/import/update/knowledge/backups）
 ├── client/          # React + Vite + Ant Design（数据概览/今日训练/AI助手/模板库/题单整理/训练计划/复习库/题目管理/掌握度地图/日历打卡/赛事中心/设置）
 ├── desktop/         # Tauri 桌面壳（app：主程序原生窗口 + Node 服务 sidecar）
 └── shared/          # 跨端共享类型与平台元信息
@@ -216,7 +217,7 @@ PATCH /api/templates/:id/note     # 学习笔记（body: { note }）
 GET  /api/reviews                 # 复习队列 | POST /api/reviews 新建复评
 GET  /api/reviews/due-count       # 到期复习数量
 POST /api/reviews/:id/feedback    # 复习反馈（记住/遗忘 → 调度下次复习）
-GET  /api/contests                # 四平台赛事聚合（?type=upcoming|finished&platform=&limit=）
+GET  /api/contests                # 五平台赛事聚合（CF/AtCoder/洛谷/牛客/计蒜客；?type=upcoming|finished&platform=&limit=）
 GET  /api/plans | POST /api/plans/generate | POST /api/plans/import | GET /api/plans/:id | DELETE /api/plans/:id
                                    # generate body: { days?, startDate?, dailyTasks?, requirements? } ← requirements 为用户手写训练要求，注入 AI 提示词优先满足
                                    # import body: { raw, startDate?, days? } ← 任意 AI 返回的计划 JSON 文本

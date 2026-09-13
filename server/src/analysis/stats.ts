@@ -2,7 +2,7 @@ import type { PlatformId } from '../../../shared/src/index.ts';
 import { PLATFORMS, canonicalTag } from '../../../shared/src/index.ts';
 import type { Db } from '../db/index.ts';
 import { filterNoiseTags } from './tags.ts';
-import { TOPIC_TAGS_SQL } from '../topics/pipeline.ts';
+import { knowledgeTagsSql } from '../knowledge/store.ts';
 
 export function bucketForDifficulty(difficulty: number | null | undefined): string {
   if (difficulty === null || difficulty === undefined || !Number.isFinite(difficulty)) {
@@ -58,15 +58,18 @@ export interface SubmissionRow {
   tags: string;
 }
 
-/** 拉取用户提交（join problems），供统计/弱项/趋势共用。 */
+/** 拉取用户提交（join problems），供统计/弱项/趋势共用。
+ *  tags 列默认走知识点管线读取路径（problem_keypoints → 旧 problem_topics → 题源 tags）；
+ *  tagsSql 可覆盖（双口径对比时传 'p.tags AS tags' 取 tag 口径）。 */
 export function fetchRows(
   db: Db,
   userId: number,
   filter: StatsFilter = {},
+  tagsSql?: string,
 ): SubmissionRow[] {
   let sql = `
     SELECT s.platform, s.verdict, s.submitted_at, p.problem_key, p.difficulty,
-           ${TOPIC_TAGS_SQL}
+           ${tagsSql ?? knowledgeTagsSql(db)}
     FROM submissions s JOIN problems p ON s.problem_id = p.id
     WHERE s.user_id = ?
   `;

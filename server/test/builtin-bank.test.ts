@@ -165,8 +165,8 @@ test('seedBuiltinBank: 版本未变直接跳过（不覆盖用户改动）', () 
 test('seedBuiltinBank: 版本升级重新 upsert，保留用户已标难度', () => {
   setBuiltinBankJson(BANK_V1);
   seedBuiltinBank(db);
-  // 用户手动把 1001A 难度改为 2100（模拟人工校准）
-  db.prepare("UPDATE problems SET difficulty = 2100 WHERE problem_key = '1001A'").run();
+  // 用户手动把 1001A 难度改为 2100（模拟人工校准：难度值与来源一起标为 manual）
+  db.prepare("UPDATE problems SET difficulty = 2100, difficulty_source = 'manual' WHERE problem_key = '1001A'").run();
   setBuiltinBankJson(BANK_V2);
   seedBuiltinBank(db);
   const row = db.prepare("SELECT title, difficulty, tags FROM problems WHERE problem_key = '1001A'").get() as {
@@ -175,8 +175,8 @@ test('seedBuiltinBank: 版本升级重新 upsert，保留用户已标难度', ()
     tags: string;
   };
   assert.equal(row.title, '内置题A（新版标题）'); // 新版本标题覆盖
-  assert.equal(row.difficulty, 2100); // 用户难度保留
-  assert.deepEqual(JSON.parse(row.tags), ['dp', 'math']); // 非空标签更新
+  assert.equal(row.difficulty, 2100); // 用户难度保留（manual(4) > bank(1)）
+  assert.deepEqual(JSON.parse(row.tags), ['动态规划', '数学']); // 写入即净化：dp/math → 规范名
   const v = db.prepare('SELECT value FROM settings WHERE key = ?').get(BUILTIN_BANK_VERSION_KEY) as {
     value: string;
   };

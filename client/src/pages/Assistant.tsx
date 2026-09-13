@@ -84,6 +84,7 @@ interface ChatSession {
   title: string
   messages: ChatMsg[]
   planId: number | undefined
+  listId: number | undefined
   createdAt: number
   updatedAt: number
   pinned: boolean
@@ -118,6 +119,7 @@ function loadFromStorage(): ChatSession[] {
         title: typeof s.title === 'string' ? s.title : '新会话',
         messages: s.messages,
         planId: typeof s.planId === 'number' ? s.planId : undefined,
+        listId: typeof s.listId === 'number' ? s.listId : undefined,
         createdAt: s.createdAt,
         updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : s.createdAt,
         pinned: !!s.pinned,
@@ -142,13 +144,14 @@ function newSessionId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-function createSession(planId?: number): ChatSession {
+function createSession(planId?: number, listId?: number): ChatSession {
   const now = Date.now()
   return {
     id: newSessionId(),
     title: '新会话',
     messages: [],
     planId,
+    listId,
     createdAt: now,
     updatedAt: now,
     pinned: false,
@@ -247,6 +250,13 @@ function updateActiveSessionPlanId(planId: number | undefined): void {
   }))
 }
 
+function updateActiveSessionListId(listId: number | undefined): void {
+  setChatState((prev) => ({
+    ...prev,
+    sessions: prev.sessions.map((s) => (s.id === prev.activeId ? { ...s, listId } : s)),
+  }))
+}
+
 /** 更新当前会话的消息列表（async 回调安全：直接写 store，不依赖组件挂载） */
 function patchActiveSessionMessages(
   sessionId: string,
@@ -290,9 +300,12 @@ export default function Assistant() {
   const activeSession = sessions.find((s) => s.id === activeId)
   const messages = activeSession?.messages ?? []
   const planId = activeSession?.planId
+  const listId = activeSession?.listId
   const sending = sendingIds.has(activeId)
 
   const [plans, setPlans] = useState<PlanListItem[]>([])
+  /** 题单列表（关联上下文下拉用，只要 id/标题/题数） */
+  const [problemLists, setProblemLists] = useState<Array<{ id: number; title: string; item_count: number }>>([])
   const [ability, setAbility] = useState<AbilityInfo | null>(null)
   const [abilityError, setAbilityError] = useState(false)
   const [needConfig, setNeedConfig] = useState(false)
@@ -572,6 +585,23 @@ export default function Assistant() {
         })
       })
       .catch(() => {})
+    get<Array<{ id: number; title: string; item_count: number }>>('/api/lists')
+      .then((lists) => {
+        setProblemLists(lists)
+        setChatState((prev) => {
+          const active = prev.sessions.find((s) => s.id === prev.activeId)
+          if (active?.listId !== undefined && !lists.some((l) => l.id === active.listId)) {
+            return {
+              ...prev,
+              sessions: prev.sessions.map((s) =>
+                s.id === prev.activeId ? { ...s, listId: undefined } : s,
+              ),
+            }
+          }
+          return prev
+        })
+      })
+      .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -613,6 +643,7 @@ export default function Assistant() {
     }
     const nextMessages: ChatMsg[] = [...session.messages, userMsg]
     const sendPlanId = session.planId
+    const sendListId = session.listId
 
     // 写入用户消息 + 进入 sending 态（标题取首条消息前 30 字）
     setChatState((prev) => ({
@@ -668,6 +699,7 @@ export default function Assistant() {
               : {}),
           })),
           ...(sendPlanId !== undefined ? { planId: sendPlanId } : {}),
+          ...(sendListId !== undefined ? { listId: sendListId } : {}),
         },
         (delta) => {
           // 追加到最后一条 assistant 消息（用户可能已切到其他会话，但写入仍指向原会话）
@@ -1204,6 +1236,21 @@ export default function Assistant() {
             <p style={{ fontSize: 12, color: '#8993a2', margin: '8px 0 0' }}>
               关联后可让 AI 直接修改该计划（应用前会向你确认）。
             </p>
+            <Select
+              style={{ width: '100%', marginTop: 8 }}
+              placeholder="关联题单整理（可选）"
+              value={listId}
+              allowClear
+              onClear={() => updateActiveSessionListId(undefined)}
+              onChange={(v) => updateActiveSessionListId(v)}
+              options={problemLists.map((l) => ({
+                value: l.id,
+                label: `${l.title}（${l.item_count} 题）`,
+              }))}
+            />
+            <p style={{ fontSize: 12, color: '#8993a2', margin: '8px 0 0' }}>
+              关联后 AI 可基于题单内容分析分类、推荐优先刷哪些题。
+            </p>
           </Card>
 
           {/* 估算能力值 */}
@@ -1278,6 +1325,7 @@ export default function Assistant() {
                 「这段代码为什么 TLE：粘贴你的代码」<br />
                 「根据我的刷题情况帮我重新估算能力值」<br />
                 「把这段思路沉淀成模板记到模板库」{planId !== undefined ? '「把计划里下周改成图论专题」' : ''}
+                {listId !== undefined ? '「题单里哪道题最值得先做？」' : ''}
               </div>
             )}
             {messages.map((m, i) => {

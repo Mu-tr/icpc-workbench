@@ -16,6 +16,8 @@ import { CURRICULUM } from '../templates/curriculum.ts';
 import type { Db } from '../db/index.ts';
 import { fetchRows, rate, round2, safeTags } from './stats.ts';
 import { filterNoiseTags } from './tags.ts';
+import { allPoints } from '../knowledge/taxonomy.ts';
+import { getConfidenceThreshold } from '../knowledge/store.ts';
 
 const RECENT_WINDOW_DAYS = 56;
 
@@ -79,11 +81,21 @@ export function templatesForTag(
   return links;
 }
 
+/**
+ * 掌握度地图（知识点口径）：有达标知识点标注的提交按 taxonomy code 聚合、
+ * templateIds 直达课程（比 tag 更准）；无标注的提交回退净化 tag 聚合（未覆盖桶），
+ * 与同名 code 合并，避免切换期同一知识点裂成两个点。
+ */
 export function computeMastery(db: Db, userId: number, opts: MasteryOptions = {}): MasteryReport {
   const minSolved = Math.max(0, opts.minSolved ?? 0);
-  const rows = fetchRows(db, userId);
-  const totalAc = rows.filter((r) => r.verdict === 'AC').length;
-  const avgAcRate = rate(rows.length, totalAc);
+  const threshold = getConfidenceThreshold(db);
+  const statusMap = loadTemplateStatuses(db, userId);
+  const recentCutoff = new Date(Date.now() - RECENT_WINDOW_DAYS * 86_400_000).toISOString();
+
+  const totals = db
+    .prepare("SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN verdict = 'AC' THEN 1 ELSE 0 END), 0) AS ac FROM submissions WHERE user_id = ?")
+    .get(userId) as { n: number; ac: number };
+  const avgAcRate = rate(totals.n, totals.ac);
 
   interface Acc {
     attempts: number;
@@ -91,46 +103,73 @@ export function computeMastery(db: Db, userId: number, opts: MasteryOptions = {}
     solved: Set<string>;
     recentSolved: Set<string>;
   }
-  const byTag = new Map<string, Acc>();
-  const recentCutoff = new Date(Date.now() - RECENT_WINDOW_DAYS * 86_400_000).toISOString();
+  const bumpAcc = (map: Map<string, Acc>, key: string, isAc: boolean, platform: string, problemKey: string, submittedAt: string): void => {
+    let acc = map.get(key);
+    if (!acc) {
+      acc = { attempts: 0, ac: 0, solved: new Set(), recentSolved: new Set() };
+      map.set(key, acc);
+    }
+    acc.attempts += 1;
+    if (isAc) {
+      acc.ac += 1;
+      acc.solved.add(`${platform}:${problemKey}`);
+      if (submittedAt >= recentCutoff) acc.recentSolved.add(`${platform}:${problemKey}`);
+    }
+  };
 
-  for (const r of rows) {
+  // 1) 知识点口径：problem_keypoints 达标标注（一题多 code 各自计入）
+  const byCode = new Map<string, Acc>();
+  const codeRows = db
+    .prepare(
+      `SELECT s.platform, s.verdict, s.submitted_at, p.problem_key, pk.code
+       FROM submissions s
+       JOIN problems p ON s.problem_id = p.id
+       JOIN problem_keypoints pk ON pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ?
+       WHERE s.user_id = ?`,
+    )
+    .all(threshold, userId) as unknown as Array<{
+    platform: string;
+    verdict: string;
+    submitted_at: string;
+    problem_key: string;
+    code: string;
+  }>;
+  for (const r of codeRows) {
+    bumpAcc(byCode, r.code, r.verdict === 'AC', r.platform, r.problem_key, r.submitted_at);
+  }
+
+  // 2) 未覆盖回退：无达标标注的提交按净化 tag 聚合；与 taxonomy 同名的并入对应 code
+  const nameToCode = new Map(allPoints().map((p) => [p.name, p.code]));
+  const fallbackSql =
+    `CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ${threshold}) ` +
+    `THEN '[]' ELSE p.tags END AS tags`;
+  const fallbackRows = fetchRows(db, userId, {}, fallbackSql);
+  const byTag = new Map<string, Acc>();
+  for (const r of fallbackRows) {
     const isAc = r.verdict === 'AC';
-    for (const rawTag of filterNoiseTags(safeTags(r.tags))) {
-      // CF 等平台的英文标签归并到课程中文知识点（binary search → 二分），避免同一知识点拆成两个点
-      const tag = canonicalTag(rawTag);
-      let acc = byTag.get(tag);
-      if (!acc) {
-        acc = { attempts: 0, ac: 0, solved: new Set(), recentSolved: new Set() };
-        byTag.set(tag, acc);
-      }
-      acc.attempts += 1;
-      if (isAc) {
-        acc.ac += 1;
-        acc.solved.add(`${r.platform}:${r.problem_key}`);
-        if (r.submitted_at >= recentCutoff) acc.recentSolved.add(`${r.platform}:${r.problem_key}`);
-      }
+    // CF 等平台的英文标签归并到课程中文知识点（binary search → 二分），避免同一知识点拆成两个点
+    for (const tag of filterNoiseTags(safeTags(r.tags)).map((t) => canonicalTag(t))) {
+      const code = nameToCode.get(tag);
+      if (code) bumpAcc(byCode, code, isAc, r.platform, r.problem_key, r.submitted_at);
+      else bumpAcc(byTag, tag, isAc, r.platform, r.problem_key, r.submitted_at);
     }
   }
 
-  // 课程大纲中出现的知识点即使 0 练习也纳入（「未开始」正是地图要暴露的盲区）；
-  // 同样做别名归并（课程里个别模板直接写了英文别名 tag，如 two pointers）
-  const curriculumTags = new Set<string>();
-  for (const cat of CURRICULUM) for (const t of cat.templates) for (const tag of t.tags) curriculumTags.add(canonicalTag(tag));
+  // 课程模板索引：templateIds 直达课程（掌握度地图「看课」入口）
+  const templateIndex = new Map(
+    CURRICULUM.flatMap((cat) => cat.templates.map((t) => [t.id, { t, cat }] as const)),
+  );
 
-  const tags = new Set<string>([...byTag.keys(), ...curriculumTags]);
-  // 学习状态一次性加载，避免逐 tag 重复查询 template_progress（tag 数量 100+）
-  const statusMap = loadTemplateStatuses(db, userId);
   const points: MasteryPoint[] = [];
-  for (const tag of tags) {
-    const acc = byTag.get(tag);
+  const pushPoint = (tag: string, code: string | undefined, acc: Acc | undefined, templates: MasteryTemplateLink[]): void => {
     const solved = acc?.solved.size ?? 0;
-    if (solved < minSolved) continue;
+    if (solved < minSolved) return;
     const attempts = acc?.attempts ?? 0;
     const ac = acc?.ac ?? 0;
     const acRate = attempts > 0 ? rate(attempts, ac) : 0;
     points.push({
       tag,
+      ...(code !== undefined ? { code } : {}),
       solved,
       attempts,
       acRate,
@@ -138,8 +177,29 @@ export function computeMastery(db: Db, userId: number, opts: MasteryOptions = {}
       gap: round2(avgAcRate - acRate),
       level: levelFor(solved, acRate),
       recentSolved: acc?.recentSolved.size ?? 0,
-      templates: templatesForTag(db, userId, tag, statusMap),
+      templates,
     });
+  };
+
+  // taxonomy 全部 code 进地图（0 练习 = 未开始，正是地图要暴露的盲区）
+  for (const p of allPoints()) {
+    const templates: MasteryTemplateLink[] = [];
+    for (const id of p.templateIds ?? []) {
+      const found = templateIndex.get(id);
+      if (!found) continue;
+      templates.push({
+        id: found.t.id,
+        name: found.t.name,
+        categoryKey: found.cat.key,
+        categoryName: found.cat.name,
+        status: statusMap.get(id) ?? 'todo',
+      });
+    }
+    pushPoint(p.name, p.code, byCode.get(p.code), templates);
+  }
+  // 未覆盖桶：无法归入 taxonomy 的净化 tag（brute force 等保留原样）
+  for (const [tag, acc] of byTag) {
+    pushPoint(tag, undefined, acc, templatesForTag(db, userId, tag, statusMap));
   }
 
   points.sort((a, b) => b.level - a.level || b.solved - a.solved || a.tag.localeCompare(b.tag));

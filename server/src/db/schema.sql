@@ -61,9 +61,13 @@ CREATE TABLE IF NOT EXISTS problems (
   title       TEXT NOT NULL,
   difficulty  INTEGER,                         -- CF rating 统一标尺（洛谷分级 0-8 已映射为 rating；AtCoder 为映射分值）
   url         TEXT,
-  tags        TEXT NOT NULL DEFAULT '[]',      -- JSON 数组字符串
+  tags        TEXT NOT NULL DEFAULT '[]',      -- JSON 数组字符串（写入即净化：噪声标签已过滤 + 同义词已归并）
+  -- 难度来源（优先级 manual > backfill > sync > bank）：决定新值能否覆盖已有值，见 import/problemWritePolicy.ts
+  difficulty_source TEXT,
   UNIQUE (platform, problem_key)
 );
+-- 难度过滤/排序（题库页 ORDER BY difficulty、stats 难度分布）在 2 万题规模上依赖此索引
+CREATE INDEX IF NOT EXISTS idx_problems_difficulty ON problems(difficulty);
 
 -- 平台原始 tags 仅作审计数据；训练/统计只读取本表的自建知识点标注。
 -- 一个题可命中多个知识点，confidence/evidence 使结果可审计、可人工复核。
@@ -79,6 +83,43 @@ CREATE TABLE IF NOT EXISTS problem_topics (
 );
 CREATE INDEX IF NOT EXISTS idx_problem_topics_topic ON problem_topics(topic_id, confidence);
 
+-- 自建知识点管线（v2）：结构化知识点标注。JSONL（dataDir/knowledge/annotations.jsonl）
+-- 为源真相，本表是启动时幂等重建的查询索引。code 锚定 taxonomy.json（稳定不可改）；
+-- name 为展示名（重载时按当前 taxonomy 刷新）。source: rule / ai / manual，
+-- manual 为人工校正，永不被管线重跑覆盖。confidence < 统计阈值（默认 0.5）的
+-- 标注入库但统计端默认过滤。无 FK：表可由 JSONL 独立重建，不随 problems 重播种失效。
+-- annotated_title 记录标注当时的题目标题：标题被修复（如牛客标题污染清洗）后
+-- 与库内 title 不一致即视为陈旧标注，差量重跑会重新标注。
+CREATE TABLE IF NOT EXISTS problem_keypoints (
+  platform    TEXT NOT NULL,
+  problem_key TEXT NOT NULL,
+  code        TEXT NOT NULL,
+  name        TEXT NOT NULL DEFAULT '',
+  confidence  REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  source      TEXT NOT NULL,             -- rule / ai / manual
+  method      TEXT NOT NULL,             -- rule#rNNN / ai:<model> / manual
+  taxonomy_version INTEGER NOT NULL,
+  pipeline_version INTEGER NOT NULL,
+  annotated_title TEXT,
+  annotated_at TEXT NOT NULL,
+  PRIMARY KEY (platform, problem_key, code)
+);
+CREATE INDEX IF NOT EXISTS idx_problem_keypoints_code ON problem_keypoints(code, confidence);
+
+-- L2 AI 待标注队列：L1 未命中的题入队持久化，批跑中断后续跑。
+-- status: pending / done / uncertain（AI 也判不出，不硬贴）/ failed（可重试）
+CREATE TABLE IF NOT EXISTS knowledge_queue (
+  platform    TEXT NOT NULL,
+  problem_key TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT,
+  enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (platform, problem_key)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_queue_status ON knowledge_queue(status, enqueued_at);
+
 CREATE TABLE IF NOT EXISTS submissions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id      INTEGER NOT NULL REFERENCES users(id),
@@ -92,6 +133,8 @@ CREATE TABLE IF NOT EXISTS submissions (
 );
 CREATE INDEX IF NOT EXISTS idx_submissions_user_platform ON submissions(user_id, platform);
 CREATE INDEX IF NOT EXISTS idx_submissions_problem ON submissions(problem_id);
+-- 按用户取时间窗提交（能力值近 60 天窗口 / 趋势图）与按时间排序：无此索引时万级提交全表扫
+CREATE INDEX IF NOT EXISTS idx_submissions_user_time ON submissions(user_id, submitted_at);
 
 CREATE TABLE IF NOT EXISTS plans (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
