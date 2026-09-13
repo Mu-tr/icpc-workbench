@@ -362,8 +362,15 @@ export function keypointsOfProblem(db: Db, platform: string, problemKey: string)
 /**
  * 知识点读取路径（**唯一实现**，调用处的题目表别名必须是 p）。
  *
- * 二来源：problem_keypoints 中 source IN ('tag','rule') 的标注，按 code 去重后聚合；
- * 无标注则回退题源 tags（已净化的原始值，供审计与兜底）。
+ * 三来源：problem_keypoints 中 source IN ('tag','rule','manual') 的标注按题聚合，
+ * 一题多 code 全返回（主键 (platform, problem_key, code) 保证同题同 code 至多一行，
+ * 故 SQL 无需 DISTINCT）；无标注则回退题源 tags（已净化的原始值，供审计与兜底）。
+ *
+ * `manual` 必须留在读取侧：`setManualKeypoints`（人工校正）会先删掉该题**全部**旧行、
+ * 再只写 manual 行 —— 读取侧若不认 manual，用户显式做出的校正就会在题库列表 / 统计 /
+ * 复习里被静默回退成平台原始 tags。manual 是人工覆盖，为本模块最高优先级来源
+ * （见 SOURCE_PRECEDENCE）。**同 code 的跨来源让位只发生在写入侧**：读取侧不挑来源、
+ * 不做优先级裁决，各来源的点位取并集。
  *
  * 已摘除两个分支（清洗重构 spec §1.3）：
  * - `source='ai'`：AI 已退出清洗模块，不再参与任何统计
@@ -371,13 +378,16 @@ export function keypointsOfProblem(db: Db, platform: string, problemKey: string)
  *
  * confidence 不再作为可信度门槛（该字段已降级为来源内排序权重）；
  * 因此本函数不再读取知识库阈值设置。
+ *
+ * `intent`（spec §1.2 的「用户声明的卡点」，计划 Task 7 落库）尚无写入方，
+ * 待其上线时需同步加入本过滤。
  */
 export function knowledgeTagsSql(_db: Db): string {
   return (
     'CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform ' +
-    "AND pk.problem_key = p.problem_key AND pk.source IN ('tag','rule')) " +
+    "AND pk.problem_key = p.problem_key AND pk.source IN ('tag','rule','manual')) " +
     'THEN (SELECT json_group_array(pk2.name) FROM problem_keypoints pk2 WHERE pk2.platform = p.platform ' +
-    "AND pk2.problem_key = p.problem_key AND pk2.source IN ('tag','rule')) " +
+    "AND pk2.problem_key = p.problem_key AND pk2.source IN ('tag','rule','manual')) " +
     'ELSE p.tags END AS tags'
   );
 }
@@ -385,12 +395,13 @@ export function knowledgeTagsSql(_db: Db): string {
 /**
  * knowledgeTagsSql 同一口径的 CTE 版本：把标注侧预聚合成按题一行的小派生表，
  * 再由调用方 LEFT JOIN —— 避免标量子查询逐行重跑（题库 2 万题时的主要开销）。
+ * 来源过滤与标量版严格一致（tag/rule/manual；含 manual 的理由见 knowledgeTagsSql 注释）。
  * 用法：`WITH ${problemKeypointsCte(db)} SELECT ... ${knowledgeTagsCoalesceSql()} FROM problems p ${knowledgeTagsJoinSql()}`
  */
 export function problemKeypointsCte(_db: Db): string {
   return (
     "pk AS (SELECT platform, problem_key, json_group_array(name) AS tags FROM problem_keypoints " +
-    "WHERE source IN ('tag','rule') GROUP BY platform, problem_key)"
+    "WHERE source IN ('tag','rule','manual') GROUP BY platform, problem_key)"
   );
 }
 
