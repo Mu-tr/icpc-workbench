@@ -6,7 +6,6 @@ import type { ReactNode } from 'react'
 import { useSyncExternalStore } from 'react'
 import {
   CalendarOutlined,
-  CloudSyncOutlined,
   CodeOutlined,
   DashboardOutlined,
   FileTextOutlined,
@@ -40,7 +39,6 @@ export const MENU: MenuMeta[] = [
   { key: '/calendar', icon: <CalendarOutlined />, label: '日历打卡' },
   { key: '/reviews', icon: <ReadOutlined />, label: '复习库' },
   { key: '/contests', icon: <FlagOutlined />, label: '赛事中心' },
-  { key: '/sync', icon: <CloudSyncOutlined />, label: '同步中心' },
   { key: '/settings', icon: <SettingOutlined />, label: '设置' },
   { key: '/about', icon: <InfoCircleOutlined />, label: '关于' },
 ]
@@ -59,7 +57,7 @@ export interface MenuGroup {
 
 export const MENU_GROUPS: MenuGroup[] = [
   { key: 'training', label: '训练', items: ['/today', '/ai', '/templates', '/lists', '/plans', '/reviews'] },
-  { key: 'records', label: '题库与记录', items: ['/problems', '/mastery', '/calendar', '/contests', '/sync'] },
+  { key: 'records', label: '题库与记录', items: ['/problems', '/mastery', '/calendar', '/contests'] },
 ]
 
 /** 固定项（不在分组内、不可拖拽） */

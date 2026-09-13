@@ -13,7 +13,6 @@ import About from './pages/About'
 import Today from './pages/Today'
 import Reviews from './pages/Reviews'
 import Contests from './pages/Contests'
-import Sync from './pages/Sync'
 import Templates from './pages/Templates'
 import Mastery from './pages/Mastery'
 import Reminder from './Reminder'
@@ -97,7 +96,6 @@ export default function App() {
             <Route path="/calendar" element={<CalendarPage />} />
             <Route path="/reviews" element={<Reviews />} />
             <Route path="/contests" element={<Contests />} />
-            <Route path="/sync" element={<Sync />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/about" element={<About />} />
           </Routes>
