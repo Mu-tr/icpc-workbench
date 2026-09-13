@@ -10,10 +10,12 @@ import { CURRICULUM } from '../src/templates/curriculum.ts';
 import { loadTaxonomy, allPoints, isValidCode, nameOfCode, templateIdsOfCode } from '../src/knowledge/taxonomy.ts';
 import { classifyTitle, loadRules } from '../src/knowledge/ruleEngine.ts';
 
-test('taxonomy: 122 个 code 全局唯一且锚定 curriculum 10 大类', () => {
+test('taxonomy: code 全局唯一、非空且锚定 curriculum 10 大类', () => {
   const taxonomy = loadTaxonomy();
   assert.equal(taxonomy.categories.length, 10);
   const codes = allPoints().map((p) => p.code);
+  // code 数量下界：粗粒度层落地时应只增不减；显式断言可避免标题里的数字随时间失真
+  assert.ok(codes.length >= 134, `taxonomy code 数应 >= 134，实得 ${codes.length}`);
   assert.equal(new Set(codes).size, codes.length);
   // 每个 code 的命名空间前缀必须是所属大类 key
   for (const cat of taxonomy.categories) {

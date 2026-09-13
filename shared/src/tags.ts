@@ -227,12 +227,20 @@ export function codeOfTag(tag: string): string | undefined {
   return GROUP_BY_NAME.get(canonicalTag(tag))?.code;
 }
 
-/** 组名 → taxonomy code（未知/粗粒度返回 undefined） */
+/** 组名 → taxonomy code（同名组不存在时返回 undefined；粗粒度层落地后所有组均带 code） */
 export function codeOfCanonicalName(name: string): string | undefined {
   return GROUP_BY_NAME.get(name)?.code;
 }
 
-/** 粗粒度归类名（无 code）：题单分类等需要「人类友好分类目录」的场景使用 */
+/**
+ * 粗粒度归类名（无 code）。
+ *
+ * ⚠️ 当前恒返回 `[]`：粗粒度层落地后（见 knowledge-cleaning-redesign spec §2.1），
+ * 原先 7 个无 code 的粗组已全部升级为带 code 的知识点，本函数的筛选条件不再命中。
+ * 保留函数与导出的原因：`routes/lists.ts` 的分类目录仍把它与
+ * `TAG_ALIAS_TO_CANONICAL` 取并集，删掉会改动那条调用链；且将来若重新引入
+ * 无 code 的纯人类友好分类，这里会自动恢复生效。
+ */
 export function coarseCategoryNames(): string[] {
   return TAG_SYNONYM_GROUPS.filter((g) => g.code === undefined).map((g) => g.name);
 }
