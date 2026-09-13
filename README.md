@@ -2,11 +2,11 @@
 
 **中文** | [English](./README.en.md)
 
-基于刷题记录（Codeforces / AtCoder / 洛谷 / 牛客 / 代码源 / LeetCode）分析弱项、由 AI 生成个性化训练计划，并提供日历打卡的**本地 Web 应用**。
+基于刷题记录（Codeforces / AtCoder / 洛谷 / 牛客 / 代码源 / LeetCode / 计蒜客）分析弱项、由 AI 生成个性化训练计划，并提供日历打卡的**本地 Web 应用**。
 
 ## 功能
 
-- **多平台刷题导入**：Codeforces / AtCoder 自动同步（官方/社区公开 API，增量去重）；洛谷 / 代码源 / LeetCode 配置 Cookie 后自动同步；全平台支持手动导入（JSON / CSV / 表单）
+- **多平台刷题导入**：Codeforces / AtCoder 自动同步（官方/社区公开 API，增量去重）；洛谷 / 代码源 / LeetCode / 计蒜客配置 Cookie 后自动同步；全平台支持手动导入（JSON / CSV / 表单）
 - **内置题库**：软件自带约 1.3 万题离线题库（Codeforces 全量 + 洛谷普及/提高- 及以上，含难度与算法标签），首次启动自动入库、开箱即可供训练计划/题单选题；需要更多时在「题目管理 → 拉取题库」按平台扩充（CF 单次调用秒级，洛谷/牛客按页拉取）
 - **弱项分析**：按标签 / 难度区间 / 平台统计 AC 率，输出相对自身平均的弱项画像；近 12 周趋势
 - **掌握度地图**：按知识点五档评估掌握度（未开始→接触→入门→掌握→熟练），串联刷题数据、弱项画像与模板课程；每个知识点可直达对应练习题目（含题库未做题，按难度从低到高）与课程；CF 等平台的英文标签与课程中文知识点自动归并（binary search ↔ 二分），同一知识点不分裂；掌握/熟练带 ⭐/🏆 徽章、升档进度条与新达成 🎉 标记
@@ -43,7 +43,7 @@
 ```
 icpc-workbench/
 ├── server/          # Node.js + Express + node:sqlite（内置 SQLite，零原生依赖）
-│   ├── adapters/    # 平台适配器（CF/AtCoder 自动；洛谷/牛客/代码源/LeetCode 受限）+ 增量同步
+│   ├── adapters/    # 平台适配器（CF/AtCoder 自动；洛谷/牛客/代码源/LeetCode/计蒜客受限）+ 增量同步
 │   ├── analysis/    # 聚合统计 / 弱项画像 / 周趋势
 │   ├── ai/          # OpenAI 兼容 provider + plan-prompt.md / assistant-prompt.md 提示词模板 + function calling 工具注册（fetch-url / pdf-parse / 联网搜索）+ 文档转换器（Word/Excel/PPT/HTML/CSV/JSON/XML/EPub → Markdown）
 │   ├── contests/    # 四平台赛事聚合（CF/AtCoder/洛谷/牛客，单源失败降级）
@@ -174,17 +174,19 @@ node server/scripts/build-exe.mjs
 | 牛客 | ✅ | 公开 HTML `acm/contest/profile/{uid}/practice-coding` | 无需登录/Cookie（牛客已下线 JSON API）；解析提交表格，支持增量与分页；题目无难度/标签字段（数据源限制） |
 | 代码源 | ✅（需 Cookie） | Hydro JSON API `/record?uidOrName=`（`Accept: application/json`） | 设置页填写 `sid` 一项会话 Cookie 后自动同步（每页 100 条，增量提前终止）；走 Hydro 原生 JSON 内容协商直接取 rdocs 数组，不依赖 HTML 模板解析，Hydro 升级改前端模板不会破坏适配器；状态按 Hydro STATUS 数字枚举映射统一 Verdict；仅含非比赛提交；题库页 `/p/{id}` 公开 |
 | LeetCode | ✅（需 Cookie） | leetcode.cn GraphQL `submissionList` | 设置页填写 Cookie 后自动同步（每页 40 条，最多 250 页）；仅接入力扣中国（leetcode.cn），国际版接口结构不同暂未接入；题库匿名可访问 |
+| 计蒜客 | ✅（需 Cookie） | `/api/contests?hasParticipated=true` + 逐赛 `/api/contest/submissions` | 设置页整段粘贴登录 Cookie 后自动同步（站点给未登录访客也发游客 `s` 会话，需确认已登录再从 Network 请求头复制）；无统一记录页，按「参加过的比赛」逐场拉取提交（每场至多 2 个请求，30 场/次分批）；以比赛序号为补全游标；作业/练习题不在同步范围 |
 
 > 洛谷基于社区维护的非官方 API，接口结构可能随平台变更；若同步失败请更新 Cookie 重试。Cookie 仅保存在本机数据库，请勿外泄。
 
-## Cookie 配置方法（洛谷 / 代码源 / LeetCode 需要）
+## Cookie 配置方法（洛谷 / 代码源 / LeetCode / 计蒜客需要）
 
 1. 浏览器登录洛谷后，F12 → Application（应用）→ Cookies → `https://www.luogu.com.cn`
 2. 复制 `_uid` 与 `__client_id` 两项的值，分别填入「设置 → 洛谷」的两个输入框后保存（请求用 Cookie 头由应用拼装，C3LK 等其余 Cookie 自动续期，无需填写）
 3. 代码源同理：浏览器登录 bs.daimayuan.top 后，F12 → Application → Cookies 复制 `sid` 一项（登录会话），填入「设置 → 代码源」后保存（支持直接整段粘贴 Cookie 头，自动提取字段；过期后重新复制一次即可）
 4. LeetCode：浏览器登录 leetcode.cn 后，F12 → Application → Cookies 复制 `LEETCODE_SESSION` 与 `csrftoken` 两项，填入「设置 → LeetCode」后保存
-5. 到「题目管理」→ 平台同步 → 输入用户名/uid → 同步
-6. 换绑账号时，新同步会自动清空该平台旧账号的提交数据
+5. 计蒜客：先确认浏览器已登录 www.jisuanke.com（右上角为头像），然后 F12 → Network → 刷新页面 → 点任一 api 请求 → Request Headers 复制整段 Cookie，填入「设置 → 计蒜客」后保存（handle 填昵称仅作备注）。注意：未登录时站点也会发游客 `s` 会话，从 Application 直接抄 `s` 大概率是游客会话，会提示无效
+6. 到「题目管理」→ 平台同步 → 输入用户名/uid → 同步
+7. 换绑账号时，新同步会自动清空该平台旧账号的提交数据
 
 ## API 一览
 

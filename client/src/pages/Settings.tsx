@@ -71,6 +71,17 @@ const COOKIE_FORM: Partial<Record<PlatformId, CookieFieldDef[]>> = {
     { key: 'session', cookieName: 'LEETCODE_SESSION', placeholder: 'LEETCODE_SESSION（登录会话，F12 → Application → Cookies 复制）', password: true },
     { key: 'csrftoken', cookieName: 'csrftoken', placeholder: 'csrftoken（CSRF 令牌，同处复制；支持整段粘贴）', password: true },
   ],
+  // 计蒜客：整段粘贴请求头里的 Cookie 原样透传。站点给每个访客（含未登录）都发游客 s 会话，
+  // 只抄 Application 里的 s 容易拿到游客会话——推荐从 Network 真实 /api 请求的 Request Headers 复制
+  jisuanke: [
+    {
+      key: 'cookie',
+      cookieName: 'cookie',
+      placeholder: '登录 www.jisuanke.com → F12 → Network → 刷新 → 点任一 api 请求 → Request Headers → 右键 Copy → Copy value 复制完整 Cookie 值（必须包含全部 Cookie，只有单值不够）',
+      password: true,
+      raw: true,
+    },
+  ],
 }
 
 export default function Settings() {
@@ -104,7 +115,7 @@ export default function Settings() {
           // 已保存的是拼装好的 Cookie 头，回填时按平台字段定义拆回各输入框
           const saved = c.cookie ?? ''
           cookies[platform] = Object.fromEntries(
-            (COOKIE_FORM[platform as PlatformId] ?? []).map((f) => [f.key, extractCookieValue(saved, f.cookieName)]),
+            (COOKIE_FORM[platform as PlatformId] ?? []).map((f) => [f.key, f.raw ? saved.trim() : extractCookieValue(saved, f.cookieName)]),
           )
         }
         setHandleInputs(handles)
@@ -512,7 +523,7 @@ export default function Settings() {
             })}
           />
           <p className="muted-note">
-            说明：Codeforces / AtCoder / 牛客自动同步；洛谷、代码源、LeetCode 填写 Cookie 后自动同步（未配置时请在「题目管理」手动导入）。代码源基于 Hydro 搭建，只需复制 sid 一项会话 Cookie；LeetCode 为力扣中国（leetcode.cn），需复制 LEETCODE_SESSION 与 csrftoken 两项 Cookie。
+            说明：Codeforces / AtCoder / 牛客自动同步；洛谷、代码源、LeetCode、计蒜客填写 Cookie 后自动同步（未配置时请在「题目管理」手动导入）。代码源基于 Hydro 搭建，只需复制 sid 一项会话 Cookie；LeetCode 为力扣中国（leetcode.cn），需复制 LEETCODE_SESSION 与 csrftoken 两项 Cookie；计蒜客提交记录按参加过的比赛组织，需登录后从 Network 的 api 请求头整段复制 Cookie（注意：未登录时站点也会发游客 s 会话，直接复制会提示无效）。
           </p>
           <div style={{ marginTop: 4 }}>
             <Space>

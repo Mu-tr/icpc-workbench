@@ -308,3 +308,57 @@ test('lists: ai-classify updates categories via mock provider; ai-suggest return
     assert.match(providerChats[1]!, /练习数据汇总/);
   });
 });
+
+test('lists: reorder persists dragged position order, detail reflects it', async () => {
+  await withServer(async ({ base, db }) => {
+    seedProblems(db);
+    await fetch(`${base}/`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '排序题单', raw: 'P1001\nCF1234A\nP9999' }),
+    });
+    const listId = (db.prepare('SELECT id FROM problem_lists').get() as { id: number }).id;
+    const items = db
+      .prepare('SELECT id, problem_key FROM problem_list_items ORDER BY position')
+      .all() as Array<{ id: number; problem_key: string }>;
+    assert.deepEqual(items.map((i) => i.problem_key), ['P1001', '1234A', 'P9999']);
+
+    // 把第 1 题（P1001）拖到最后 → 新顺序 [1234A, P9999, P1001]
+    const orderedIds = [items[1]!.id, items[2]!.id, items[0]!.id];
+    const res = await fetch(`${base}/${listId}/reorder`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ orderedIds }),
+    });
+    assert.equal(res.status, 200);
+    const after = db
+      .prepare('SELECT problem_key FROM problem_list_items ORDER BY position')
+      .all() as Array<{ problem_key: string }>;
+    assert.deepEqual(after.map((i) => i.problem_key), ['1234A', 'P9999', 'P1001']);
+    // 详情接口按新 position 返回
+    const detail = (await (await fetch(`${base}/${listId}`)).json()) as {
+      items: Array<{ problem_key: string }>;
+    };
+    assert.deepEqual(detail.items.map((i) => i.problem_key), ['1234A', 'P9999', 'P1001']);
+
+    // 校验失败路径：缺条目 / 多余 id / 题单不存在
+    const bad1 = await fetch(`${base}/${listId}/reorder`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ orderedIds: [items[0]!.id] }),
+    });
+    assert.equal(bad1.status, 400);
+    const bad2 = await fetch(`${base}/${listId}/reorder`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ orderedIds: [...orderedIds, 99999] }),
+    });
+    assert.equal(bad2.status, 400);
+    const bad3 = await fetch(`${base}/999999/reorder`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ orderedIds }),
+    });
+    assert.equal(bad3.status, 404);
+  });
+});

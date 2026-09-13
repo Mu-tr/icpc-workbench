@@ -6,6 +6,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { difficultyColor, rateColor, tagColor, platformName } from '../src/ui.ts'
+import { assembleCookie } from '../src/cookies.ts'
 
 // ---------- ui.ts 纯展示函数 ----------
 
@@ -266,5 +267,35 @@ describe('editorSettings.ts', () => {
     setIndentSize(2)
     assert.equal(store.get(INDENT_KEY), '2')
     assert.equal(getIndentSize(), 2)
+  })
+})
+
+// ---------- cookies.ts：raw 透传（计蒜客整段粘贴） ----------
+
+describe('cookies.ts assembleCookie raw', () => {
+  it('passes full header through as-is, stripping Cookie: prefix', () => {
+    const def = [{ key: 'cookie', cookieName: 'cookie', placeholder: '', raw: true }]
+    const header = 'acw_tc=x; s=eyJabc; XSRF-TOKEN=tok; remember_web_x=yz'
+    assert.equal(assembleCookie(def, { cookie: 'Cookie: ' + header }), header)
+    assert.equal(assembleCookie(def, { cookie: header }), header)
+  })
+
+  it('wraps a bare session value with the cookie name (s=)', () => {
+    const def = [{ key: 'cookie', cookieName: 's', placeholder: '', raw: true }]
+    assert.equal(assembleCookie(def, { cookie: 'eyJabc%3D' }), 's=eyJabc%3D')
+    // 含 = 的整段（哪怕只有一对）按完整头透传，不补前缀
+    assert.equal(assembleCookie(def, { cookie: 'eyJabc%3D; extra=1' }), 'eyJabc%3D; extra=1')
+    assert.equal(assembleCookie(def, { cookie: 'k=v' }), 'k=v')
+  })
+
+  it('keeps named-field extraction behavior unchanged', () => {
+    const def = [
+      { key: 'uid', cookieName: '_uid', placeholder: '' },
+      { key: 'clientId', cookieName: '__client_id', placeholder: '' },
+    ]
+    assert.equal(
+      assembleCookie(def, { uid: '1892580', clientId: 'abc-123' }),
+      '_uid=1892580; __client_id=abc-123',
+    )
   })
 })
