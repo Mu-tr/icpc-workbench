@@ -53,6 +53,60 @@ fn core_path() -> PathBuf {
     exe_dir().join(CORE_FILE)
 }
 
+/// 用户主目录：$HOME 优先，缺失时查 getpwuid。
+/// GUI 进程的环境变量不一定齐全，而数据目录必须落在应用包外，所以留一层兜底。
+#[cfg(target_os = "macos")]
+fn home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+    // /etc/passwd 查询免依赖；仅在 $HOME 缺失时走到
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    let uid = std::env::var("UID").ok()?;
+    passwd
+        .lines()
+        .find(|line| line.split(':').nth(2) == Some(uid.as_str()))
+        .and_then(|line| line.split(':').nth(5))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+/// macOS 用户数据目录：
+/// `~/Library/Application Support/icpc-workbench/data`。
+///
+/// 核心作为 sidecar 位于 `icpc-workbench.app/Contents/MacOS/`，若沿用 Windows 那种
+/// 「exe 旁 data/」，用户数据会写进应用包内部——既让 .app 代码签名失效
+/// （下次打开报「已损坏」，即 issue #14 的现象之一），又会在覆盖安装新版时丢数据。
+/// 所以显式经 ICPC_DATA_DIR 把数据目录挪到应用包外。
+#[cfg(target_os = "macos")]
+fn macos_data_dir() -> Option<PathBuf> {
+    Some(
+        home_dir()?
+            .join("Library")
+            .join("Application Support")
+            .join("icpc-workbench")
+            .join("data"),
+    )
+}
+
+/// 给核心子进程指定数据目录（macOS：挪出应用包，见 macos_data_dir 说明）。
+/// 主目录彻底取不到时告警而不是静默退回包内目录——那正是要避免的故障。
+#[cfg(target_os = "macos")]
+fn apply_data_dir(cmd: &mut std::process::Command) {
+    match macos_data_dir() {
+        Some(dir) => {
+            cmd.env("ICPC_DATA_DIR", dir);
+        }
+        None => eprintln!("[shell] 无法确定用户主目录，核心将退回应用包内数据目录（不推荐）"),
+    }
+}
+
+/// 给核心子进程指定数据目录（非 macOS 无需指定：Windows 便携版就用 exe 旁 data/）。
+#[cfg(not(target_os = "macos"))]
+fn apply_data_dir(_cmd: &mut std::process::Command) {}
+
 /// 拉起核心（无窗口、嵌入模式）。若核心进程仍在运行则跳过。
 fn spawn_core(app: &tauri::AppHandle) {
     let core: &CoreHandle = app.state::<CoreHandle>().inner();
@@ -76,6 +130,7 @@ fn spawn_core(app: &tauri::AppHandle) {
     // 企业网 TLS 拦截下 Node 内置 CA 校验会失败（更新检查/下载），改走 Windows 系统证书库
     cmd.env("NODE_USE_SYSTEM_CA", "1");
     cmd.current_dir(exe_dir()); // data/ 与壳 exe 同目录，升级替换 exe 数据不丢
+    apply_data_dir(&mut cmd);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     match cmd.spawn() {

@@ -111,8 +111,10 @@ node server/scripts/build-desktop-mac.mjs   # 仅 macOS 上运行
 
 CI 的 nightly 预发布版随 Windows 三件套一起发布 `.dmg`（Apple Silicon M 系列；Node SEA 核心架构相关，暂不含 Intel Mac 版）：
 
-- `icpc-workbench_<版本>_aarch64.dmg`：拖入「应用程序」即完成安装；数据存于 app 内 `data/`
-- 未购买 Apple 开发者证书：首次打开提示「无法验证开发者」时，右键 →「打开」，或终端执行 `xattr -cr /Applications/icpc-workbench.app`
+- `icpc-workbench_<版本>_aarch64.dmg`：拖入「应用程序」即完成安装
+- **构建时强制 ad-hoc 签名并校验**（`codesign --force --deep --sign -` + `codesign --verify --deep --strict`）：Apple 芯片要求包内每个可执行文件都有有效签名，未签名或签名失效的包在用户机上表现为「已损坏，无法打开」（issue #14）；签名不通过直接让 CI 失败，不发布坏包。刻意不开 hardened runtime（缺 allow-jit 会让 Node 核心的 JIT 起不来）
+- 仍未公证（未购买 Apple 开发者证书），首次打开可能提示「无法验证开发者」，任选一种放行：右键 →「打开」；系统设置 →「隐私与安全性」→「仍要打开」；终端 `xattr -cr /Applications/icpc-workbench.app`
+- 用户数据存放在 `~/Library/Application Support/icpc-workbench/data`（**不在 app 包内**：写包内会让签名失效导致「已损坏」，且覆盖安装新版会丢数据）；老 nightly 写在包内的数据会在首次启动时自动搬出来
 - macOS 暂不支持应用内一键更新（该功能仅 Windows），更新请到 Releases 页手动下载覆盖
 
 ## 浏览器模式单文件 exe 打包（兼容保留）

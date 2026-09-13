@@ -5,7 +5,8 @@
 # 并覆盖 nightly 预发布版，用户拉到的可能是坏包。
 # 平台覆盖：
 #   - Windows：NSIS 安装程序 + 便携版双 exe
-#   - macOS（Apple Silicon）：.dmg 安装镜像（未签名，首开需右键打开，见 release notes）
+#   - macOS（Apple Silicon）：.dmg 安装镜像（构建脚本内 ad-hoc 签名并校验，签名失败即构建失败；
+#     未公证，首开可能需右键打开或「仍要打开」，见 release notes）
 name: 桌面版 nightly 构建
 
 on:
@@ -115,6 +116,7 @@ jobs:
           path: |
             server/release/*.dmg
             server/release/icpc-core-*
+            server/release/README-mac.txt
           if-no-files-found: error
 
   publish:
@@ -135,7 +137,7 @@ jobs:
         run: |
           cd server/release
           ls -la
-          sha256sum icpc-workbench.exe icpc-core.exe *-setup.exe *.dmg icpc-core-* > checksums.sha256
+          sha256sum icpc-workbench.exe icpc-core.exe *-setup.exe *.dmg icpc-core-* README-mac.txt > checksums.sha256
           cat checksums.sha256
 
       - name: 发布 nightly 预发布版（在位覆盖，避免删除重建造成检查/下载 404 窗口）
@@ -148,8 +150,8 @@ jobs:
           TITLE="nightly · $SHORT · $DATE"
           NOTES="master 分支提交 ${SHORT} 的自动构建（开发版，稳定性低于正式发布版）。
           - Windows：icpc-workbench-<版本>-x64-setup.exe 安装程序，或便携版双 exe；支持应用内一键更新
-          - macOS（Apple Silicon M 系列）：*.dmg 安装镜像，未签名——首次打开请右键 →「打开」，或终端执行 xattr -cr /Applications/icpc-workbench.app；暂不支持 Intel Mac 与应用内一键更新，更新请手动下载覆盖"
-          ASSETS="server/release/icpc-workbench.exe server/release/icpc-core.exe server/release/*-setup.exe server/release/*.dmg server/release/icpc-core-*"
+          - macOS（Apple Silicon M 系列）：*.dmg 安装镜像，ad-hoc 已签名（构建脚本强制签名并校验，签名不过不出包）。未公证，首次打开如提示「无法验证开发者/已损坏」：右键 →「打开」，或「系统设置 → 隐私与安全性 → 仍要打开」，或终端 xattr -cr /Applications/icpc-workbench.app。数据在 ~/Library/Application Support/icpc-workbench/data，覆盖安装不丢。暂不支持 Intel Mac 与应用内一键更新，更新请手动下载覆盖"
+          ASSETS="server/release/icpc-workbench.exe server/release/icpc-core.exe server/release/*-setup.exe server/release/*.dmg server/release/icpc-core-* server/release/README-mac.txt"
           if gh release view nightly >/dev/null 2>&1; then
             gh release edit nightly --prerelease --target "$SHA" --title "$TITLE" --notes "$NOTES"
             # exe 先行、checksums 最后上传：应用内更新先取校验文件再下载产物，

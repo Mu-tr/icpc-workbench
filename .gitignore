@@ -29,3 +29,5 @@ videos/
 # 本地 AI 代理工具的会话上传/记忆目录，非项目源码
 .dsh-uploads/
 .workbuddy/
+.superpowers/
+.scratch/

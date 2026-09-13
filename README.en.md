@@ -107,8 +107,10 @@ node server/scripts/build-desktop-mac.mjs   # Run on macOS only
 
 The CI nightly pre-release publishes a `.dmg` alongside the Windows set (Apple Silicon M-series; Node SEA core is architecture-specific, no Intel Mac build for now):
 
-- `icpc-workbench_<version>_aarch64.dmg`: drag to "Applications" to install; data stored in app's `data/`
-- No Apple Developer certificate purchased: on first launch, when prompted "cannot verify developer," right-click → "Open," or run `xattr -cr /Applications/icpc-workbench.app` in Terminal
+- `icpc-workbench_<version>_aarch64.dmg`: drag to "Applications" to install
+- **The build ad-hoc signs and verifies the bundle** (`codesign --force --deep --sign -` plus `codesign --verify --deep --strict`): Apple Silicon requires a valid signature on every executable in the bundle, and an unsigned or invalidated bundle shows up as "is damaged and can't be opened" (issue #14). A failed verification fails CI instead of publishing a broken package. Hardened runtime is deliberately off (without allow-jit the Node core's JIT cannot start)
+- Still not notarized (no paid Apple Developer certificate), so the first launch may warn that the developer cannot be verified. Any of these clears it: right-click → "Open"; System Settings → "Privacy & Security" → "Open Anyway"; or `xattr -cr /Applications/icpc-workbench.app` in Terminal
+- User data lives in `~/Library/Application Support/icpc-workbench/data`, **outside the app bundle** (writing inside the bundle invalidates the signature, and reinstalling would discard the data). Data written inside the bundle by older nightlies is migrated out automatically on first launch
 - macOS does not support in-app one-click update (Windows only); to update, manually download from the Releases page and overwrite
 
 ## Browser-Mode Single-File EXE Packaging (Legacy, Retained)

@@ -17,6 +17,7 @@ import type { Server } from 'node:http';
 import { isSea, getAsset } from 'node:sea';
 import express, { type Express } from 'express';
 import { looksLikeOurInstance } from './instance-health.ts';
+import { resolveDataDir, migrateLegacyDataDir } from './data-dir.ts';
 import { aiConfigFromDb, loadConfig, DEFAULT_CONFIG, type AppConfig } from './config.ts';
 import { tryLaunchWidget } from './widget-launcher.ts';
 import { createDb } from './db/index.ts';
@@ -150,18 +151,20 @@ function readTextAsset(relPath: string): string {
   return fs.readFileSync(path.join(serverRoot, relPath), 'utf8');
 }
 
-/** SEA 模式下用户数据目录：exe 旁 data/（数据库、AtCoder 缓存等） */
+/** SEA 模式下用户数据目录：默认 exe 旁 data/，macOS 上挪出应用包（见 data-dir.ts） */
 function seaDataDir(): string {
-  return path.join(path.dirname(process.execPath), 'data');
+  return resolveDataDir();
 }
 
 function loadConfigForRuntime(): AppConfig {
   if (!isSea()) return loadConfig();
   // SEA：config.json 只从 exe 旁读取（缺省时静默用默认值，不给双击用户弹警告）；
-  // dbPath/dataDir 固定到 exe 旁 data/
+  // dbPath/dataDir 固定到用户数据目录
   const cfgPath = path.join(path.dirname(process.execPath), 'config.json');
   const cfg = existsSync(cfgPath) ? loadConfig(cfgPath) : { ...DEFAULT_CONFIG };
   const dataDir = seaDataDir();
+  // 老 nightly 把数据写在了应用包内部：升级到本版时把旧数据搬出来一次
+  migrateLegacyDataDir(process.execPath, dataDir);
   return { ...cfg, dataDir, dbPath: path.join(dataDir, 'icpc.db') };
 }
 
