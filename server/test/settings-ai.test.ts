@@ -87,6 +87,36 @@ test('POST /ai/models returns sorted deduped ids and forwards api key', async ()
   await upstream.close();
 });
 
+test('GET /api/settings reports secret presence without returning secret values', async () => {
+  await withServer(async (db, base) => {
+    saveAiConfig(db, DEFAULT_CONFIG, { apiKey: 'ai-secret', searchApiKey: 'search-secret' });
+    db.prepare("INSERT INTO settings (key, value) VALUES ('cookie.luogu', 'session=secret')").run();
+    const res = await fetch(base);
+    const body = (await res.json()) as {
+      ai: { apiKey: string; searchApiKey: string; hasApiKey: boolean; hasSearchApiKey: boolean };
+      cookies: Record<string, { configured: boolean }>;
+    };
+    assert.equal(body.ai.apiKey, '');
+    assert.equal(body.ai.searchApiKey, '');
+    assert.equal(body.ai.hasApiKey, true);
+    assert.equal(body.ai.hasSearchApiKey, true);
+    assert.deepEqual(body.cookies.luogu, { configured: true });
+    assert.doesNotMatch(JSON.stringify(body), /secret/);
+
+    // 保存响应同样不能回传秘密；空密钥提交（不传字段）不覆盖已保存值
+    const save = await fetch(`${base}/ai`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true, baseURL: 'https://ai.example.com', model: 'm1' }),
+    });
+    const savedBody = (await save.json()) as { apiKey: string; searchApiKey: string; hasApiKey: boolean };
+    assert.equal(savedBody.apiKey, '');
+    assert.equal(savedBody.searchApiKey, '');
+    assert.equal(savedBody.hasApiKey, true);
+    assert.doesNotMatch(JSON.stringify(savedBody), /secret/);
+  });
+});
+
 test('POST /ai/test succeeds via /models and reports configured model', async () => {
   const upstream = await startUpstream({ withModels: true, requireKey: 'secret' });
   await withServer(async (_db, base) => {

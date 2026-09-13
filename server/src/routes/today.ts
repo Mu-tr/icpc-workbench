@@ -3,6 +3,7 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { safeTags } from '../analysis/stats.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
+import { TOPIC_TAGS_SQL } from '../topics/pipeline.ts';
 import { bandRanges, pickBand, type CandidateProblem } from '../today/select.ts';
 import { effectiveAbility } from '../today/ability.ts';
 import type { TodayBandKey, TodayProblem } from '../../../shared/src/index.ts';
@@ -33,7 +34,8 @@ export function todayRoutes(db: Db): Router {
     // 2) 候选题：题库中有难度、未 AC 的题（提交记录里 AC 过的排除）
     const candidates = db
       .prepare(
-        `SELECT p.id, p.platform, p.problem_key, p.title, p.difficulty, p.url, p.tags
+        `SELECT p.id, p.platform, p.problem_key, p.title, p.difficulty, p.url,
+                ${TOPIC_TAGS_SQL}
            FROM problems p
           WHERE p.difficulty IS NOT NULL
             AND NOT EXISTS (
