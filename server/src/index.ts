@@ -2,10 +2,12 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { aiConfigFromDb, loadConfig } from './config.ts';
 import { createDb } from './db/index.ts';
+import { applyPendingRestore, createBackup, maybeDailyBackup } from './backup.ts';
 import { seedBuiltinBank } from './db/builtinBank.ts';
 import { initAdapters } from './adapters/index.ts';
 import { asyncHandler } from './asyncHandler.ts';
 import { errorHandler, securityHeaders } from './middleware.ts';
+import { backupsRoutes } from './routes/backups.ts';
 import { checkinsRoutes } from './routes/checkins.ts';
 import { contestsRoutes } from './routes/contests.ts';
 import { aiRoutes } from './routes/ai.ts';
@@ -25,9 +27,18 @@ import { widgetRoutes } from './routes/widget.ts';
 import { PLATFORMS } from '../../shared/src/index.ts';
 
 const config = loadConfig();
+// 恢复点回滚：必须在 createDb 之前应用（覆盖数据库文件）
+applyPendingRestore(config.dbPath);
 const db = createDb(config.dbPath);
 seedBuiltinBank(db); // 内置题库播种：版本变化时 upsert 一次，日常启动零开销
 initAdapters(config.dataDir);
+// 每日首次启动自动备份（settings 键幂等）；失败不阻塞启动
+try {
+  const daily = maybeDailyBackup(db);
+  if (daily.created) console.log(`[backup] 已创建每日备份 ${daily.file}`);
+} catch (e) {
+  console.error(`[backup] 每日备份失败（不影响启动）: ${(e as Error).message}`);
+}
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -47,7 +58,8 @@ app.use('/api/templates', templatesRoutes(db));
 app.use('/api/contests', contestsRoutes());
 app.use('/api/checkins', checkinsRoutes(db));
 app.use('/api/settings', settingsRoutes(db, config));
-app.use('/api/update', updateRoutes(config));
+app.use('/api/backups', backupsRoutes(db));
+app.use('/api/update', updateRoutes(config, () => createBackup(db, 'pre-upgrade')));
 app.use('/widget', widgetRoutes());
 
 app.get('/api/health', (_req, res) => {

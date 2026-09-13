@@ -6,6 +6,7 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { insertNormalized } from '../import/importService.ts';
 import { getAdapter } from './registry.ts';
+import { createBackup } from '../backup.ts';
 import { ManualImportRequiredError, SyncError, type FetchOptions, type SyncErrorCode } from './types.ts';
 
 export interface SyncOptions {
@@ -136,6 +137,15 @@ export async function syncPlatform(
     (account.handle !== handle || !account.last_sync_at);
 
   try {
+    // 换账号会清空该平台旧提交：先建「重置前」恢复点（失败只记日志，不阻塞同步）
+    if (handleChanged) {
+      try {
+        const b = createBackup(db, 'pre-reset');
+        console.log(`[backup] 换账号重置前备份已创建: ${b.file}`);
+      } catch (e) {
+        console.error(`[backup] 重置前备份失败（继续同步）: ${(e as Error).message}`);
+      }
+    }
     // 换账号/未成功同步过：全量重拉（不沿用可能属于旧账号的增量起点）
     const since =
       daysWindow

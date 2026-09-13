@@ -9,6 +9,7 @@ import {
   Form,
   Input,
   InputNumber,
+  List,
   Modal,
   Row,
   Col,
@@ -22,7 +23,7 @@ import {
   Upload,
   App as AntdApp,
 } from 'antd'
-import { ApiOutlined, ImportOutlined, RobotOutlined, UploadOutlined, UserOutlined, BellOutlined, FileMarkdownOutlined, LinkOutlined } from '@ant-design/icons'
+import { ApiOutlined, ImportOutlined, RobotOutlined, UploadOutlined, UserOutlined, BellOutlined, FileMarkdownOutlined, LinkOutlined, DatabaseOutlined } from '@ant-design/icons'
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
 import type { PlatformId } from '../../../shared/src/index.ts'
@@ -610,6 +611,9 @@ export default function Settings() {
       </Col>
 
       <ImportPlanModal open={importOpen} onClose={() => setImportOpen(false)} />
+      <Col span={24}>
+        <BackupCard />
+      </Col>
       </Row>
     </div>
   )
@@ -702,5 +706,115 @@ function ImportPlanModal({ open, onClose }: { open: boolean; onClose: () => void
         </Space>
       </Form>
     </Modal>
+  )
+}
+
+/** 恢复点条目（GET /api/backups） */
+interface BackupItem {
+  file: string
+  reason: string
+  createdAtMs: number
+  size: number
+}
+
+const BACKUP_REASON_LABEL: Record<string, string> = {
+  manual: '手动',
+  daily: '每日',
+  'pre-upgrade': '升级前',
+  'pre-import': '导入前',
+  'pre-reset': '重置前',
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+/** 备份与恢复点：每日首次启动 / 升级前 / 大批量导入前 / 换账号重置前自动创建；恢复重启后生效 */
+function BackupCard() {
+  const { message, modal } = AntdApp.useApp()
+  const [backups, setBackups] = useState<BackupItem[]>([])
+  const [loading, setLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
+
+  const load = () => {
+    setLoading(true)
+    get<{ backups: BackupItem[] }>('/api/backups')
+      .then((d) => setBackups(d.backups))
+      .catch((e) => message.error((e as Error).message))
+      .finally(() => setLoading(false))
+  }
+  useEffect(load, [message])
+
+  const createNow = async () => {
+    setCreating(true)
+    try {
+      const r = await post<{ file: string }>('/api/backups')
+      message.success(`已创建恢复点 ${r.file}`)
+      load()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const confirmRestore = (b: BackupItem) => {
+    modal.confirm({
+      title: '恢复此备份？',
+      width: 480,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p>数据库将回滚到 {new Date(b.createdAtMs).toLocaleString()}（{BACKUP_REASON_LABEL[b.reason] ?? b.reason}，{formatBytes(b.size)}）。</p>
+          <p style={{ color: '#d4380d' }}>备份之后产生的同步、打卡、复习等数据会丢失。恢复在重启应用后生效。</p>
+        </div>
+      ),
+      okText: '登记恢复（重启生效）',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await post(`/api/backups/${encodeURIComponent(b.file)}/restore`)
+          message.warning('已登记恢复请求：请重启应用以完成回滚')
+        } catch (e) {
+          message.error((e as Error).message)
+        }
+      },
+    })
+  }
+
+  return (
+    <Card title={<span className="settings-section-title"><DatabaseOutlined />备份与恢复点</span>} size="small">
+      <Space style={{ marginBottom: 8 }}>
+        <Button onClick={() => void createNow()} loading={creating}>
+          立即备份
+        </Button>
+        <span style={{ color: '#8993a2', fontSize: 12 }}>
+          自动备份时机：每日首次启动、应用升级前、大批量导入前、换账号重置前；恢复需重启应用生效。
+        </span>
+      </Space>
+      <List
+        size="small"
+        loading={loading}
+        dataSource={backups}
+        locale={{ emptyText: '暂无备份' }}
+        renderItem={(b) => (
+          <List.Item
+            actions={[
+              <Button key="restore" size="small" danger onClick={() => confirmRestore(b)}>
+                恢复
+              </Button>,
+            ]}
+          >
+            <Space size={8} wrap>
+              <Tag>{BACKUP_REASON_LABEL[b.reason] ?? b.reason}</Tag>
+              <span style={{ fontSize: 12 }}>{new Date(b.createdAtMs).toLocaleString()}</span>
+              <span style={{ color: '#8993a2', fontSize: 12 }}>{formatBytes(b.size)}</span>
+            </Space>
+          </List.Item>
+        )}
+      />
+    </Card>
   )
 }

@@ -305,8 +305,9 @@ function canSelfUpdate(): boolean {
 let lastCheck: { info: UpdateInfo; at: number } | null = null;
 const CHECK_CACHE_TTL_MS = 10 * 60_000;
 
-/** GET /check、GET /progress、POST /download、POST /apply（永 200，失败信息在 body） */
-export function updateRoutes(config: AppConfig): Router {
+/** GET /check、GET /progress、POST /download、POST /apply（永 200，失败信息在 body）。
+ *  preUpgradeBackup：应用更新前的备份钩子（升级前恢复点），失败仅记录不阻塞更新。 */
+export function updateRoutes(config: AppConfig, preUpgradeBackup?: () => void): Router {
   const r = Router();
   const stagingDir = `${config.dataDir}/update-staging`;
   if (canSelfUpdate()) cleanupOldFiles(); // 清理上次更新遗留的 *.exe.old
@@ -342,6 +343,13 @@ export function updateRoutes(config: AppConfig): Router {
     if (!canSelfUpdate()) {
       res.json({ ok: false, message: '当前环境不支持一键更新' });
       return;
+    }
+    if (preUpgradeBackup) {
+      try {
+        preUpgradeBackup();
+      } catch (e) {
+        console.error(`[backup] 升级前备份失败（继续更新）: ${(e as Error).message}`);
+      }
     }
     res.json(applyUpdate(stagingDir));
   });

@@ -20,6 +20,8 @@ import { looksLikeOurInstance } from './instance-health.ts';
 import { aiConfigFromDb, loadConfig, DEFAULT_CONFIG, type AppConfig } from './config.ts';
 import { tryLaunchWidget } from './widget-launcher.ts';
 import { createDb } from './db/index.ts';
+import { applyPendingRestore, createBackup, maybeDailyBackup } from './backup.ts';
+import { backupsRoutes } from './routes/backups.ts';
 import { initAdapters } from './adapters/index.ts';
 import { errorHandler, securityHeaders } from './middleware.ts';
 import { checkinsRoutes } from './routes/checkins.ts';
@@ -77,7 +79,8 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   app.use('/api/contests', contestsRoutes());
   app.use('/api/checkins', checkinsRoutes(db));
   app.use('/api/settings', settingsRoutes(db, config));
-  app.use('/api/update', updateRoutes(config));
+  app.use('/api/backups', backupsRoutes(db));
+  app.use('/api/update', updateRoutes(config, () => createBackup(db, 'pre-upgrade')));
   // widget 静态目录必须先注入再创建 router（express.static 创建时捕获目录值）
   setWidgetPublicDir(resolveWidgetDir());
   app.use('/widget', widgetRoutes());
