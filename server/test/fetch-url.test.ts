@@ -1,10 +1,13 @@
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   executeFetchUrl,
   htmlToText,
   extractTitle,
   validatePublicFetchUrl,
+  isPrivateIp,
+  resolveAndValidateHost,
+  setDnsLookupForTest,
 } from '../src/ai/fetch-url.ts';
 // 静态导入触发 fetch_url 注册副作用（registerTool 在模块顶层执行）
 import '../src/ai/fetch-url.ts';
@@ -21,16 +24,18 @@ const CFG_NO_KEY: AiConfig = {
 };
 const CTX_NO_KEY: ToolContext = { cfg: CFG_NO_KEY };
 
-/** 临时替换 globalThis.fetch，返回后用 restore 恢复 */
+/** 临时替换 globalThis.fetch，返回后用 restore 恢复（记录请求 URL 与 headers） */
 function mockGlobalFetch(
   responses: Array<{ status?: number; body?: string; headers?: Record<string, string> }>,
-): { restore: () => void; calls: string[] } {
+): { restore: () => void; calls: string[]; headerCalls: Array<Record<string, string>> } {
   const original = globalThis.fetch;
   let idx = 0;
   const calls: string[] = [];
-  globalThis.fetch = (async (input: URL | RequestInfo) => {
+  const headerCalls: Array<Record<string, string>> = [];
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
+    headerCalls.push((init?.headers ?? {}) as Record<string, string>);
     const r = responses[idx] ?? { status: 200, body: '' };
     idx++;
     return new Response(r.body ?? '', {
@@ -43,7 +48,13 @@ function mockGlobalFetch(
       globalThis.fetch = original;
     },
     calls,
+    headerCalls,
   };
+}
+
+/** directFetch 会做真实 DNS 解析：涉及网络的用例统一 stub 为「公网 IP」保证封闭性 */
+function stubPublicDns(): void {
+  setDnsLookupForTest(async () => [{ address: '93.184.216.34' }]);
 }
 
 // ---------- htmlToText 纯函数 ----------
@@ -142,9 +153,53 @@ describe('validatePublicFetchUrl', () => {
   });
 });
 
+describe('isPrivateIp', () => {
+  it('识别 IPv4 私网/回环/链路本地/CGNAT/元数据', () => {
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '256.1.1.1']) {
+      assert.ok(isPrivateIp(ip), `${ip} 应判为私网`);
+    }
+    for (const ip of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '100.128.0.1']) {
+      assert.ok(!isPrivateIp(ip), `${ip} 应判为公网`);
+    }
+  });
+
+  it('识别 IPv6 回环/未指定/链路本地/唯一本地/IPv4 映射', () => {
+    for (const ip of ['::1', '::', 'fe80::1', 'fc00::1', 'fd12:3456::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1', '::ffff:7f00:1']) {
+      assert.ok(isPrivateIp(ip), `${ip} 应判为私网`);
+    }
+    for (const ip of ['2606:4700::1111', '2001:db8::1', '::ffff:8.8.8.8']) {
+      assert.ok(!isPrivateIp(ip), `${ip} 应判为公网`);
+    }
+  });
+});
+
+describe('resolveAndValidateHost', () => {
+  afterEach(() => setDnsLookupForTest(null));
+
+  it('公网域名解析到公网 IP → 放行', async () => {
+    setDnsLookupForTest(async () => [{ address: '93.184.216.34' }]);
+    assert.equal(await resolveAndValidateHost('example.com'), null);
+  });
+
+  it('公网域名解析到私网 IP → 拦截（DNS rebinding 防护）', async () => {
+    setDnsLookupForTest(async () => [{ address: '10.9.9.9' }, { address: '192.168.0.2' }]);
+    assert.match(await resolveAndValidateHost('evil.example.com'), /内网/);
+  });
+
+  it('解析失败（NXDOMAIN/非常规字面量）→ 拦截', async () => {
+    setDnsLookupForTest(async () => {
+      throw new Error('NXDOMAIN');
+    });
+    assert.match(await resolveAndValidateHost('0x7f000001'), /解析失败/);
+  });
+});
+
 // ---------- executeFetchUrl 兜底路径（mock globalThis.fetch） ----------
 
 describe('executeFetchUrl fallback (direct fetch)', () => {
+  beforeEach(() => stubPublicDns());
+  afterEach(() => setDnsLookupForTest(null));
+
   it('成功读取 HTML 正文并返回 title', async () => {
     const html = '<html><head><title>测试页面</title></head><body><p>你好世界</p></body></html>';
     const mock = mockGlobalFetch([
@@ -187,9 +242,105 @@ describe('executeFetchUrl fallback (direct fetch)', () => {
   });
 });
 
+// ---------- 重定向逐跳校验与 Cookie 隔离 ----------
+
+describe('directFetch redirect hop validation', () => {
+  beforeEach(() => stubPublicDns());
+  afterEach(() => setDnsLookupForTest(null));
+
+  it('跟随同/跨主机重定向并解析相对 Location', async () => {
+    const html = '<html><head><title>落地页</title></head><body><p>重定向后内容</p></body></html>';
+    const mock = mockGlobalFetch([
+      { status: 302, headers: { Location: '/final' } },
+      { status: 200, body: html, headers: { 'Content-Type': 'text/html' } },
+    ]);
+    try {
+      const r = await executeFetchUrl('https://example.com/start', CFG_NO_KEY);
+      assert.equal(r.error, undefined);
+      assert.match(r.content, /重定向后内容/);
+      assert.deepEqual(mock.calls, ['https://example.com/start', 'https://example.com/final']);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('重定向跳向内网 IP 被拦截，且不会发起对该地址的请求', async () => {
+    const mock = mockGlobalFetch([
+      { status: 302, headers: { Location: 'http://10.0.0.5/admin' } },
+    ]);
+    try {
+      const r = await executeFetchUrl('https://example.com/redirect', CFG_NO_KEY);
+      assert.match(r.error ?? '', /内网/);
+      assert.equal(mock.calls.length, 1, '第二跳应在 fetch 前被拦截');
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('公网重定向链中途 DNS 解析到私网被拦截', async () => {
+    const mock = mockGlobalFetch([
+      { status: 302, headers: { Location: 'https://rebind.example.net/a' } },
+    ]);
+    setDnsLookupForTest(async (host) => [
+      { address: host === 'example.com' ? '93.184.216.34' : '127.0.0.1' },
+    ]);
+    try {
+      const r = await executeFetchUrl('https://example.com/redirect', CFG_NO_KEY);
+      assert.match(r.error ?? '', /内网/);
+      assert.equal(mock.calls.length, 1);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('重定向超过 5 跳返回错误', async () => {
+    const responses = Array.from({ length: 8 }, (_, i) => ({
+      status: 302,
+      headers: { Location: `/hop${i + 1}` },
+    }));
+    const mock = mockGlobalFetch(responses);
+    try {
+      const r = await executeFetchUrl('https://example.com/hop0', CFG_NO_KEY);
+      assert.match(r.error ?? '', /重定向次数过多/);
+      assert.equal(mock.calls.length, 6);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('跨主机重定向不携带平台 Cookie', async () => {
+    const mock = mockGlobalFetch([
+      { status: 302, headers: { Location: 'https://third.example.org/next' } },
+      { status: 200, body: '<p>ok</p>', headers: { 'Content-Type': 'text/html' } },
+    ]);
+    try {
+      await executeFetchUrl('https://www.luogu.com.cn/record/1', CFG_NO_KEY, { luogu: { cookie: '_uid=1; __gid=2' } });
+      assert.equal(mock.headerCalls[0]['Cookie'], '_uid=1; __gid=2', '首跳应带平台 Cookie');
+      assert.equal(mock.headerCalls[1]['Cookie'], undefined, '跨主机第二跳不得携带 Cookie');
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('同主机重定向继续携带 Cookie（洛谷站内跳转）', async () => {
+    const mock = mockGlobalFetch([
+      { status: 302, headers: { Location: 'https://www.luogu.com.cn/record/1/mine' } },
+      { status: 200, body: '<p>ok</p>', headers: { 'Content-Type': 'text/html' } },
+    ]);
+    try {
+      await executeFetchUrl('https://www.luogu.com.cn/record/1', CFG_NO_KEY, { luogu: { cookie: '_uid=1' } });
+      assert.equal(mock.headerCalls[1]['Cookie'], '_uid=1');
+    } finally {
+      mock.restore();
+    }
+  });
+});
+
 // ---------- 工具注册与 execute 包装 ----------
 
 describe('fetch_url registration & execute', () => {
+  beforeEach(() => stubPublicDns());
+  afterEach(() => setDnsLookupForTest(null));
   it('fetch_url 已注册到工具表', () => {
     assert.ok(
       getRegisteredToolNames().includes('fetch_url'),

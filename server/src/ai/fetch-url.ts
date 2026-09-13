@@ -3,6 +3,7 @@ import type { ToolDefinition } from './provider.ts';
 import { registerTool, type ToolResult, type ToolContext, type PlatformCookies } from './tools/registry.ts';
 import type { SearchConfig } from './search.ts';
 import { extractPdfText, truncatePdfText, isPdfContentType } from './pdf.ts';
+import dns from 'node:dns/promises';
 
 /** fetch_url 工具定义：AI 可在回复中调用以读取指定网址的网页正文 */
 export const FETCH_URL_TOOL: ToolDefinition = {
@@ -41,9 +42,89 @@ interface FetchResult {
 }
 
 /**
+ * 判断 IP 地址是否属于本机/内网/链路本地等禁止访问的范围：
+ * IPv4 未指定/回环/RFC1918/链路本地/CGNAT/元数据端点；IPv6 回环/未指定/链路本地/唯一本地/IPv4 映射私网。
+ */
+export function isPrivateIp(ip: string): boolean {
+  const addr = ip.toLowerCase().replace(/^\[|\]$/g, '');
+  const ipv4 = addr.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b, c, d] = ipv4.slice(1).map(Number);
+    if ([a, b, c, d].some((n) => n > 255)) return true;
+    return a === 0 || a === 10 || a === 127 ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  // IPv6：归一化 ::ffff:a.b.c.d 映射形式后按前缀判断
+  const mapped = addr.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) return isPrivateIp(mapped[1]);
+  const expanded = expandIpv6(addr);
+  if (!expanded) return addr === '::' || addr === '::1';
+  if (expanded === '0'.repeat(32)) return true; // ::
+  if (expanded.startsWith('0'.repeat(31) + '1')) return true; // ::1
+  if (expanded.startsWith('fe80')) return true; // 链路本地 fe80::/10
+  if (expanded.startsWith('fc') || expanded.startsWith('fd')) return true; // 唯一本地 fc00::/7
+  // IPv4 映射地址的十六进制形式（::ffff:7f00:1 ↔ ::ffff:127.0.0.1）
+  if (expanded.startsWith('0'.repeat(20) + 'ffff')) {
+    const v4hex = expanded.slice(-8);
+    const v4 = [0, 1, 2, 3].map((i) => parseInt(v4hex.slice(i * 2, i * 2 + 2), 16)).join('.');
+    return isPrivateIp(v4);
+  }
+  return false;
+}
+
+/** 将 IPv6 展开为 32 位十六进制字符串；非法输入返回 null */
+function expandIpv6(addr: string): string | null {
+  if (!/^[0-9a-f:.]+$/.test(addr)) return null;
+  const halves = addr.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - left.length - right.length;
+  if (halves.length === 2 && missing < 0) return null;
+  if (halves.length === 1 && left.length !== 8) return null;
+  const groups = halves.length === 2 ? [...left, ...Array(missing).fill('0'), ...right] : left;
+  let out = '';
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    out += g.padStart(4, '0');
+  }
+  return out.length === 32 ? out : null;
+}
+
+/**
+ * DNS 解析可注入：测试中替换以模拟「公网域名解析到私网 IP」等场景。
+ */
+type DnsLookup = (hostname: string) => Promise<Array<{ address: string }>>;
+let dnsLookup: DnsLookup = (hostname) => dns.lookup(hostname, { all: true, verbatim: true }) as never;
+export function setDnsLookupForTest(fn: DnsLookup | null): void {
+  dnsLookup = fn ?? ((hostname) => dns.lookup(hostname, { all: true, verbatim: true }) as never);
+}
+
+/**
+ * 解析主机名并校验所有结果地址都不指向本机/内网。
+ * 返回 null 表示可访问；否则返回给用户的错误说明。
+ * 同时封堵字面量形式的非常规 IP（十六进制/十进制整数等，DNS 解析失败即拒绝）。
+ */
+export async function resolveAndValidateHost(hostname: string): Promise<string | null> {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await dnsLookup(host);
+  } catch {
+    return '域名解析失败（无法访问该主机）';
+  }
+  if (!addresses?.length) return '域名解析失败（无可用地址）';
+  for (const { address } of addresses) {
+    if (isPrivateIp(address)) return '该域名解析到本机或内网地址，禁止访问';
+  }
+  return null;
+}
+
+/**
  * 阻止工具访问本机/内网 HTTP 服务。该工具的 URL 来自模型调用，不能把它当作
- * 可信输入。此处覆盖不依赖 DNS 的主机名与字面 IP 地址；域名解析与逐跳重定向
- * 校验应在后续网络层增强中继续补上。
+ * 可信输入。此处做字符串级校验（协议、本地域名、字面 IP）；域名解析与逐跳
+ * 重定向校验分别由 resolveAndValidateHost 与 directFetch 的重定向循环承担。
  */
 export function validatePublicFetchUrl(raw: string): string | null {
   let parsed: URL;
@@ -55,20 +136,7 @@ export function validatePublicFetchUrl(raw: string): string | null {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '网址需以 http:// 或 https:// 开头';
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return '禁止访问本机或本地域名';
-  // IPv4: loopback, RFC1918, link-local, carrier-grade NAT, unspecified, metadata endpoint.
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const [a, b, c, d] = ipv4.slice(1).map(Number);
-    if ([a, b, c, d].some((n) => n > 255) || a === 0 || a === 10 || a === 127 ||
-      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)) {
-      return '禁止访问内网或链路本地地址';
-    }
-  }
-  // IPv6 loopback/unspecified/link-local/unique-local, including IPv4-mapped loopback.
-  if (host === '::1' || host === '::' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('::ffff:127.')) {
-    return '禁止访问内网或链路本地地址';
-  }
+  if (isPrivateIp(host)) return '禁止访问内网或链路本地地址';
   return null;
 }
 
@@ -152,65 +220,88 @@ function findCookie(url: string, cookies?: PlatformCookies): { cookie?: string; 
 }
 
 /** 兜底路径：直接 fetch 网页 HTML/PDF，转为可读文本。对服务端渲染页面有效。
- *  cookies 可选：对洛谷等需登录的平台携带认证信息，并处理 C3VK 反爬验证。 */
+ *  cookies 可选：对洛谷等需登录的平台携带认证信息，并处理 C3VK 反爬验证。
+ *  重定向采用手动逐跳跟随（≤5 跳）：每一跳都先做字符串级 URL 校验 + DNS 解析
+ *  校验，防止公网页面 302 跳向内网；跨主机重定向不再携带平台 Cookie。 */
+const MAX_REDIRECT_HOPS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 async function directFetch(url: string, cookies?: PlatformCookies): Promise<FetchResult> {
-  const platCreds = findCookie(url, cookies);
-  const cookieStr = platCreds?.cookie?.trim() || '';
+  const initialPlatCreds = findCookie(url, cookies);
+  const cookieStr = initialPlatCreds?.cookie?.trim() || '';
+  const initialHost = new URL(url).hostname.toLowerCase();
+
+  let currentUrl = url;
+  let cookie = cookieStr;
   try {
-    const baseHeaders: Record<string, string> = {
-      'User-Agent': BROWSER_UA,
-      Accept: 'text/html,application/xhtml+xml,text/plain,application/pdf',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    };
-    if (cookieStr) baseHeaders['Cookie'] = cookieStr;
+    for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
+      const invalid = validatePublicFetchUrl(currentUrl) ?? await resolveAndValidateHost(new URL(currentUrl).hostname);
+      if (invalid) return { content: '', title: url, error: invalid };
 
-    let res = await fetch(url, {
-      headers: baseHeaders,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(20_000),
-    });
+      const headers: Record<string, string> = {
+        'User-Agent': BROWSER_UA,
+        Accept: 'text/html,application/xhtml+xml,text/plain,application/pdf',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      };
+      // 仅原始主机（洛谷 C3VK 场景）携带平台 Cookie，防止凭据经重定向泄露到第三方
+      if (cookie && new URL(currentUrl).hostname.toLowerCase() === initialHost) {
+        headers['Cookie'] = cookie;
+      }
 
-    // C3VK 反爬验证：洛谷返回 302 重定向，需从 Set-Cookie 提取 C3VK 再重试
-    if (res.status === 302) {
-      const setCookies = res.headers.getSetCookie?.() ?? [];
-      let c3vk = '';
-      for (const c of setCookies) {
-        const m = c.match(/C3VK=([^;]+)/);
-        if (m) c3vk = m[1];
-      }
-      if (c3vk) {
-        baseHeaders['Cookie'] = (cookieStr ? cookieStr + '; ' : '') + 'C3VK=' + c3vk;
-        res = await fetch(url, {
-          headers: baseHeaders,
-          redirect: 'follow',
-          signal: AbortSignal.timeout(20_000),
-        });
-      }
-    }
+      const res = await fetch(currentUrl, {
+        headers,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(20_000),
+      });
 
-    if (!res.ok) return { content: '', title: url, error: `HTTP ${res.status}` };
-    const ct = res.headers.get('content-type') ?? '';
-    // PDF：以字节读取后调用 unpdf 提取文本
-    if (isPdfContentType(ct)) {
-      const buf = new Uint8Array(await res.arrayBuffer());
-      try {
-        const { text } = await extractPdfText(buf);
-        if (!text.trim()) return { content: '', title: url, error: 'PDF 未提取到文本（可能是扫描型 PDF）' };
-        // 标题取 URL 末段（如 contest/4071 → 4071），无法提取时回退 url
-        const seg = url.split('/').filter(Boolean).pop() || url;
-        return { content: truncatePdfText(text), title: seg };
-      } catch (e) {
-        return { content: '', title: url, error: `PDF 提取失败：${(e as Error).message}` };
+      // C3VK 反爬验证：洛谷 302 后需从 Set-Cookie 提取 C3VK，原地重试（不跟随该跳）
+      if (res.status === 302 && new URL(currentUrl).hostname.toLowerCase() === initialHost) {
+        const setCookies = res.headers.getSetCookie?.() ?? [];
+        let c3vk = '';
+        for (const c of setCookies) {
+          const m = c.match(/C3VK=([^;]+)/);
+          if (m) c3vk = m[1];
+        }
+        if (c3vk) {
+          cookie = (cookieStr ? cookieStr + '; ' : '') + 'C3VK=' + c3vk;
+          continue; // 原地重试，Cookie 附加逻辑由下一轮 headers 组装完成
+        }
       }
+
+      // 逐跳重定向：校验目标 URL 与其 DNS 解析结果后再跟随
+      if (REDIRECT_STATUSES.has(res.status)) {
+        const location = res.headers.get('location');
+        if (!location) return { content: '', title: url, error: `HTTP ${res.status}（缺少重定向目标）` };
+        if (hop === MAX_REDIRECT_HOPS) return { content: '', title: url, error: '重定向次数过多（>5 跳）' };
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+
+      if (!res.ok) return { content: '', title: url, error: `HTTP ${res.status}` };
+      const ct = res.headers.get('content-type') ?? '';
+      // PDF：以字节读取后调用 unpdf 提取文本
+      if (isPdfContentType(ct)) {
+        const buf = new Uint8Array(await res.arrayBuffer());
+        try {
+          const { text } = await extractPdfText(buf);
+          if (!text.trim()) return { content: '', title: url, error: 'PDF 未提取到文本（可能是扫描型 PDF）' };
+          // 标题取 URL 末段（如 contest/4071 → 4071），无法提取时回退 url
+          const seg = url.split('/').filter(Boolean).pop() || url;
+          return { content: truncatePdfText(text), title: seg };
+        } catch (e) {
+          return { content: '', title: url, error: `PDF 提取失败：${(e as Error).message}` };
+        }
+      }
+      if (!/text\/(html|plain)|application\/xhtml/i.test(ct)) {
+        return { content: '', title: url, error: `非文本内容类型：${ct || '未知'}` };
+      }
+      const html = await res.text();
+      const title = extractTitle(html) || url;
+      const content = htmlToText(html);
+      if (!content.trim()) return { content: '', title: url, error: '页面正文为空（可能是 JS 渲染页面）' };
+      return { content, title };
     }
-    if (!/text\/(html|plain)|application\/xhtml/i.test(ct)) {
-      return { content: '', title: url, error: `非文本内容类型：${ct || '未知'}` };
-    }
-    const html = await res.text();
-    const title = extractTitle(html) || url;
-    const content = htmlToText(html);
-    if (!content.trim()) return { content: '', title: url, error: '页面正文为空（可能是 JS 渲染页面）' };
-    return { content, title };
+    return { content: '', title: url, error: '重定向次数过多（>5 跳）' };
   } catch (e) {
     return { content: '', title: url, error: `请求失败：${(e as Error).message}` };
   }
