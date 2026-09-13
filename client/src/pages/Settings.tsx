@@ -86,7 +86,7 @@ const COOKIE_FORM: Partial<Record<PlatformId, CookieFieldDef[]>> = {
 }
 
 export default function Settings() {
-  const { message } = AntdApp.useApp()
+  const { message, modal } = AntdApp.useApp()
   const { preference, setPreference } = useTheme()
   const [data, setData] = useState<SettingsData | null>(null)
   const [aiForm] = Form.useForm()
@@ -228,10 +228,42 @@ export default function Settings() {
   }
 
   const saveCookie = async (platform: PlatformId) => {
+    // 用户只填各字段值，请求头格式由前端按平台定义拼装；
+    // csrf: '' 让后端清掉历史遗留的 csrf 记录——同步请求全是 GET，不需要 x-csrf-token
+    // Cookie 原文不会回传前端（输入框恒为空）：全空时提交空串会被后端理解为「清除」，
+    // 必须显式确认，防止打开面板随手点「保存 Cookie」误删已配置的登录凭据
+    const cookie = assembleCookie(platform, cookieInputs[platform])
+    if (!cookie) {
+      if (data?.cookies[platform]?.configured) {
+        const name = PLATFORMS.find((p) => p.id === platform)?.name ?? platform
+        modal.confirm({
+          title: '输入框为空，已保存的 Cookie 保持不变',
+          content: '设置页不再回显 Cookie 原文：留空即保留现有登录凭据，粘贴新值则覆盖。如需彻底清除该平台 Cookie，请确认。',
+          okText: '清除 Cookie',
+          okButtonProps: { danger: true },
+          cancelText: '取消',
+          onOk: async () => {
+            try {
+              await post('/api/settings/cookies', { platform, cookie: '', csrf: '' })
+              message.warning(`${name} Cookie 已清除`)
+              setCookieCheck((s0) => {
+                const next = { ...s0 }
+                delete next[platform]
+                return next
+              })
+              load()
+            } catch (e) {
+              message.error((e as Error).message)
+            }
+          },
+        })
+      } else {
+        message.info('请先填写 Cookie 再保存')
+      }
+      return
+    }
     try {
-      // 用户只填各字段值，请求头格式由前端按平台定义拼装；
-      // csrf: '' 让后端清掉历史遗留的 csrf 记录——同步请求全是 GET，不需要 x-csrf-token
-      await post('/api/settings/cookies', { platform, cookie: assembleCookie(platform, cookieInputs[platform]), csrf: '' })
+      await post('/api/settings/cookies', { platform, cookie, csrf: '' })
       message.success(`${PLATFORMS.find((p) => p.id === platform)?.name} Cookie 已保存`)
       // 清除旧检测结果：上方 data 变化驱动的 effect 会据此重新检测，刷新连接状态点
       setCookieCheck((s) => {
@@ -470,37 +502,47 @@ export default function Settings() {
                     </Space>
                     {p.sync === 'cookie' && (
                       <div style={{ marginTop: 10 }}>
-                        <Space wrap>
-                          {fields.map((f) =>
-                            f.password ? (
-                              <Input.Password
-                                key={f.key}
-                                placeholder={f.placeholder}
-                                style={{ width: 300 }}
-                                value={c[f.key] ?? ''}
-                                onChange={(e) =>
-                                  setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
-                                }
-                              />
-                            ) : (
-                              <Input
-                                key={f.key}
-                                placeholder={f.placeholder}
-                                style={{ width: 200 }}
-                                value={c[f.key] ?? ''}
-                                onChange={(e) =>
-                                  setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
-                                }
-                              />
-                            ),
-                          )}
-                          <Button size="small" onClick={() => saveCookie(p.id)}>
-                            保存 Cookie
-                          </Button>
-                          <Button size="small" loading={check === 'checking'} onClick={() => checkCookie(p.id)}>
-                            检测 Cookie
-                          </Button>
-                        </Space>
+                        {/* Cookie 原文不回传前端，输入框恒为空：用此标记 + placeholder 指示配置状态 */}
+                        {(() => {
+                          const configured = data?.cookies[p.id]?.configured === true
+                          return (
+                            <Space wrap>
+                              <Tag color={configured ? 'success' : 'default'} style={{ marginRight: 4 }}>
+                                {configured ? '已配置' : '未配置'}
+                              </Tag>
+                              {fields.map((f) => {
+                                const ph = configured ? `已配置 · 粘贴新值可覆盖（原提示：${f.placeholder}）` : f.placeholder
+                                return f.password ? (
+                                  <Input.Password
+                                    key={f.key}
+                                    placeholder={ph}
+                                    style={{ width: 300 }}
+                                    value={c[f.key] ?? ''}
+                                    onChange={(e) =>
+                                      setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
+                                    }
+                                  />
+                                ) : (
+                                  <Input
+                                    key={f.key}
+                                    placeholder={ph}
+                                    style={{ width: 200 }}
+                                    value={c[f.key] ?? ''}
+                                    onChange={(e) =>
+                                      setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
+                                    }
+                                  />
+                                )
+                              })}
+                              <Button size="small" onClick={() => saveCookie(p.id)}>
+                                保存 Cookie
+                              </Button>
+                              <Button size="small" loading={check === 'checking'} onClick={() => checkCookie(p.id)}>
+                                检测 Cookie
+                              </Button>
+                            </Space>
+                          )
+                        })()}
                         {check && check !== 'checking' && (
                           <Alert
                             style={{ marginTop: 8, maxWidth: 520 }}
