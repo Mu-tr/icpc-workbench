@@ -54,18 +54,6 @@ function run(cmd) {
 }
 
 /**
- * 自检：codesign 能否真正执行。
- * macOS 上 codesign 是系统自带工具；这里只防「工具缺失/被裁剪」环境静默产出坏包。
- */
-function assertCodesignAvailable() {
-  try {
-    execSync('codesign --version', { stdio: 'ignore' });
-  } catch {
-    throw new Error('未找到 codesign（macOS 系统签名工具），无法产出可用的 macOS 包');
-  }
-}
-
-/**
  * ad-hoc 签名 .app 全包（含 Contents/MacOS 下的 SEA 核心 sidecar）。
  *
  * 为什么必须做：Apple Silicon 上内核要求所有可执行文件带有效签名，且签名覆盖
@@ -78,14 +66,15 @@ function assertCodesignAvailable() {
 function adhocSignApp(appPath) {
   // 先签包内的核心 sidecar，再签外层包：反过来会被外层签名覆盖，且校验可能不过
   const core = path.join(appPath, 'Contents', 'MacOS', 'icpc-core');
-  if (fs.existsSync(core)) {
-    // 核心单独显式签一次：--deep 对 sidecar 的处理随版本变化，显式签保证确定行为
-    run(`codesign --force --sign - "${core}"`);
-  } else {
+  if (!fs.existsSync(core)) {
     // 核心不在预期位置 = 包结构不对，壳启动后必然找不到核心，先在这里暴露
     throw new Error(`包内未找到核心 sidecar: ${core}`);
   }
+  // 核心单独显式签一次：--deep 对 sidecar 的处理随版本变化，显式签保证确定行为
+  run(`codesign --force --sign - "${core}"`);
   run(`codesign --force --sign - "${appPath}"`);
+  // 最后一步校验：签名链有任何一环失效都会在这里失败（不额外做 codesign 自检——
+  // macOS 上 `codesign --version` 本身返回非 0，拿它当可用性探针会误报）
   run(`codesign --verify --deep --strict --verbose=2 "${appPath}"`);
   console.log('      签名校验通过（ad-hoc，含嵌入核心）');
 }
@@ -141,7 +130,6 @@ const appPath = path.join(appDir, appFile);
 
 // 签名必须在 tauri build 之后：Tauri 打包时会重新组装包内容，之前签的都会失效。
 console.log('[4/5] ad-hoc 签名 .app 并校验签名 ...');
-assertCodesignAvailable();
 adhocSignApp(appPath);
 
 const dmgDir = path.join(bundleDir, 'dmg');
