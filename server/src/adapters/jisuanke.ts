@@ -24,7 +24,8 @@ import type { FetchOptions, PlatformAdapter } from './types.ts';
  * 训练赛（二元结果制）会返回数字 status：0=未通过 1=通过；挑战题（challenge）则返回
  * ojStatus 字典序号（4=AC 6=WA 7=TL 8=ML 10=RE 11=CE）。两类都做了映射。
  *
- * 鉴权：Laravel 会话 Cookie（withCredentials 纯 Cookie 鉴权，无 Authorization 头）。注意
+ * 鉴权：纯 Cookie 鉴权（无 Authorization 头），登录态在 s 与 JSKUSS 两项（实测站点
+ * 共 4 项 Cookie：acw_tc 为 CDN 项、XSRF-TOKEN 供 POST 使用，均不需要）。注意
  * 站点给未登录访客也发匿名 `s` 会话（2h 有效），因此必须复制「已登录」浏览器发出的
  * Cookie——推荐从 F12 → Network 的真实 /api 请求 Request Headers 整段复制。
  * handle 仅作账号备注（平台无公开用户名），同步完全依赖 Cookie。
@@ -244,7 +245,7 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
       if (!cookie) {
         throw new ManualImportRequiredError(
           'jisuanke',
-          '计蒜客提交记录按「参加过的比赛」组织且需登录访问：请在设置页「计蒜客」分别填写 s（登录会话，必需）与 remember_web_…（登录保持，建议）两项 Cookie —— 确认浏览器已登录 www.jisuanke.com（右上角显示头像），F12 → Application → Cookies 按名复制值；未登录时站点也会发游客 s 会话，建议从 F12 → Network 的真实 /api 请求 Request Headers 里取',
+          '计蒜客提交记录按「参加过的比赛」组织且需登录访问：请在设置页「计蒜客」分别填写 s 与 JSKUSS 两项会话 Cookie（实测站点仅这两项与登录相关）—— 确认浏览器已登录 www.jisuanke.com（右上角显示头像），F12 → Application → Cookies 按名复制值；未登录时站点也会发游客 s 会话，校验不过通常是缺 JSKUSS',
         );
       }
     return cookie;
@@ -400,7 +401,7 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
           signal: AbortSignal.timeout(15000),
         });
         if (res.status === 302 || res.status === 401) {
-          return { ok: false, message: 'Cookie 未通过登录校验：登录态分散在 s（会话）与 remember_web_…（登录保持）两项里，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 或 Network 的 api 请求头按名复制）' };
+          return { ok: false, message: 'Cookie 未通过登录校验：需要 s 与 JSKUSS 两项会话 Cookie，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 按名复制）' };
         }
         if (!res.ok) {
           return { ok: false, message: `计蒜客返回 HTTP ${res.status}，请稍后重试` };
@@ -409,7 +410,7 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
         if (body && typeof body.uuid === 'string' && body.uuid) {
           return { ok: true, message: `Cookie 有效${body.name ? `，当前用户：${body.name}` : ''}` };
         }
-        return { ok: false, message: 'Cookie 未通过登录校验：登录态分散在 s（会话）与 remember_web_…（登录保持）两项里，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 或 Network 的 api 请求头按名复制）' };
+        return { ok: false, message: 'Cookie 未通过登录校验：需要 s 与 JSKUSS 两项会话 Cookie，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 按名复制）' };
       } catch (e) {
         return { ok: false, message: `无法连接计蒜客：${(e as Error).message}` };
       }

@@ -73,10 +73,11 @@ const COOKIE_FORM: Partial<Record<PlatformId, CookieFieldDef[]>> = {
     { key: 'session', cookieName: 'LEETCODE_SESSION', label: '登录会话', placeholder: '粘贴 LEETCODE_SESSION 的值', password: true },
     { key: 'csrftoken', cookieName: 'csrftoken', label: 'CSRF 令牌', placeholder: '粘贴 csrftoken 的值' },
   ],
-  // 计蒜客：Laravel 会话，登录态分散在 s + remember_web_* 两项；详细指引见面板底部说明行
+  // 计蒜客：登录态分散在 s 与 JSKUSS 两项会话 Cookie（实测站点共 4 项：acw_tc 为 CDN 项、
+  // XSRF-TOKEN 供 POST 使用，均不需要）；两项都建议填写，校验不过通常是缺 JSKUSS
   jisuanke: [
-    { key: 's', cookieName: 's', label: '登录会话（必需）', placeholder: '粘贴 s 的值', password: true, raw: true },
-    { key: 'remember', cookieName: 'remember_web', label: '登录保持（整对粘贴）', placeholder: '粘贴 remember_web_…=值 整对', password: true, raw: true },
+    { key: 's', cookieName: 's', label: '会话（必需）', placeholder: '粘贴 s 的值', password: true, raw: true },
+    { key: 'jskuss', cookieName: 'JSKUSS', label: '登录会话（必需）', placeholder: '粘贴 JSKUSS 的值', password: true, raw: true },
   ],
 }
 
@@ -550,7 +551,7 @@ export default function Settings() {
                               </Space>
                               {p.id === 'jisuanke' && (
                                 <div style={{ fontSize: 12, color: '#8993a2', marginTop: 6 }}>
-                                  登录 www.jisuanke.com 后，F12 → Application → Cookies 按名复制；未登录时站点的 s 是游客会话，校验不过。
+                                  登录 www.jisuanke.com 后，F12 → Application → Cookies 复制 s 与 JSKUSS 的值（acw_tc / XSRF-TOKEN 不需要）；未登录时的 s 是游客会话，校验不过。
                                 </div>
                               )}
                             </>
@@ -573,7 +574,7 @@ export default function Settings() {
             })}
           />
           <p className="muted-note">
-            说明：每个 Cookie 单独一框，按输入框上方的名称到浏览器 F12 → Application → Cookies 复制对应值（框内整段粘贴亦可）。代码源仅需 sid；LeetCode 需 LEETCODE_SESSION 与 csrftoken；计蒜客需 s 与 remember_web_… 两项（未登录时站点的 s 是游客会话，校验不过）。
+            说明：每个 Cookie 单独一框，按输入框上方的名称到浏览器 F12 → Application → Cookies 复制对应值（框内整段粘贴亦可）。代码源仅需 sid；LeetCode 需 LEETCODE_SESSION 与 csrftoken；计蒜客需 s 与 JSKUSS 两项（未登录时站点的 s 是游客会话，校验不过）。
           </p>
           <div style={{ marginTop: 4 }}>
             <Space>
