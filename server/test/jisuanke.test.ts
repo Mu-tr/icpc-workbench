@@ -297,3 +297,119 @@ test('jisuanke: registered via initAdapters, problemUrl format', () => {
   const adapter = createJisuankeAdapter();
   assert.equal(adapter.problemUrl({ problemKey: '37176-123' }), 'https://www.jisuanke.com/contest/37176/problem/123');
 });
+
+// ---------- Phase 2：题库难度映射 / 公开题库拉取 / 赛事归一化 ----------
+
+import { jisuankeDifficultyToRating } from '../src/adapters/jisuanke.ts';
+import { fetchJisuankeBank } from '../src/adapters/problemBank.ts';
+import { classifyJisuankeContest, fetchJisuankeContests, toJisuankeContest } from '../src/contests/jisuankeContests.ts';
+
+test('jisuanke: jisuankeDifficultyToRating maps level strings/numbers, caps at 2800', () => {
+  assert.equal(jisuankeDifficultyToRating('level1'), 800);
+  assert.equal(jisuankeDifficultyToRating('level4'), 1600);
+  assert.equal(jisuankeDifficultyToRating('level8'), 2800);
+  assert.equal(jisuankeDifficultyToRating('level12'), 2800); // level8+ 封顶
+  assert.equal(jisuankeDifficultyToRating(5), 1900);
+  assert.equal(jisuankeDifficultyToRating('level0'), null);
+  assert.equal(jisuankeDifficultyToRating(undefined), null);
+  assert.equal(jisuankeDifficultyToRating('weird'), null);
+});
+
+test('jisuanke: fetchJisuankeBank pages, maps difficulty/tags/urls, dedupes total', async () => {
+  const page = (rows: unknown[]) => JSON.stringify({ data: rows, total: 103 });
+  const seenPages: string[] = [];
+  const fetchFn: typeof fetch = async (input) => {
+    const u = String(input);
+    seenPages.push(u);
+    if (u.includes('page=1')) {
+      return new Response(
+        page([
+          { problemIdentifier: 'T1001', title: '入门题', difficultyType: 'level1', countOfTags: ['模拟'] },
+          { problemIdentifier: 'T1002', title: '进阶题', difficultyType: 'level5', countOfTags: [{ name: '动态规划' }] },
+          { problemIdentifier: '', title: '无题号应跳过' },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(page([]), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const r = await fetchJisuankeBank(fetchFn, { max: 500 });
+  assert.equal(r.platform, 'jisuanke');
+  assert.equal(r.total, 103);
+  assert.equal(r.problems.length, 2);
+  assert.equal(r.problems[0].problemKey, 'T1001');
+  assert.equal(r.problems[0].difficulty, 800);
+  assert.deepEqual(r.problems[0].tags, ['模拟']);
+  assert.equal(r.problems[0].url, 'https://www.jisuanke.com/problem/T1001');
+  assert.equal(r.problems[1].difficulty, 1900);
+  assert.deepEqual(r.problems[1].tags, ['动态规划']);
+  assert.ok(seenPages[0].includes('page=1'));
+  assert.ok(seenPages[1].includes('page=2'), '首页未满 max 应继续翻页');
+  assert.ok(seenPages[seenPages.length - 1].includes('page=2'), '空页（第 2 页）后终止，不再翻第 3 页');
+});
+
+test('jisuanke: fetchJisuankeBank stops at max and unwraps bare arrays', async () => {
+  const fetchFn: typeof fetch = async () =>
+    new Response(
+      JSON.stringify([
+        { problemIdentifier: 'T1', title: 'A', difficultyType: 'level2' },
+        { problemIdentifier: 'T2', title: 'B', difficultyType: 'level3' },
+        { problemIdentifier: 'T3', title: 'C', difficultyType: 'level4' },
+      ]),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  const r = await fetchJisuankeBank(fetchFn, { max: 2 });
+  assert.equal(r.problems.length, 2);
+  assert.equal(r.problems[1].difficulty, 1300);
+});
+
+test('jisuanke: bank endpoint error surfaces message', async () => {
+  const fetchFn: typeof fetch = async () => new Response('', { status: 502 });
+  await assert.rejects(() => fetchJisuankeBank(fetchFn), /HTTP 502/);
+});
+
+test('jisuanke: toJisuankeContest normalizes beijing start / seconds duration / type tag', () => {
+  const c = toJisuankeContest({
+    contestId: 37176,
+    title: '计蒜客 2026 新手赛',
+    startTime: '2026-09-05 10:00:00',
+    duration: 7200,
+    rule: 'IOI',
+    type: '计蒜客新手赛',
+  });
+  assert.ok(c);
+  assert.equal(c.id, 'jsk-37176');
+  assert.equal(c.platform, 'jisuanke');
+  assert.equal(c.category, '计蒜客新手赛'); // type 优先作分类
+  assert.equal(c.startTimeIso, '2026-09-05T02:00:00.000Z'); // 北京时间 → UTC
+  assert.equal(c.durationMinutes, 120); // 秒 → 分钟
+  assert.equal(c.url, 'https://www.jisuanke.com/contest/37176');
+
+  // 数字 startTime（unix 秒）与毫秒 duration 防御；无 contestId → null
+  const c2 = toJisuankeContest({ contestId: 1, startTime: 1796000000, duration: 5400000 });
+  assert.equal(c2?.startTimeIso, new Date(1796000000 * 1000).toISOString());
+  assert.equal(c2?.durationMinutes, 90);
+  assert.equal(toJisuankeContest({ title: 'x' }), null);
+  assert.equal(classifyJisuankeContest('新手入门赛', '', 'IOI'), '新手赛');
+});
+
+test('jisuanke: fetchJisuankeContests pages twice, dedupes, caches', async () => {
+  const mk = (id: number, page: number) =>
+    new Response(
+      JSON.stringify({ contests: [{ contestId: id, title: `赛${id}`, startTime: '2026-10-01 19:00:00', duration: 10800 }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  let calls = 0;
+  const fetchFn: typeof fetch = async (input) => {
+    calls += 1;
+    const u = String(input);
+    return mk(u.includes('page=1') ? 100 + pageOf(u) : 200 + pageOf(u), pageOf(u));
+  };
+  const pageOf = (u: string): number => (u.includes('page=2') ? 2 : 1);
+  const first = await fetchJisuankeContests(fetchFn);
+  assert.equal(calls, 2, '取前两页');
+  assert.ok(first.length >= 2);
+  assert.ok(first.every((c) => c.platform === 'jisuanke'));
+  await fetchJisuankeContests(fetchFn);
+  assert.equal(calls, 2, '30 分钟缓存内不再请求');
+});

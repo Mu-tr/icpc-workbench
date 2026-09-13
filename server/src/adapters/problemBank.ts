@@ -1,6 +1,7 @@
 import type { PlatformId } from '../../../shared/src/index.ts';
 import { fetchWithChallenge, luoguDifficultyToRating } from './luogu.ts';
 import { leetcodeDifficultyToRating } from './leetcode.ts';
+import { jisuankeDifficultyToRating } from './jisuanke.ts';
 
 /** 题库题目（无提交记录，仅供扩充待选池） */
 export interface BankProblem {
@@ -569,4 +570,97 @@ function parseDmyRows(html: string): DmyBankRow[] {
     rows.push({ pid, title, difficulty, tags });
   }
   return rows;
+}
+
+// ---------- 计蒜客 ----------
+
+const JISUANKE_BASE = 'https://www.jisuanke.com';
+const JISUANKE_PER_PAGE = 50;
+
+interface JisuankeListProblem {
+  problemIdentifier?: string;
+  title?: string;
+  accept?: number;
+  submit?: number;
+  difficultyType?: string | number;
+  passingRate?: number;
+  /** 实测为标签数组（可能只回传数量或对象数组），防御性解析 */
+  countOfTags?: unknown;
+}
+
+/** /api/problems 单页响应体：数组或 { data / problems / result } 包裹，防御性解包 */
+function unpackJisuankeProblemPage(body: unknown): JisuankeListProblem[] {
+  if (Array.isArray(body)) return body as JisuankeListProblem[];
+  const o = body as { data?: unknown; problems?: unknown; result?: unknown };
+  for (const cand of [o.data, o.problems, o.result]) {
+    if (Array.isArray(cand)) return cand as JisuankeListProblem[];
+  }
+  return [];
+}
+
+/** 标签字段防御性解析：数组（字符串/对象 {name|tagName}）→ 名称数组；其余 → 空数组 */
+function parseJisuankeTags(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((t) =>
+      typeof t === 'string'
+        ? t
+        : String((t as { name?: string; tagName?: string })?.name ?? (t as { tagName?: string })?.tagName ?? ''),
+    )
+    .filter(Boolean);
+}
+
+/**
+ * 计蒜客公开题库（匿名可访问，无需 Cookie）：
+ * GET /api/problems?page={n}（约 3600 题，每页约 50 条；total 随首页返回）。
+ * difficultyType（level1…levelN）→ jisuankeDifficultyToRating 映射统一难度标尺。
+ * 题号 problemIdentifier（如 T1001）即 problemKey，题目页 /problem/{identifier}。
+ */
+export async function fetchJisuankeBank(
+  fetchFn: typeof fetch,
+  opts: BankFetchOptions = {},
+): Promise<BankFetchResult> {
+  const max = opts.max ?? 2000;
+  const problems: BankProblem[] = [];
+  let total: number | null = null;
+
+  for (let page = 1; page <= 200; page += 1) {
+    const res = await fetchFn(`${JISUANKE_BASE}/api/problems?page=${page}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Accept: 'application/json',
+        Referer: `${JISUANKE_BASE}/problems`,
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) {
+      throw new Error(`计蒜客题库接口 HTTP ${res.status}，请稍后重试`);
+    }
+    const body = (await res.json().catch(() => null)) as unknown;
+    if (body === null) throw new Error('计蒜客题库接口返回非 JSON（接口变化），请稍后重试');
+    const rows = unpackJisuankeProblemPage(body);
+    // 总数：常见形态 { total } / { data: { total } }（首页即可拿到）
+    if (total === null) {
+      const o = body as { total?: unknown; data?: { total?: unknown } };
+      const t = o.total ?? o.data?.total;
+      if (typeof t === 'number') total = t;
+    }
+    if (rows.length === 0) break;
+
+    for (const p of rows) {
+      const key = typeof p.problemIdentifier === 'string' ? p.problemIdentifier.trim() : '';
+      if (!key) continue;
+      problems.push({
+        platform: 'jisuanke',
+        problemKey: key,
+        title: p.title?.trim() || key,
+        difficulty: jisuankeDifficultyToRating(p.difficultyType),
+        url: `${JISUANKE_BASE}/problem/${encodeURIComponent(key)}`,
+        tags: parseJisuankeTags(p.countOfTags),
+      });
+    }
+    if (problems.length >= max) break;
+    await sleep(300); // 页间限速
+  }
+  return { platform: 'jisuanke', problems: problems.slice(0, max), total };
 }

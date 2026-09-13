@@ -7,7 +7,7 @@ import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { bucketForDifficulty, safeTags } from '../analysis/stats.ts';
 import { backfillDifficulties } from '../analysis/difficultyBackfill.ts';
-import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBank, fetchAtcoderBank, fetchDaimayuanBank } from '../adapters/problemBank.ts';
+import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBank, fetchAtcoderBank, fetchDaimayuanBank, fetchJisuankeBank } from '../adapters/problemBank.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
 import { rebuildTopicAnnotations, TOPIC_TAGS_SQL } from '../topics/pipeline.ts';
 
@@ -76,7 +76,7 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
     );
   });
 
-  // POST /api/problems/bank  body: { platform: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan', max?, luoguMinDifficulty? }
+  // POST /api/problems/bank  body: { platform: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke', max?, luoguMinDifficulty? }
   // 拉取公开题库入库（匿名可访问），扩充待选题目池（不产生提交记录）。
   // codeforces / atcoder 为单次 API 调用（全量），通常仅在刷新内置快照后的新题时使用。
   r.post('/bank', asyncHandler(async (req, res) => {
@@ -84,9 +84,10 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
     if (
       platform !== 'luogu' && platform !== 'nowcoder' &&
       platform !== 'codeforces' && platform !== 'leetcode' &&
-      platform !== 'atcoder' && platform !== 'daimayuan'
+      platform !== 'atcoder' && platform !== 'daimayuan' &&
+      platform !== 'jisuanke'
     ) {
-      return res.status(400).json({ error: 'platform 需为 luogu / nowcoder / codeforces / leetcode / atcoder / daimayuan' });
+      return res.status(400).json({ error: 'platform 需为 luogu / nowcoder / codeforces / leetcode / atcoder / daimayuan / jisuanke' });
     }
     const maxCap = platform === 'codeforces' ? 20000 : platform === 'atcoder' ? 10000 : 5000;
     const maxN =
@@ -111,9 +112,11 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
               ? fetchLeetcodeBank
               : platform === 'atcoder'
                 ? fetchAtcoderBank
-                : platform === 'daimayuan'
-                  ? fetchDaimayuanBank
-                  : fetchCodeforcesBank;
+            : platform === 'daimayuan'
+              ? fetchDaimayuanBank
+              : platform === 'jisuanke'
+                ? fetchJisuankeBank
+                : fetchCodeforcesBank;
       const result = await fetcher(fetchFn, { max: maxN, ...(minDiff !== undefined ? { luoguMinDifficulty: minDiff } : {}) });
       const imported = upsertBankProblems(db, result.problems);
       res.json({

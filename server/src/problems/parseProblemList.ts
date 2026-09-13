@@ -50,6 +50,8 @@ const URL_PATTERNS: UrlPattern[] = [
   { re: /ac\.nowcoder\.com\/acm\/problem\/(\d+)/, platform: 'nowcoder', key: (m) => m[1] },
   // 计蒜客比赛题：www.jisuanke.com/contest/37176/problem/12345 → key 37176-12345（与同步适配器同键）
   { re: /jisuanke\.com\/contest\/(\d+)\/problem\/([A-Za-z0-9_-]+)/, platform: 'jisuanke', key: (m) => `${m[1]}-${m[2]}` },
+  // 计蒜客题库题：www.jisuanke.com/problem/T1001 → key T1001（与题库拉取同键）
+  { re: /jisuanke\.com\/problem\/(T\d+)/, platform: 'jisuanke', key: (m) => m[1] },
   // 力扣题单：slug 即 problemKey（同步/题库同键）。cn 为接入平台，com 链接同 slug 一并识别
   { re: /leetcode\.cn\/problems\/([a-z0-9_-]+)/i, platform: 'leetcode', key: (m) => m[1].toLowerCase() },
   { re: /leetcode\.com\/problems\/([a-z0-9_-]+)/i, platform: 'leetcode', key: (m) => m[1].toLowerCase() },
@@ -117,6 +119,8 @@ function matchKeyToken(token: string): { platform: PlatformId; problemKey: strin
     };
   }
   if (ATCODER_KEY_RE.test(token)) return { platform: 'atcoder', problemKey: token.toLowerCase() };
+  // 计蒜客题库题裸题号（T1001）；不含 URL 时不与其它平台规则冲突（T+纯数字仅计蒜客使用）
+  if (/^T\d+$/.test(token)) return { platform: 'jisuanke', problemKey: token.toUpperCase() };
   return null;
 }
 

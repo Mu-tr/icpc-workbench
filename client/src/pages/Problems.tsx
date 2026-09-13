@@ -772,7 +772,7 @@ const LUOGU_DIFFICULTY_OPTIONS = [
 /** 「拉取题库」页签：从公开题库批量入库，扩充训练计划待选题池（无需账号）。 */
 function BankTab({ onDone }: { onDone: () => void }) {
   const { message } = AntdApp.useApp()
-  const [platform, setPlatform] = useState<'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan'>('luogu')
+  const [platform, setPlatform] = useState<'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke'>('luogu')
   const [max, setMax] = useState(1000)
   const [luoguMin, setLuoguMin] = useState(3)
   const [busy, setBusy] = useState(false)
@@ -785,9 +785,10 @@ function BankTab({ onDone }: { onDone: () => void }) {
     leetcode: 'LeetCode',
     atcoder: 'AtCoder',
     daimayuan: '代码源',
+    jisuanke: '计蒜客',
   }
 
-  const switchPlatform = (v: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan') => {
+  const switchPlatform = (v: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke') => {
     setPlatform(v)
     // Codeforces / AtCoder 单次 API 调用即可拿全量，默认直接全拉
     // LeetCode 全量约 3300+ 题（按页拉取，约 1 分钟）；代码源约 500 题
@@ -834,6 +835,7 @@ function BankTab({ onDone }: { onDone: () => void }) {
             { value: 'atcoder' as const, label: 'AtCoder' },
             { value: 'leetcode' as const, label: 'LeetCode' },
             { value: 'daimayuan' as const, label: '代码源' },
+            { value: 'jisuanke' as const, label: '计蒜客' },
           ]}
         />
         <InputNumber

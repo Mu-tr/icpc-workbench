@@ -97,6 +97,31 @@ export function mapJisuankeVerdict(status: unknown): Verdict | null {
   return null;
 }
 
+/**
+ * 题库 difficultyType（level1…levelN）→ CF rating 近似值，供统一难度标尺。
+ * 档位总数按公开题库分布校准为 8 档（level8+ → 2800 封顶）；
+ * 数值为 ICPC 训练场景的粗校准，待全量题库通过率分布回归后再修正。
+ */
+const JISUANKE_LEVEL_TO_RATING: Record<number, number> = {
+  1: 800,
+  2: 1000,
+  3: 1300,
+  4: 1600,
+  5: 1900,
+  6: 2200,
+  7: 2500,
+  8: 2800,
+};
+
+export function jisuankeDifficultyToRating(difficultyType: unknown): number | null {
+  const n =
+    typeof difficultyType === 'number'
+      ? difficultyType
+      : Number(String(difficultyType ?? '').replace(/^level/i, ''));
+  if (!Number.isInteger(n) || n < 1) return null;
+  return JISUANKE_LEVEL_TO_RATING[Math.min(n, 8)] ?? null;
+}
+
 /** /api/contest/submissions 的单行（前端 ContestSubmissions 表格绑定的字段） */
 export interface JisuankeSubmissionRow {
   hashId?: string;
@@ -248,7 +273,13 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
       let processed = 0;
       let rowCapped = false;
       let caughtUp = false; // 增量模式：整场提交全部已知 → 更早的比赛都在库中
-      const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+      // 限速等待累计到 opts.waitedMs（同步层写入 sync_runs.waited_ms 供同步中心展示）
+      const sleep = async (ms: number): Promise<void> => {
+        if (ms > 0) {
+          if (opts) opts.waitedMs = (opts.waitedMs ?? 0) + ms;
+          await new Promise((r) => setTimeout(r, ms));
+        }
+      };
 
       for (let i = startIndex - 1; i < contests.length; i += 1) {
         if (processed >= PER_SYNC_MAX_CONTESTS) break;

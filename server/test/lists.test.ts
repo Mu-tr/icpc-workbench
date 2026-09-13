@@ -18,12 +18,14 @@ test('parseProblemList: URLs of all supported platforms', () => {
     'https://atcoder.jp/contests/abc300/tasks/abc300_a',
     'https://bs.daimayuan.top/p/7',
     'https://ac.nowcoder.com/acm/problem/51000',
+    'https://www.jisuanke.com/problem/T1001',
+    'https://www.jisuanke.com/contest/37176/problem/12345',
   ].join('\n');
   const rows = parseProblemListText(raw);
-  assert.equal(rows.length, 5);
+  assert.equal(rows.length, 7);
   assert.deepEqual(
     rows.map((r) => `${r.platform}:${r.problemKey}`),
-    ['luogu:P1001', 'codeforces:1234A', 'atcoder:abc300_a', 'daimayuan:7', 'nowcoder:51000'],
+    ['luogu:P1001', 'codeforces:1234A', 'atcoder:abc300_a', 'daimayuan:7', 'nowcoder:51000', 'jisuanke:T1001', 'jisuanke:37176-12345'],
   );
 });
 

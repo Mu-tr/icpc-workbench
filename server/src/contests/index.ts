@@ -1,11 +1,12 @@
 import type { ContestInfo, PlatformId } from '../../../shared/src/index.ts';
 import { fetchAtcoderContests } from './atcoderContests.ts';
 import { fetchCfContests } from './cfContests.ts';
+import { fetchJisuankeContests } from './jisuankeContests.ts';
 import { fetchLuoguContests } from './luoguContests.ts';
 import { fetchNowcoderContests } from './nowcoderContests.ts';
 
 /**
- * 多平台赛事聚合：Codeforces / AtCoder / 洛谷 / 牛客。
+ * 多平台赛事聚合：Codeforces / AtCoder / 洛谷 / 牛客 / 计蒜客。
  * 单一数据源失败只降级跳过（记入 failures），全部失败才报错。
  */
 
@@ -33,8 +34,9 @@ export async function fetchAllContests(fetchFn: typeof fetch = fetch): Promise<A
     fetchAtcoderContests(fetchFn),
     fetchLuoguContests(fetchFn),
     fetchNowcoderContests(fetchFn),
+    fetchJisuankeContests(fetchFn),
   ]);
-  const platforms: PlatformId[] = ['codeforces', 'atcoder', 'luogu', 'nowcoder'];
+  const platforms: PlatformId[] = ['codeforces', 'atcoder', 'luogu', 'nowcoder', 'jisuanke'];
   const contests: ContestInfo[] = [];
   const failures: AllContests['failures'] = {};
   results.forEach((r, i) => {
