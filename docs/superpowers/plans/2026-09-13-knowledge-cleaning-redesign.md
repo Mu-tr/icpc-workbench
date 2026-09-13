@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 测试基线：**538 server + 67 client 全绿**（`npm test`；538 为批次 A/B 提交后的实测值）。每个任务结束时测试必须保持全绿。
+- 测试基线：**559 server + 67 client 全绿**（`npm test`；559 为 Task 1/2 完成后的实测值，随每个任务递增）。每个任务结束时测试必须保持全绿。
 - 代码风格：既有文件用分号 + 单引号（server），client 用无分号风格；沿用 `commonjs`→ESM `node:` 前缀导入。
 - 数据库迁移必须**幂等**：重复打开同一库不产生额外变化（`server/src/db/index.ts` 的 `migrate()` 既有约定）。
 - **JSONL 是源真相**：任何对 `problem_keypoints` 的删除都必须在同一事务窗口内向 `data/knowledge/annotations.jsonl` 追加 tombstone 行（`knowledgePoints: []`），且 **append 先于 COMMIT**。只删库不写 tombstone 会导致下次启动重放复活数据。
@@ -2136,7 +2136,7 @@ git commit -m "docs(knowledge): 消费端口径同步与 README 更新（中英�
 
 - [ ] `npm run typecheck` 无错误
 - [ ] `npm run lint` **0 errors**（client 既有 11 个 warning 不增加）
-- [ ] `npm test` 全绿（server 测试数因删除 `knowledge-ai.test.ts` 而低于 538，但其覆盖的映射逻辑已由 Task 2/9 的新测试补回）
+- [ ] `npm test` 全绿（server 测试数会因本任务删除 `knowledge-ai.test.ts` 而下降，但其覆盖的映射逻辑已由 Task 2/9 的新测试补回）
 - [ ] `GET /api/knowledge/coverage` 的 `bySource.ai` 为 0，且 `annotated` 不包含任何 `source='ai'` 行
 - [ ] `SELECT COUNT(*) FROM problem_keypoints WHERE source='ai'` 为 **0**
 - [ ] 重启服务后该计数仍为 0（证明 JSONL tombstone 生效，AI 标注未复活）
