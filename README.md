@@ -63,7 +63,7 @@ icpc-workbench/
 
 ## 快速开始
 
-要求：Node.js ≥ 22.5（使用内置 `node:sqlite`），npm。
+要求：Node.js ≥ 22.16（使用内置 `node:sqlite`；知识点管线依赖 `DatabaseSync.isTransaction`，该属性 22.16 起提供），npm。
 
 ```bash
 npm install     # 安装全部 workspace 依赖

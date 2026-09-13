@@ -279,8 +279,9 @@ export function writeAnnotationsToDb(
       // 同 code 被别的来源占位时按优先级让位：优先级更高 → 删掉占位行后接管；
       // 更低 → 放弃该 code（不写库、也不进本条 JSONL 快照，保持「快照 = 本来源实际持有」）。
       // 这样 rule 想接管 tag 已占用的 code 时不会再撞主键、把整批事务打回。
+      // `?? 0` 与读路径（loadAnnotationsIntoDb）口径一致：枚举外的脏 source 视为最低优先级。
       const holder = holderOfCode.get(w.platform, w.problemKey, p.code) as { source: KnowledgeSource } | undefined;
-      if (holder && SOURCE_PRECEDENCE[holder.source] > SOURCE_PRECEDENCE[w.source]) continue;
+      if (holder && (SOURCE_PRECEDENCE[holder.source] ?? 0) > (SOURCE_PRECEDENCE[w.source] ?? 0)) continue;
       if (holder) delCode.run(w.platform, w.problemKey, p.code);
       insert.run(
         w.platform,
@@ -331,13 +332,15 @@ export function setManualKeypoints(
     return { code, confidence: 1, method: 'manual' };
   });
   // 人工校正清除该题全部旧来源标注后写 manual（校正即定论）；
-  // rule/ai 各补一行清除快照，防止 JSONL 重放时复活旧来源标注
+  // rule/tag/ai 各补一行清除快照，防止 JSONL 重放时复活旧来源标注
+  // （tag 层不会重访 manual 题，漏掉 tag 墓碑 = 被清除的 tag 行下次启动原样复活）
   db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(platform, problemKey);
   const result = writeAnnotationsToDb(db, [{ platform, problemKey, source: 'manual', points }]);
   const dataDir = resolveDataDir(opts.dataDir);
   if (dataDir) {
     appendAnnotations(dataDir, [
       tombstoneLine(platform, problemKey, 'rule'),
+      tombstoneLine(platform, problemKey, 'tag'),
       tombstoneLine(platform, problemKey, 'ai'),
       ...result.lines,
     ]);

@@ -40,7 +40,7 @@ export function upsertBankProblems(
   }
 
   const stmt = db.prepare(problemUpsertSql('bank'));
-  const findProblem = db.prepare('SELECT id, title FROM problems WHERE platform = ? AND problem_key = ?');
+  const findProblem = db.prepare('SELECT id, title, tags FROM problems WHERE platform = ? AND problem_key = ?');
 
   db.exec('BEGIN');
   try {
@@ -56,7 +56,7 @@ export function upsertBankProblems(
       }
       existedByPlatform.set(platform, existed);
     }
-    const newProblems: Array<{ platform: string; problemKey: string; title: string }> = [];
+    const newProblems: Array<{ platform: string; problemKey: string; title: string; tags: string }> = [];
     for (const r of rows) {
       stmt.run(
         r.platform,
@@ -67,8 +67,15 @@ export function upsertBankProblems(
         JSON.stringify(purifyTags(r.tags ?? [])),
         'bank',
       );
-      const problem = findProblem.get(r.platform, r.problemKey) as { id: number; title: string };
-      newProblems.push({ platform: r.platform, problemKey: r.problemKey, title: problem.title });
+      // tags 取**库内落定值**（写入即净化；非空才覆盖，故可能与本次入参不同）——
+      // tag 来源标注必须按实际落库的标签做映射
+      const problem = findProblem.get(r.platform, r.problemKey) as { id: number; title: string; tags: string };
+      newProblems.push({
+        platform: r.platform,
+        problemKey: r.problemKey,
+        title: problem.title,
+        tags: problem.tags,
+      });
     }
     db.exec('COMMIT');
     // 知识点管线增量：新题跑 L1 规则标注（未命中入 L2 队列）；标注失败不影响入库结果

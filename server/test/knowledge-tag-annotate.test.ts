@@ -10,8 +10,12 @@ import {
   initKnowledgeStore,
   keypointsOfProblem,
   loadAnnotationsIntoDb,
+  setManualKeypoints,
 } from '../src/knowledge/store.ts';
 import { runRulePass } from '../src/knowledge/pipeline.ts';
+import { parseManualRow } from '../src/import/rows.ts';
+import { insertNormalized } from '../src/import/importService.ts';
+import { upsertBankProblems } from '../src/import/bankService.ts';
 
 let db: Db;
 beforeEach(() => { db = createDb(':memory:'); });
@@ -279,5 +283,57 @@ test('annotateProblemsFromTags: 非 JSON / 非数组的 tags 视为无标签，�
     { dataDir: null },
   );
   assert.equal(empty.malformedTags, 0, "'[]' 是合法空标签，不算脏数据");
+});
+
+// ---------- 下游入口：人工校正 / 导入路径 ----------
+
+test('人工校正后重启重建：该题不得复活任何 tag 行（清除快照须含 tag）', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-tag-manual-'));
+  initKnowledgeStore(dataDir);
+  const db1 = createDb(':memory:');
+  try {
+    db1
+      .prepare("INSERT INTO problems (platform,problem_key,title,difficulty,tags) VALUES ('codeforces','8A','A. 线段树',1500,?)")
+      .run(JSON.stringify(['贪心']));
+    runRulePass(db1);
+    assert.deepEqual(codeSourcesOf('8A', db1), ['basic.greedy:tag', 'ds.segtree:rule']);
+
+    setManualKeypoints(db1, 'codeforces', '8A', ['dp.general']);
+    assert.deepEqual(codeSourcesOf('8A', db1), ['dp.general:manual']);
+
+    // 源真相重放：tag 层不会重访 manual 题，若清除快照漏了 tag，这里会复活基本贪心
+    const db2 = createDb(':memory:');
+    try {
+      loadAnnotationsIntoDb(db2, dataDir);
+      assert.deepEqual(
+        keypointsOfProblem(db2, 'codeforces', '8A').map((k) => `${k.code}:${k.source}`),
+        ['dp.general:manual'],
+        '人工校正后 tag 行不得从 JSONL 重放复活',
+      );
+    } finally {
+      db2.close();
+    }
+  } finally {
+    db1.close();
+    initKnowledgeStore(null);
+  }
+});
+
+test('导入路径：新导入题在同一批里落库 source=tag', () => {
+  // 标题不命中规则，行集纯粹由 tag 层产生（修复前：callers 不传 tags → 该题连一行都没有）
+  insertNormalized(db, 1, [
+    parseManualRow('codeforces', { problemKey: '9A', title: 'A. 无信息题', verdict: 'AC', tags: ['贪心', '排序'] }, 0),
+  ]);
+  assert.deepEqual(codeSourcesOf('9A'), ['basic.greedy:tag', 'misc.sorting:tag']);
+});
+
+test('题库路径：新入库题并联 tag 标注，且按库内落定标签（空标签不覆盖旧值）', () => {
+  // 库内已有标签、但还没有任何标注：入库时传空标签（不覆盖旧值），
+  // tag 标注必须按**落库后的** ['贪心'] 映射，而不是本次入参的 []
+  db.prepare("INSERT INTO problems (platform,problem_key,title,tags) VALUES ('codeforces','9B','A. 题','[\"贪心\"]')").run();
+  upsertBankProblems(db, [
+    { platform: 'codeforces', problemKey: '9B', title: 'A. 题', difficulty: null, url: null, tags: [] },
+  ]);
+  assert.deepEqual(codeSourcesOf('9B'), ['basic.greedy:tag']);
 });
 

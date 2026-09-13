@@ -59,7 +59,7 @@ icpc-workbench/
 
 ## Quick Start
 
-Requirements: Node.js ≥ 22.5 (uses built-in `node:sqlite`), npm.
+Requirements: Node.js ≥ 22.16 (uses built-in `node:sqlite`; the knowledge pipeline relies on `DatabaseSync.isTransaction`, available since 22.16), npm.
 
 ```bash
 npm install     # Install all workspace dependencies

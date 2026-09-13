@@ -32,7 +32,7 @@ export function insertNormalized(
        (user_id, platform, problem_id, verdict, language, submitted_at, external_id)
      VALUES (?, ?, (SELECT id FROM problems WHERE platform = ? AND problem_key = ?), ?, ?, ?, ?)`,
   );
-  const findProblem = db.prepare('SELECT id, title FROM problems WHERE platform = ? AND problem_key = ?');
+  const findProblem = db.prepare('SELECT id, title, tags FROM problems WHERE platform = ? AND problem_key = ?');
   // 手动导入（externalId 以 manual: 开头）与平台同步数据协调：
   // 同平台同题同结果已存在（无论来源是同步还是手动）→ 跳过，避免重复计数
   const manualDup = db.prepare(
@@ -43,7 +43,7 @@ export function insertNormalized(
 
   let imported = 0;
   let skipped = 0;
-  const newProblems: Array<{ platform: string; problemKey: string; title: string }> = [];
+  const newProblems: Array<{ platform: string; problemKey: string; title: string; tags: string }> = [];
   db.exec('BEGIN');
   try {
     if (opts.clearPlatform) {
@@ -64,8 +64,19 @@ export function insertNormalized(
         JSON.stringify(purifyTags(s.problem.tags)),
         source,
       );
-      const problem = findProblem.get(s.problem.platform, s.problem.problemKey) as { id: number; title: string };
-      newProblems.push({ platform: s.problem.platform, problemKey: s.problem.problemKey, title: problem.title });
+      const problem = findProblem.get(s.problem.platform, s.problem.problemKey) as {
+        id: number;
+        title: string;
+        tags: string;
+      };
+      // tags 取**库内落定值**（写入即净化，且非空才覆盖 → 可能与本次入参不同）：
+      // tag 来源标注必须按实际落库的标签做映射
+      newProblems.push({
+        platform: s.problem.platform,
+        problemKey: s.problem.problemKey,
+        title: problem.title,
+        tags: problem.tags,
+      });
       // 手动导入协调：同题同结果已存在 → 跳过（不再重复计入）
       if (isManual) {
         const dup = manualDup.get(
