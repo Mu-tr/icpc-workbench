@@ -65,21 +65,57 @@ export function parseCsvRows(
   platform: PlatformId,
   csv: string,
 ): NormalizedSubmission[] {
+  return parseCsvRowsWithReport(platform, csv).subs;
+}
+
+/** 逐行解析结果：合法行 + 非法行（含行号与原因），预览接口使用 */
+export interface RowParseReport {
+  subs: NormalizedSubmission[];
+  invalid: Array<{ line: number; error: string }>;
+}
+
+/** 逐行解析手动行：单行失败不中断整批（导入预览用），非法行带行号与原因 */
+export function parseManualRowsWithReport(
+  platform: PlatformId,
+  rows: ManualSubmissionRow[],
+): RowParseReport {
+  const subs: NormalizedSubmission[] = [];
+  const invalid: Array<{ line: number; error: string }> = [];
+  rows.forEach((row, i) => {
+    try {
+      subs.push(parseManualRow(platform, row, i));
+    } catch (e) {
+      invalid.push({ line: i + 1, error: (e as Error).message });
+    }
+  });
+  return { subs, invalid };
+}
+
+/** 逐行解析 CSV：表头缺失仍整体抛错（结构性问题）；数据行单行失败不中断 */
+export function parseCsvRowsWithReport(platform: PlatformId, csv: string): RowParseReport {
   const rows = parseCsv(csv);
-  if (rows.length === 0) return [];
+  if (rows.length === 0) return { subs: [], invalid: [] };
   const header = rows[0].map((h) => h.trim());
   for (const col of MANUAL_CSV_HEADER) {
     if (!header.includes(col)) {
       throw new Error(`CSV 缺少列: ${col}（表头: ${MANUAL_CSV_HEADER.join(',')}）`);
     }
   }
-  return rows.slice(1).map((r, i) => {
+  const subs: NormalizedSubmission[] = [];
+  const invalid: Array<{ line: number; error: string }> = [];
+  rows.slice(1).forEach((r, i) => {
     const obj: Record<string, unknown> = {};
     for (let c = 0; c < header.length; c += 1) {
       const val = (r[c] ?? '').trim();
       if (val === '') continue;
       obj[header[c]] = header[c] === 'difficulty' ? Number(val) : val;
     }
-    return parseManualRow(platform, obj as unknown as ManualSubmissionRow, i + 1);
+    // line 用含表头的 CSV 文件行号（表头为第 1 行，数据行从第 2 行起）
+    try {
+      subs.push(parseManualRow(platform, obj as unknown as ManualSubmissionRow, i + 1));
+    } catch (e) {
+      invalid.push({ line: i + 2, error: (e as Error).message });
+    }
   });
+  return { subs, invalid };
 }

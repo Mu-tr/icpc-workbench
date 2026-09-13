@@ -27,6 +27,20 @@ import { buildTagAliasSet, matchesProblemFilters } from '../problemFilter'
 import { canonicalTag, filterNoiseTags } from '../../../shared/src/index.ts'
 import { get, post } from '../api'
 
+/** POST /api/import/preview 响应：变更预览（不写库） */
+interface ImportPreviewResp {
+  total: number
+  valid: number
+  invalid: Array<{ line: number; error: string }>
+  preview: {
+    newSubmissions: number
+    duplicateSkips: number
+    manualSkips: number
+    problemCreates: number
+    problemUpdates: number
+  }
+}
+
 interface ProblemRow {
   id: number
   platform: PlatformId
@@ -268,15 +282,44 @@ export default function Problems() {
       reader.onload = async () => {
         const text = String(reader.result ?? '')
         try {
-          if (file.name.endsWith('.csv')) {
-            await post('/api/import/csv', { platform, csv: text })
-          } else {
-            const rows = JSON.parse(text) as unknown[]
-            await post('/api/import/manual', { platform, rows })
-          }
-          message.success('导入成功')
-          setImportOpen(false)
-          load()
+          const isCsv = file.name.endsWith('.csv')
+          const endpoint = isCsv ? '/api/import/csv' : '/api/import/manual'
+          const body = isCsv ? { platform, csv: text } : { platform, rows: JSON.parse(text) as unknown[] }
+          // 变更预览：先看不写库，确认后才真正导入
+          const pv = await post<ImportPreviewResp>('/api/import/preview', body)
+          modal.confirm({
+            title: '导入预览（未写入任何数据）',
+            width: 520,
+            content: (
+              <div style={{ fontSize: 13 }}>
+                <p>共 {pv.total} 行：合法 {pv.valid} 行，非法 {pv.invalid.length} 行</p>
+                <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                  <li>将新增提交：<b>{pv.preview.newSubmissions}</b> 条</li>
+                  <li>重复跳过：{pv.preview.duplicateSkips} 条；同题同结果跳过：{pv.preview.manualSkips} 条</li>
+                  <li>题目新建 {pv.preview.problemCreates} 个 / 更新 {pv.preview.problemUpdates} 个</li>
+                </ul>
+                {pv.invalid.length > 0 && (
+                  <div style={{ color: '#d4380d' }}>
+                    非法行示例：
+                    <ul style={{ paddingLeft: 18 }}>
+                      {pv.invalid.slice(0, 3).map((r) => (
+                        <li key={r.line}>第 {r.line} 行：{r.error}</li>
+                      ))}
+                    </ul>
+                    {pv.invalid.length > 3 && <span>… 共 {pv.invalid.length} 条</span>}
+                  </div>
+                )}
+              </div>
+            ),
+            okText: pv.invalid.length ? `仍要导入（${pv.valid} 条合法）` : '确认导入',
+            cancelText: '取消',
+            onOk: async () => {
+              await post(endpoint, body)
+              message.success('导入成功')
+              setImportOpen(false)
+              load()
+            },
+          })
         } catch (e) {
           message.error((e as Error).message)
         }
