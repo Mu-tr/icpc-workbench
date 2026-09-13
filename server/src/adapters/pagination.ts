@@ -25,6 +25,11 @@ export function markTruncated(opts: FetchOptions | undefined): void {
   if (opts) opts.truncated = true;
 }
 
+/** 累计本次同步的限速等待耗时（同步层写入 sync_runs.waited_ms，同步中心展示） */
+export function recordWait(opts: FetchOptions | undefined, ms: number): void {
+  if (opts && ms > 0) opts.waitedMs = (opts.waitedMs ?? 0) + ms;
+}
+
 /** 页码型平台（牛客/力扣/代码源）分批拉取的统一配置 */
 export interface PagedFetchConfig<R> {
   /** 每页条数（用于推算页数预算与「最后一页」判定） */
@@ -45,6 +50,11 @@ export interface PagedFetchConfig<R> {
   backfill?: boolean;
   /** 补全续拉游标（从该页起续拉更早历史） */
   backfillFromPage?: number;
+  /**
+   * 同步窗口起点（ISO8601 UTC）。降序平台分页遇到早于该时间的提交时提前终止
+   * （「仅同步最近 N 天」场景），终止不视为截断。
+   */
+  since?: string;
   /** 适配器 → 同步层 out 字段载体（回写 truncated / backfillReachedPage） */
   opts?: FetchOptions;
   /** 页间限速（毫秒），默认 0 */
@@ -66,7 +76,12 @@ export async function pagedFetch<R>(cfg: PagedFetchConfig<R>): Promise<Normalize
   let naturalEnd = false; // 空页 / 最后一页
   let caughtUp = false; // 增量模式整页已知早停
   let rowCapped = false; // 触及新增上限
-  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  let windowEnd = false; // 早于 since 窗口起点（仅同步最近 N 天）
+  const sleep = async (ms: number): Promise<void> => {
+    if (ms <= 0) return;
+    recordWait(cfg.opts, ms);
+    await new Promise<void>((r) => setTimeout(r, ms));
+  };
 
   for (let page = startPage, n = 0; n < budget; page += 1, n += 1) {
     reachedPage = page;
@@ -84,13 +99,18 @@ export async function pagedFetch<R>(cfg: PagedFetchConfig<R>): Promise<Normalize
       }
       const norm = cfg.normalize(row);
       if (norm === null) continue; // 评测中 / 隐藏等：不计入已知也不计入新增
+      // 降序分页遇到早于窗口起点的行：本页后续与后续页都更旧，标记终止（不计截断）
+      if (cfg.since && norm.submittedAt < cfg.since) {
+        windowEnd = true;
+        break;
+      }
       out.push(norm);
       if (cfg.maxSubmissions && out.length >= cfg.maxSubmissions) {
         rowCapped = true;
         break;
       }
     }
-    if (rowCapped) break;
+    if (rowCapped || windowEnd) break;
     // 整页已知（所有行都在库中）：补全跳过该页继续向更旧，增量模式则终止（更旧都在库）
     if (cfg.knownExternalIds && knownInPage > 0 && knownInPage === rows.length) {
       if (cfg.backfill) {
@@ -107,9 +127,9 @@ export async function pagedFetch<R>(cfg: PagedFetchConfig<R>): Promise<Normalize
     if (cfg.pageDelayMs) await sleep(cfg.pageDelayMs);
   }
 
-  // 截断判定：触及上限，或页数预算耗尽（未自然结束 / 未增量早停）且有新增 → 仍有更早历史待补全
+  // 截断判定：触及上限，或页数预算耗尽（未自然结束 / 未增量早停 / 未到窗口起点）且有新增
   let truncated = rowCapped;
-  if (!rowCapped && !naturalEnd && !caughtUp && out.length > 0) truncated = true;
+  if (!rowCapped && !naturalEnd && !caughtUp && !windowEnd && out.length > 0) truncated = true;
   if (truncated && cfg.opts) {
     cfg.opts.truncated = true;
     cfg.opts.backfillReachedPage = reachedPage;

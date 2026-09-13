@@ -6,10 +6,40 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { insertNormalized } from '../import/importService.ts';
 import { getAdapter } from './registry.ts';
-import { ManualImportRequiredError, type FetchOptions } from './types.ts';
+import { ManualImportRequiredError, SyncError, type FetchOptions, type SyncErrorCode } from './types.ts';
 
 export interface SyncOptions {
   userId?: number;
+  /** 仅同步最近 N 天（补充拉取窗口）：不改 platform_accounts 状态，插入仍按唯一键去重 */
+  days?: number;
+  /** 同步触发来源（写入 sync_runs.triggered_by，供同步中心展示） */
+  triggeredBy?: 'manual' | 'retry' | 'days' | 'all';
+}
+
+/** 每个平台建议的同步间隔（毫秒）：按平台风控强度选定，同步中心据此展示「下次推荐同步时间」 */
+const SUGGESTED_SYNC_INTERVAL_MS: Partial<Record<PlatformId, number>> = {
+  codeforces: 2 * 3600_000,
+  atcoder: 6 * 3600_000,
+  luogu: 6 * 3600_000,
+  nowcoder: 12 * 3600_000,
+  leetcode: 12 * 3600_000,
+  daimayuan: 12 * 3600_000,
+};
+const DEFAULT_SYNC_INTERVAL_MS = 12 * 3600_000;
+
+/**
+ * 将同步过程中的异常归类为可解释错误码（sync_runs.error_code）：
+ * 优先识别显式 SyncError，再按既有适配器错误消息的特征回退匹配。
+ */
+export function classifySyncError(e: unknown): SyncErrorCode {
+  if (e instanceof SyncError) return e.code;
+  if (e instanceof ManualImportRequiredError) return 'manual_required';
+  const msg = String((e as Error)?.message ?? '');
+  if (/HTTP 429|限流|Too Many Requests/i.test(msg)) return 'rate_limited';
+  if (/HTTP 40[13]|Cookie|风控|登录|auth/i.test(msg)) return 'auth_expired';
+  if (/结构|解析失败|页面异常|parse/i.test(msg)) return 'schema_changed';
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|timeout|abort|网络/i.test(msg)) return 'network';
+  return 'unknown';
 }
 
 /** 单次同步新增提交数默认上限与取值范围（分批拉取防封号）；与 settings 路由共用同一约束。
@@ -83,6 +113,15 @@ export async function syncPlatform(
     return result;
   }
 
+  // 同步历史（sync_runs）：无论成败都记录，供同步中心展示失败原因与限速等待
+  const startedAt = new Date().toISOString();
+  const startedTick = Date.now();
+  let mode: 'full' | 'incremental' | 'backfill' | 'days' = 'incremental';
+  let waitedMs = 0;
+  let truncated = false;
+
+  const daysWindow = opts.days && opts.days > 0 ? opts.days : 0;
+
   const account = db
     .prepare('SELECT handle, last_sync_at, sync_truncated, backfill_page FROM platform_accounts WHERE user_id = ? AND platform = ?')
     .get(userId, platform) as { handle: string; last_sync_at: string | null; sync_truncated: number; backfill_page: number | null } | undefined;
@@ -90,18 +129,24 @@ export async function syncPlatform(
   // 两种情况都要求全量重拉 + 清空该平台旧数据，避免跨账号数据混入或增量起点错乱。
   // 注意：同 handle 首次成功同步时也会清空该平台旧数据（含手动导入记录）——
   // 语义是"同步以平台数据为准"，手动导入数据会被平台数据取代。
+  // days 窗口模式是补充拉取，不改账号状态、不触发清空。
   const handleChanged =
+    !daysWindow &&
     account !== undefined &&
     (account.handle !== handle || !account.last_sync_at);
 
   try {
     // 换账号/未成功同步过：全量重拉（不沿用可能属于旧账号的增量起点）
     const since =
-      !handleChanged && account?.last_sync_at ? account.last_sync_at : undefined;
+      daysWindow
+        ? new Date(Date.now() - daysWindow * 86_400_000).toISOString()
+        : !handleChanged && account?.last_sync_at ? account.last_sync_at : undefined;
     // 声明支持已知提交号过滤的适配器（CF/洛谷/牛客，拉取按新到旧排序）：
-    // 注入库中已有提交号，适配器整页已知即提前终止分页，实现真实增量
+    // 注入库中已有提交号，适配器整页已知即提前终止分页，实现真实增量。
+    // days 窗口模式不注入（否则整页已知会提前终止，覆盖不到窗口内漏拉的历史），
+    // 窗口终止由 since 早停承担，重复插入由唯一键去重兜底。
     const knownExternalIds =
-      !handleChanged && adapter.knownIdsFilter
+      !daysWindow && !handleChanged && adapter.knownIdsFilter
         ? loadKnownExternalIds(db, userId, platform)
         : undefined;
     // 需登录平台：从 settings 读取 Cookie / CSRF 注入适配器
@@ -115,11 +160,15 @@ export async function syncPlatform(
     const csrf = readSetting(`csrf.${platform}`);
     const maxSubmissions = readMaxSubmissions(db);
     // 补全模式：上次同步被截断（仍有更早历史待拉），且非换账号全量重拉
-    const backfill = !handleChanged && account?.sync_truncated === 1;
+    const backfill = !daysWindow && !handleChanged && account?.sync_truncated === 1;
+    mode = daysWindow ? 'days' : handleChanged ? 'full' : backfill ? 'backfill' : 'incremental';
 
-    // 始终传入一个完整对象，便于适配器回写 truncated / backfillReachedPage out 字段
+    // 始终传入一个完整对象，便于适配器回写 truncated / backfillReachedPage / waitedMs out 字段。
+    // windowSince 仅在 days 窗口模式注入：降序平台分页按窗口起点提前终止；
+    // 常规增量绝不注入时间截断（牛客存在提交晚于其提交时间出现在列表的真实场景）。
     const fetchOpts: FetchOptions = {
       ...(since ? { since } : {}),
+      ...(daysWindow && since ? { windowSince: since } : {}),
       ...(cookie ? { cookie } : {}),
       ...(csrf ? { csrf } : {}),
       ...(knownExternalIds ? { knownExternalIds } : {}),
@@ -128,7 +177,8 @@ export async function syncPlatform(
       ...(backfill && account?.backfill_page ? { backfillFromPage: account.backfill_page } : {}),
     };
     const rows = await adapter.fetchUserSubmissions(handle, fetchOpts);
-    const truncated = fetchOpts.truncated === true;
+    truncated = fetchOpts.truncated === true;
+    waitedMs = fetchOpts.waitedMs ?? 0;
     const reachedPage = fetchOpts.backfillReachedPage;
 
     // 换账号：全量重拉，并在同一事务内清空该平台旧提交再写入新数据
@@ -137,8 +187,18 @@ export async function syncPlatform(
     });
     result.imported = r.imported;
     result.skipped = r.skipped;
-    if (!handleChanged && (since || (knownExternalIds && knownExternalIds.size > 0))) {
+    if (!daysWindow && !handleChanged && (since || (knownExternalIds && knownExternalIds.size > 0))) {
       result.incremental = true;
+    }
+
+    // days 窗口模式为补充拉取：不改 platform_accounts 状态（last_sync_at / 补全游标保持原样）
+    if (daysWindow) {
+      result.note = `已同步最近 ${daysWindow} 天：新增 ${r.imported} 条（重复 ${r.skipped} 条自动跳过）。`;
+      recordSyncRun(db, userId, platform, handle, startedAt, startedTick, {
+        mode, status: 'ok', imported: r.imported, skipped: r.skipped, truncated: false, waitedMs,
+        triggeredBy: opts.triggeredBy ?? 'days', nextSuggestedSyncAt: null,
+      });
+      return result;
     }
 
     // last_sync_at 推进策略：
@@ -178,12 +238,56 @@ export async function syncPlatform(
         `提交记录较多，已分批同步 ${r.imported} 条以防触发平台风控；再次点击同步可继续补全更早的历史记录。` +
         `（单次上限可在「设置 → 平台账号与适配器」中调整）`;
     }
+    recordSyncRun(db, userId, platform, handle, startedAt, startedTick, {
+      mode, status: 'ok', imported: r.imported, skipped: r.skipped, truncated, waitedMs,
+      triggeredBy: opts.triggeredBy ?? 'manual',
+      nextSuggestedSyncAt: new Date(Date.now() + (SUGGESTED_SYNC_INTERVAL_MS[platform] ?? DEFAULT_SYNC_INTERVAL_MS)).toISOString(),
+    });
   } catch (e) {
+    const code = classifySyncError(e);
     if (e instanceof ManualImportRequiredError) {
       result.errors.push(e.message);
     } else {
       result.errors.push((e as Error).message);
     }
+    recordSyncRun(db, userId, platform, handle, startedAt, startedTick, {
+      mode, status: 'failed', imported: 0, skipped: 0, truncated: false, waitedMs,
+      triggeredBy: opts.triggeredBy ?? 'manual', nextSuggestedSyncAt: null,
+      errorCode: code, errorMessage: (e as Error).message,
+    });
   }
   return result;
+}
+
+/** 写入一条同步历史（sync_runs）。 */
+function recordSyncRun(
+  db: Db,
+  userId: number,
+  platform: PlatformId,
+  handle: string,
+  startedAt: string,
+  startedTick: number,
+  data: {
+    mode: string;
+    status: 'ok' | 'failed';
+    imported: number;
+    skipped: number;
+    truncated: boolean;
+    waitedMs: number;
+    triggeredBy: string;
+    nextSuggestedSyncAt: string | null;
+    errorCode?: SyncErrorCode;
+    errorMessage?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO sync_runs (user_id, platform, handle, started_at, finished_at, duration_ms,
+       imported, skipped, truncated, waited_ms, mode, status, error_code, error_message,
+       triggered_by, next_suggested_sync_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    userId, platform, handle, startedAt, new Date().toISOString(), Date.now() - startedTick,
+    data.imported, data.skipped, data.truncated ? 1 : 0, data.waitedMs, data.mode, data.status,
+    data.errorCode ?? null, data.errorMessage ?? null, data.triggeredBy, data.nextSuggestedSyncAt,
+  );
 }

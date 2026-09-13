@@ -253,6 +253,14 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
       const known = opts?.knownExternalIds;
       const maxSubmissions = opts?.maxSubmissions;
       const backfill = opts?.backfill;
+      const since = opts?.windowSince;
+      // 限速等待累计到 opts.waitedMs（同步层写入 sync_runs.waited_ms 供同步中心展示）
+      const sleepTracked = async (ms: number): Promise<void> => {
+        if (ms > 0) {
+          if (opts) opts.waitedMs = (opts.waitedMs ?? 0) + ms;
+          await sleep(ms);
+        }
+      };
       // 页数预算：新增上限推算的新页 ×2（兼顾补全续拉起点的重叠页），上限 PER_SYNC_MAX_PAGES
       const budget =
         maxSubmissions && maxSubmissions > 0
@@ -270,6 +278,7 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
       let naturalEnd = false; // 空页
       let caughtUp = false; // 增量模式整页已知早停
       let rowCapped = false; // 触及新增上限
+      let windowEnd = false; // 早于 since 窗口起点（仅同步最近 N 天）
       for (let page = startPage, n = 0; n < budget; page += 1, n += 1) {
         reachedPage = page;
         const url = `${API}/record/list?user=${encodeURIComponent(handle)}&page=${page}`;
@@ -313,27 +322,32 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
           }
           // 过滤等待/评测中/隐藏的非最终状态
           if (rec.status === 0 || rec.status === 1 || rec.status === -1) continue;
+          // 降序分页遇到早于窗口起点的记录：后续都更旧，终止（不计截断）
+          if (since && rec.submitTime * 1000 < Date.parse(since)) {
+            windowEnd = true;
+            break;
+          }
           raws.push(rec);
           if (maxSubmissions && raws.length >= maxSubmissions) {
             rowCapped = true;
             break;
           }
         }
-        if (rowCapped) break;
+        if (rowCapped || windowEnd) break;
         // 整页已知：补全跳过该页继续向更旧，增量模式则终止（更旧都在库）
         if (known && knownInPage > 0 && knownInPage === records.length) {
           if (backfill) {
-            await sleep(opts?.pageDelayMs ?? PAGE_DELAY_MS);
+            await sleepTracked(opts?.pageDelayMs ?? PAGE_DELAY_MS);
             continue;
           }
           caughtUp = true;
           break;
         }
-        await sleep(opts?.pageDelayMs ?? PAGE_DELAY_MS);
+        await sleepTracked(opts?.pageDelayMs ?? PAGE_DELAY_MS);
       }
 
-      // 截断：触及上限，或页数预算耗尽（未自然结束/未增量早停）且有新增 → 仍有更早历史待补全
-      const truncated = rowCapped || (!naturalEnd && !caughtUp && raws.length > 0);
+      // 截断：触及上限，或页数预算耗尽（未自然结束/未增量早停/未到窗口起点）且有新增
+      const truncated = rowCapped || (!naturalEnd && !caughtUp && !windowEnd && raws.length > 0);
       if (truncated && opts) {
         opts.truncated = true;
         opts.backfillReachedPage = reachedPage;
@@ -354,7 +368,7 @@ export function createLuoguAdapter(fetchFn: typeof fetch = fetch): PlatformAdapt
           pidsToFetch.slice(i, i + PROBLEM_FETCH_CONCURRENCY).map((pid) => fetchProblemInfo(pid, cookie, opts?.csrf)),
         );
         if (i + PROBLEM_FETCH_CONCURRENCY < pidsToFetch.length) {
-          await sleep(PROBLEM_FETCH_BATCH_DELAY_MS); // 批次间限速
+          await sleepTracked(PROBLEM_FETCH_BATCH_DELAY_MS); // 批次间限速
         }
       }
 

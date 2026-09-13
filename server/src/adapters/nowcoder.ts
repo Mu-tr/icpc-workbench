@@ -98,6 +98,7 @@ export function createNowcoderAdapter(fetchFn: typeof fetch = fetch): PlatformAd
     ): Promise<NormalizedSubmission[]> {
       let firstPageEmpty = false; // 首页空 = 页面结构变化/风控，须抛错而非"同步成功 0 条"
       return pagedFetch<NcRow>({
+        since: opts?.windowSince,
         pageSize: PAGE_SIZE,
         perSyncMax: PER_SYNC_MAX_PAGES,
         fetchPage: async (page) => {

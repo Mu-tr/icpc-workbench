@@ -123,6 +123,7 @@ export function createDaimayuanAdapter(fetchFn: typeof fetch = fetch): PlatformA
         );
       }
       return pagedFetch<HydroRow>({
+        since: opts?.windowSince,
         pageSize: PAGE_SIZE,
         perSyncMax: PER_SYNC_MAX_PAGES,
         fetchPage: async (page) => {

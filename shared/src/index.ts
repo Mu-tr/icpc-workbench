@@ -83,6 +83,42 @@ export interface SyncResult {
   note?: string;
 }
 
+/** 同步任务历史一行（同步中心展示）。status: ok=成功 / failed=失败（含需手动导入引导）。 */
+export interface SyncRun {
+  id: number;
+  platform: PlatformId;
+  handle: string;
+  /** ISO8601 UTC */
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number;
+  imported: number;
+  skipped: number;
+  truncated: number;
+  /** 限速等待总耗时（毫秒） */
+  waitedMs: number;
+  /** full=换账号全量 / incremental=增量 / backfill=补全 / days=仅最近 N 天 */
+  mode: 'full' | 'incremental' | 'backfill' | 'days';
+  status: 'ok' | 'failed';
+  /** auth_expired / rate_limited / schema_changed / manual_required / network / unknown */
+  errorCode: string | null;
+  errorMessage: string | null;
+  /** manual=手动 / retry=重试失败平台 / days=窗口同步 / all=一键同步 */
+  triggeredBy: string;
+  /** 按平台节奏推荐的下次同步时间（ISO8601，可为空） */
+  nextSuggestedSyncAt: string | null;
+}
+
+/** 平台同步健康状态（按最近一次同步推导，供同步中心徽章展示） */
+export type PlatformSyncStatus =
+  | 'healthy'
+  | 'degraded'
+  | 'auth_expired'
+  | 'rate_limited'
+  | 'schema_changed'
+  | 'manual_required'
+  | 'never';
+
 /** 手动导入单行输入（JSON 表单或 CSV 解析后）。 */
 export interface ManualSubmissionRow {
   /** 平台内题目标识，如 P1001 / abc321_a（必填） */

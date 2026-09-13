@@ -183,14 +183,18 @@ describe('resolveAndValidateHost', () => {
 
   it('公网域名解析到私网 IP → 拦截（DNS rebinding 防护）', async () => {
     setDnsLookupForTest(async () => [{ address: '10.9.9.9' }, { address: '192.168.0.2' }]);
-    assert.match(await resolveAndValidateHost('evil.example.com'), /内网/);
+    const r = await resolveAndValidateHost('evil.example.com');
+    assert.ok(r);
+    assert.match(r, /内网/);
   });
 
   it('解析失败（NXDOMAIN/非常规字面量）→ 拦截', async () => {
     setDnsLookupForTest(async () => {
       throw new Error('NXDOMAIN');
     });
-    assert.match(await resolveAndValidateHost('0x7f000001'), /解析失败/);
+    const r = await resolveAndValidateHost('0x7f000001');
+    assert.ok(r);
+    assert.match(r, /解析失败/);
   });
 });
 

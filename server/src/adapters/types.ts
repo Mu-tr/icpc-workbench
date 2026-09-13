@@ -12,6 +12,23 @@ export class ManualImportRequiredError extends Error {
   }
 }
 
+/** 同步失败的可解释分类码（同步中心状态与诊断导出用） */
+export type SyncErrorCode =
+  | 'auth_expired' // Cookie 过期 / 401/403 / 风控
+  | 'rate_limited' // HTTP 429 等限流
+  | 'schema_changed' // 页面或接口结构变化导致解析失败
+  | 'manual_required' // 平台无公开提交 API，需手动导入
+  | 'network' // DNS/连接/超时等网络层错误
+  | 'unknown';
+
+/** 平台交互失败且可分类时抛出；同步层写入 sync_runs.error_code 供状态推导。 */
+export class SyncError extends Error {
+  constructor(readonly code: SyncErrorCode, message: string) {
+    super(message);
+    this.name = 'SyncError';
+  }
+}
+
 export interface FetchOptions {
   /** 增量同步起点（ISO8601 UTC，平台支持时使用；不支持则忽略） */
   since?: string;
@@ -57,6 +74,18 @@ export interface FetchOptions {
    * 仅页码型平台在补全模式下回写；自然结束时同步层会清空 backfill_page。
    */
   backfillReachedPage?: number;
+  /**
+   * 【适配器 → 同步层 回传】本次同步的限速等待总耗时（毫秒）。
+   * 分页 sleep 与限流 Retry-After 等待均应累计到该字段，同步层写入 sync_runs.waited_ms。
+   */
+  waitedMs?: number;
+  /**
+   * 「仅同步最近 N 天」窗口起点（ISO8601 UTC，同步层仅在窗口模式下注入）。
+   * 降序平台分页遇到早于该时间的提交时提前终止。与增量 since 严格区分：
+   * 牛客等平台存在「提交早于上次同步时刻、却晚出现在列表」的真实场景，
+   * 常规增量必须依赖 knownExternalIds 判重，绝不能做时间截断（会漏提交）。
+   */
+  windowSince?: string;
 }
 
 /**

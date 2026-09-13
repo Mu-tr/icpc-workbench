@@ -160,6 +160,7 @@ export function createLeetcodeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
       let firstPageRows = -1;
       let firstPageSlugged = -1;
       const out = await pagedFetch<LcSubmission>({
+        since: opts?.windowSince,
         pageSize: PAGE_SIZE,
         perSyncMax: PER_SYNC_MAX_PAGES,
         fetchPage: async (page) => {

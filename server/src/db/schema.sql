@@ -28,6 +28,32 @@ CREATE TABLE IF NOT EXISTS platform_accounts (
   UNIQUE (user_id, platform)
 );
 
+-- 同步任务历史：每次平台同步一行（成功与失败都记录），供同步中心展示与诊断导出。
+-- status: ok=全部成功 / partial=部分成功（预留）/ failed=失败；error_code 为可解释分类
+-- （auth_expired / rate_limited / schema_changed / manual_required / network / unknown）。
+-- mode: full=换账号全量 / incremental=增量 / backfill=补全 / days=仅最近 N 天窗口。
+CREATE TABLE IF NOT EXISTS sync_runs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id),
+  platform      TEXT NOT NULL REFERENCES platforms(id),
+  handle        TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  finished_at   TEXT,
+  duration_ms   INTEGER NOT NULL DEFAULT 0,
+  imported      INTEGER NOT NULL DEFAULT 0,
+  skipped       INTEGER NOT NULL DEFAULT 0,
+  truncated     INTEGER NOT NULL DEFAULT 0,
+  waited_ms     INTEGER NOT NULL DEFAULT 0,   -- 限速等待总耗时（分页 sleep + Retry-After）
+  mode          TEXT NOT NULL DEFAULT 'incremental',
+  status        TEXT NOT NULL DEFAULT 'ok',
+  error_code    TEXT,
+  error_message TEXT,
+  triggered_by  TEXT NOT NULL DEFAULT 'manual', -- manual | retry | days | all
+  next_suggested_sync_at TEXT                   -- 按平台节奏推荐的下次同步时间
+);
+CREATE INDEX IF NOT EXISTS idx_sync_runs_platform ON sync_runs(user_id, platform, started_at);
+
+
 CREATE TABLE IF NOT EXISTS problems (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   platform    TEXT NOT NULL REFERENCES platforms(id),
