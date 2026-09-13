@@ -373,8 +373,12 @@ export interface MasteryReport {
 
 // ---------- 自建知识点管线（taxonomy + L1 规则 / L2 AI / L3 人工） ----------
 
-/** 标注来源：rule=L1 标题规则 / ai=L2 批量模型分类 / manual=L3 人工校正（永不被重跑覆盖） */
-export type KnowledgeSource = 'rule' | 'ai' | 'manual';
+/**
+ * 标注来源：tag=题源标签映射（含粗粒度）/ rule=L1 标题规则 /
+ * ai=L2 批量模型分类 / manual=L3 人工校正（永不被重跑覆盖）。
+ * 同 code 冲突时的优先级：manual > ai > rule > tag（tag 层只补空缺，见 tagAnnotate.ts）。
+ */
+export type KnowledgeSource = 'tag' | 'rule' | 'ai' | 'manual';
 
 /** 单题单个知识点的标注条目（problem_keypoints 行 / JSONL 内嵌结构） */
 export interface KnowledgePointEntry {

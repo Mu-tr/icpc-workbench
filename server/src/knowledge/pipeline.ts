@@ -1,6 +1,7 @@
 /**
  * 知识点管线编排：L1 规则批跑 + 增量入队 + 断点续跑 + 版本差量重跑。
- * 红线：入管线即丢弃题源 tags，特征只有 platform / problemKey / title / difficulty。
+ * 红线：L2 的 AI 特征只有 platform / problemKey / title / difficulty（绝不给题源 tags）；
+ * 与 AI 并列的 tag 来源标注不走模型，直接读 problems.tags 做确定性映射（见 tagAnnotate.ts）。
  * 事务与文件顺序：DB 写入与 JSONL 追加在同一事务窗口内（先 append 后 COMMIT），
  * 崩溃时 JSONL 多出的行由下次启动重放自愈，不会丢标注。
  */
@@ -17,6 +18,7 @@ import {
   type AnnotationWrite,
   type JsonlLine,
 } from './store.ts';
+import { annotateProblemsFromTags } from './tagAnnotate.ts';
 
 /**
  * 管线代码版本：仅当 pipeline.ts / ruleEngine.ts 的**匹配逻辑**改动时才 bump。
@@ -36,6 +38,8 @@ export interface L1RunResult {
   scanned: number;
   /** 规则命中落库的题数 */
   annotated: number;
+  /** tag 来源映射落库的题数（与 rule 并列的独立来源） */
+  tagAnnotated: number;
   /** 未命中进入 L2 队列的题数 */
   enqueued: number;
   /** 有人工校正标注而跳过的题数 */
@@ -46,6 +50,8 @@ interface ProblemRow {
   platform: string;
   problem_key: string;
   title: string;
+  /** 题源标签 JSON（tag 来源标注用；缺省视为无标签） */
+  tags?: string;
 }
 
 /**
@@ -53,10 +59,12 @@ interface ProblemRow {
  * - 已有 manual 标注的题跳过（人工校正置顶）
  * - 已有任意标注的题跳过（增量语义），force 时重跑（覆盖 rule 来源旧标注）
  * - 命中落库 source=rule；未命中入 L2 队列（幂等）
+ * - 同时并联 tag 来源（题源标签 → 知识点 code，落库 source=tag，见 tagAnnotate.ts），
+ *   两者同处一个事务窗口，JSONL 在本函数内统一追加
  */
 export function annotateProblemsL1(
   db: Db,
-  rows: Array<{ platform: string; problemKey: string; title: string }>,
+  rows: Array<{ platform: string; problemKey: string; title: string; tags?: string }>,
   opts: { dataDir?: string | null; force?: boolean } = {},
 ): L1RunResult {
   const hasManual = db.prepare(
@@ -113,10 +121,26 @@ export function annotateProblemsL1(
       }
     }
     const result = writeAnnotationsToDb(db, writes);
+    // tag 来源与 rule 来源并联：两者互相独立（rule 已有标注的题仍可能有 tag 标注）。
+    // 必须在 rule 写入**之后**调用：同一 (platform, problem_key, code) 在表里只有一行，
+    // tag 层据此跳过已被 rule/manual/ai 认领的 code；反过来先写 tag 会让 rule 的插入
+    // 撞主键（UNIQUE constraint）而回滚整批。
+    const tagWrites = rows
+      .filter((r) => r.tags !== undefined && r.tags !== '[]')
+      .map((r) => ({ platform: r.platform, problemKey: r.problemKey, tags: r.tags! }));
+    // dataDir 传 null：JSONL 由本函数统一追加（把 tagResult.lines 一并带上），
+    // 避免同一事务窗口内追加两次
+    const tagResult = annotateProblemsFromTags(db, tagWrites, { dataDir: null });
     const dataDir = effectiveDataDir(opts.dataDir);
-    if (dataDir) appendAnnotations(dataDir, [...result.lines, ...tombstones]);
+    if (dataDir) appendAnnotations(dataDir, [...result.lines, ...tagResult.lines, ...tombstones]);
     db.exec('COMMIT');
-    return { scanned, annotated: result.written, enqueued, skippedManual };
+    return {
+      scanned,
+      annotated: result.written,
+      tagAnnotated: tagResult.annotated,
+      enqueued,
+      skippedManual,
+    };
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
@@ -167,7 +191,7 @@ export function runRulePass(
   const rows = opts.rerun
     ? (db
         .prepare(
-          `SELECT p.platform, p.problem_key, p.title FROM problems p
+          `SELECT p.platform, p.problem_key, p.title, p.tags FROM problems p
            WHERE EXISTS (
              SELECT 1 FROM problem_keypoints k
              WHERE k.platform = p.platform AND k.problem_key = p.problem_key
@@ -182,7 +206,7 @@ export function runRulePass(
         .all(PIPELINE_VERSION, taxonomyVersion, limit) as unknown as ProblemRow[])
     : (db
         .prepare(
-          `SELECT p.platform, p.problem_key, p.title FROM problems p
+          `SELECT p.platform, p.problem_key, p.title, p.tags FROM problems p
            WHERE NOT EXISTS (
              SELECT 1 FROM problem_keypoints k
              WHERE k.platform = p.platform AND k.problem_key = p.problem_key
@@ -192,7 +216,7 @@ export function runRulePass(
         .all(limit) as unknown as ProblemRow[]);
   return annotateProblemsL1(
     db,
-    rows.map((r) => ({ platform: r.platform, problemKey: r.problem_key, title: r.title })),
+    rows.map((r) => ({ platform: r.platform, problemKey: r.problem_key, title: r.title, tags: r.tags })),
     { dataDir: opts.dataDir, force: opts.rerun === true },
   );
 }

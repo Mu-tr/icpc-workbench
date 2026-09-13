@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_problem_topics_topic ON problem_topics(topic_id, 
 
 -- 自建知识点管线（v2）：结构化知识点标注。JSONL（dataDir/knowledge/annotations.jsonl）
 -- 为源真相，本表是启动时幂等重建的查询索引。code 锚定 taxonomy.json（稳定不可改）；
--- name 为展示名（重载时按当前 taxonomy 刷新）。source: rule / ai / manual，
+-- name 为展示名（重载时按当前 taxonomy 刷新）。source: tag / rule / ai / manual，
 -- manual 为人工校正，永不被管线重跑覆盖。confidence < 统计阈值（默认 0.5）的
 -- 标注入库但统计端默认过滤。无 FK：表可由 JSONL 独立重建，不随 problems 重播种失效。
 -- annotated_title 记录标注当时的题目标题：标题被修复（如牛客标题污染清洗）后
@@ -96,8 +96,8 @@ CREATE TABLE IF NOT EXISTS problem_keypoints (
   code        TEXT NOT NULL,
   name        TEXT NOT NULL DEFAULT '',
   confidence  REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
-  source      TEXT NOT NULL,             -- rule / ai / manual
-  method      TEXT NOT NULL,             -- rule#rNNN / ai:<model> / manual
+  source      TEXT NOT NULL,             -- tag / rule / ai / manual
+  method      TEXT NOT NULL,             -- tag / rule#rNNN / ai:<model> / manual
   taxonomy_version INTEGER NOT NULL,
   pipeline_version INTEGER NOT NULL,
   annotated_title TEXT,

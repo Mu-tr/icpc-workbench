@@ -135,8 +135,9 @@ export function loadAnnotationsIntoDb(
     latest.set(`${line.platform}|${line.problemKey}|${source}`, line);
   }
 
-  // 按题目并集各来源快照；同 code 取高优先级来源（manual > ai > rule）
-  const precedence: Record<KnowledgeSource, number> = { manual: 3, ai: 2, rule: 1 };
+  // 按题目并集各来源快照；同 code 取高优先级来源（manual > ai > rule > tag）
+  // 优先级必须两两不同：取 >= 比较，同优先级会退化为依赖遍历顺序
+  const precedence: Record<KnowledgeSource, number> = { manual: 4, ai: 3, rule: 2, tag: 1 };
   const byProblem = new Map<string, Map<string, { point: JsonlLine['knowledgePoints'][number]; prio: number }>>();
   for (const line of latest.values()) {
     const problemId = `${line.platform}|${line.problemKey}`;
@@ -417,7 +418,7 @@ export function getCoverage(db: Db): KnowledgeCoverage {
   const bySourceRows = db
     .prepare('SELECT source, COUNT(DISTINCT platform || char(31) || problem_key) AS c FROM problem_keypoints GROUP BY source')
     .all() as Array<{ source: KnowledgeSource; c: number }>;
-  const bySource: Record<KnowledgeSource, number> = { rule: 0, ai: 0, manual: 0 };
+  const bySource: Record<KnowledgeSource, number> = { tag: 0, rule: 0, ai: 0, manual: 0 };
   for (const row of bySourceRows) bySource[row.source] = row.c;
   return {
     total,
