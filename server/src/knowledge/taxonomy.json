@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "categories": [
     {
       "key": "basic",
@@ -68,6 +68,18 @@
           "templateIds": [
             "basic-divide-conquer"
           ]
+        },
+        {
+          "code": "basic.brute-force",
+          "name": "暴力枚举",
+          "fullName": "暴力枚举（穷举所有候选）",
+          "templateIds": []
+        },
+        {
+          "code": "basic.enumeration",
+          "name": "枚举",
+          "fullName": "枚举（含子集/排列枚举）",
+          "templateIds": []
         }
       ]
     },
@@ -277,6 +289,12 @@
           "templateIds": [
             "ds-partition-tree"
           ]
+        },
+        {
+          "code": "ds.general",
+          "name": "数据结构（综合）",
+          "fullName": "数据结构（综合，未细分）",
+          "templateIds": []
         }
       ]
     },
@@ -363,6 +381,12 @@
           "templateIds": [
             "tree-cactus"
           ]
+        },
+        {
+          "code": "tree.general",
+          "name": "树上算法（综合）",
+          "fullName": "树上算法（综合，未细分）",
+          "templateIds": []
         }
       ]
     },
@@ -624,6 +648,12 @@
         {
           "code": "graph.shortest-path",
           "name": "最短路"
+        },
+        {
+          "code": "graph.general",
+          "name": "图论（综合）",
+          "fullName": "图论（综合，未细分）",
+          "templateIds": []
         }
       ]
     },
@@ -782,6 +812,12 @@
         {
           "code": "math.combinatorics",
           "name": "组合计数"
+        },
+        {
+          "code": "math.general",
+          "name": "数学（综合）",
+          "fullName": "数学（综合，未细分）",
+          "templateIds": []
         }
       ]
     },
@@ -1006,6 +1042,42 @@
         {
           "code": "misc.sorting",
           "name": "排序"
+        },
+        {
+          "code": "misc.simulation",
+          "name": "模拟",
+          "fullName": "模拟（按题意逐步实现）",
+          "templateIds": []
+        },
+        {
+          "code": "misc.construction",
+          "name": "构造",
+          "fullName": "构造（构造性证明/方案）",
+          "templateIds": []
+        },
+        {
+          "code": "misc.array",
+          "name": "数组与实现",
+          "fullName": "数组与实现细节",
+          "templateIds": []
+        },
+        {
+          "code": "misc.counting",
+          "name": "计数",
+          "fullName": "计数（方案数/统计）",
+          "templateIds": []
+        },
+        {
+          "code": "misc.stack",
+          "name": "栈",
+          "fullName": "栈（含括号匹配/表达式）",
+          "templateIds": []
+        },
+        {
+          "code": "misc.interactive",
+          "name": "交互",
+          "fullName": "交互题",
+          "templateIds": []
         }
       ]
     }

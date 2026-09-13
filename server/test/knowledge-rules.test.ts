@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canonicalTag,
+  codeOfTag,
   expandTag,
   TAG_SYNONYM_GROUPS,
 } from '../../shared/src/index.ts';
@@ -105,7 +106,12 @@ test('rule engine: 无信息标题不硬贴知识点（留给 L2 / uncertain）'
 // 这些断言是改动同义词表时的护栏：历史上 'binary search' 曾被归并到「二分」，
 // 而 taxonomy 里叫「二分查找」，导致同一知识点在掌握度地图里裂成两个点。
 
-/** 题单专用粗粒度分类：curriculum 不教、taxonomy 也没有 code，只服务于题单分组 */
+/**
+ * 题单专用粗粒度分类：curriculum 不教、taxonomy 也没有 code，只服务于题单分组。
+ * 清洗重构 Task 1 之后「模拟 / 构造 / 交互」都补上了 code（misc.simulation /
+ * misc.construction / misc.interactive），本表白名单因此不再被命中 —— 保留它是为了
+ * 万一将来再出现无 code 的粗粒度组时，护栏仍能区分「题单专用」与「死点」。
+ */
 const LIST_ONLY_COARSE = ['模拟', '构造', '交互'];
 
 test('tags 不变量 1：带 code 的组名必须与 taxonomy 的 name 完全一致', () => {
@@ -201,9 +207,11 @@ test('tags：课程用短名（二分 / DFS / 网络流）时仍能通过同义�
   assert.ok(expandTag('二分').includes('二分查找'));
 });
 
-test('tags：暴力 / brute force 不归并进「搜索」通用桶（避免撑大兜底、掩盖真实弱项）', () => {
+test('tags：暴力 / brute force 不归并进「搜索」通用桶，而是落在自己的点 basic.brute-force', () => {
   for (const t of ['暴力', '暴力枚举', 'brute force', 'brute-force']) {
-    assert.equal(canonicalTag(t), t, `「${t}」不应被归并到 search.general`);
+    // 归并到专门的粗粒度点，而不是 search.general 通用桶（后者会撑大兜底、掩盖真实弱项）
+    assert.equal(codeOfTag(t), 'basic.brute-force', `「${t}」应归入 basic.brute-force`);
+    assert.notEqual(canonicalTag(t), '搜索', `「${t}」不应被归并到 search.general`);
     assert.equal(expandTag('搜索').includes(t), false);
   }
 });

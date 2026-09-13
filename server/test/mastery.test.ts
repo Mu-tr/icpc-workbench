@@ -79,12 +79,12 @@ test('computeMastery：CF 英文标签按别名归并到课程中文知识点（
   assert.equal(tp.solved, 1);
 });
 
-test('computeMastery：无别名映射的英文标签保持原样（brute force 不强行归并）', (t) => {
+test('computeMastery：无别名映射的英文标签保持原样（binary tree 不强行归并）', (t) => {
   const db = createDb(':memory:');
   t.after(() => db.close());
-  seedSubmission(db, 'codeforces', '8000A', ['brute force'], 'AC', new Date().toISOString());
+  seedSubmission(db, 'codeforces', '8000A', ['binary tree'], 'AC', new Date().toISOString());
   const report = computeMastery(db, 1);
-  assert.ok(report.points.find((p) => p.tag === 'brute force'));
+  assert.ok(report.points.find((p) => p.tag === 'binary tree'));
 });
 
 test('computeMastery：按 tag 聚合、联动课程、0 练习的知识点标记未开始', (t) => {
@@ -146,7 +146,7 @@ test('computeMastery：知识点口径按 code 聚合、templateIds 直达课程
   // 同名回退题（无标注，tag = 线段树）应并入 ds.segtree 而非另立点
   seedSubmission(db, 'luogu', 'P3372', ['线段树'], 'AC', now);
   // 无标注且无法归入 taxonomy 的 tag 保留回退点
-  seedSubmission(db, 'codeforces', '9010A', ['brute force'], 'AC', now);
+  seedSubmission(db, 'codeforces', '9010A', ['binary tree'], 'AC', now);
 
   const report = computeMastery(db, 1);
   const seg = report.points.find((p) => p.code === 'ds.segtree');
@@ -156,7 +156,7 @@ test('computeMastery：知识点口径按 code 聚合、templateIds 直达课程
   assert.equal(seg.templates.length, 1);
   assert.equal(seg.templates[0].id, 'ds-segtree');
   assert.equal(seg.templates[0].categoryKey, 'ds');
-  // 回退桶：brute force 保留；不再另立「线段树」tag 点
-  assert.ok(report.points.find((p) => p.tag === 'brute force'));
+  // 回退桶：binary tree 保留；不再另立「线段树」tag 点
+  assert.ok(report.points.find((p) => p.tag === 'binary tree'));
   assert.equal(report.points.filter((p) => p.tag === '线段树').length, 1);
 });

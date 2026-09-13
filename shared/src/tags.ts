@@ -6,8 +6,10 @@
  *    否则掌握度地图的 name → code 精确匹配会失配，同一知识点裂成两个点。
  *    历史缺陷：'binary search' 曾归并为「二分」，而体系里叫「二分查找」；
  *    9/18 条映射存在这类失配（数据结构 / DFS / 二分图 / 哈希 / 位运算 / 概率期望 / 博弈论 …）。
- * 2. 不带 code 的组是粗粒度归类（数据结构 / 图论 / 树上算法 / 数学 / 模拟 / 构造 / 交互），
- *    只用于标签桶展示与题单分类，不参与知识点统计；其 name 不得与任何 taxonomy name 同名。
+ * 2. 不带 code 的组只是标签桶展示，不参与知识点统计；其 name 不得与任何 taxonomy name 同名。
+ *    本表当前没有这类组 —— 粗粒度层（数据结构 / 图论 / 树上算法 / 数学 / 模拟 / 构造 / 交互 …）
+ *    在清洗重构 §2.1 里补了 taxonomy code，因为高频题源标签（数学 4757 题 / 模拟 3810 题 …）
+ *    此前完全无法映射到任何知识点。
  * 3. canonicalTag 幂等：canonicalTag(canonicalTag(x)) === canonicalTag(x)。
  * 4. 每个组的 tags 必须包含自身 name；同一 tag 不得出现在两个组（防静默覆盖）。
  * 5. **带 code 的组**，其 name 必须落在 taxonomy 名集合内；**不带 code 的粗粒度组**，
@@ -46,9 +48,10 @@ export const TAG_SYNONYM_GROUPS: TagSynonymGroup[] = [
   { name: '模拟退火', code: 'search.annealing', tags: ['模拟退火', '随机化', '随机化搜索', '退火', 'simulated annealing', 'annealing'] },
   { name: '舞蹈链 DLX', code: 'search.dlx', tags: ['舞蹈链 DLX', '舞蹈链', '精确覆盖', 'DLX', 'dancing links', 'exact cover'] },
   // 粗粒度兜底：只收「搜索」语义本身。刻意不收「暴力 / 暴力枚举 / brute force」——
-  // 它们与「搜索」是两种不同的解题策略，塞进 search.general 会把通用桶撑大、掩盖真实弱项
-  // （这类无对应知识点的题源标签继续以原样进入「未覆盖桶」，行为与引入本表之前一致）。
-  { name: '搜索', code: 'search.general', tags: ['搜索', '搜索与枚举', 'search', 'enumeration'] },
+  // 它们与「搜索」是两种不同的解题策略，塞进 search.general 会把通用桶撑大、掩盖真实弱项；
+  // 它们有自己的落点 basic.brute-force（见文件末尾粗粒度层）。
+  // 同理不收 'enumeration' —— 枚举有专门的点 basic.enumeration，同一 tag 只能有一个归属组。
+  { name: '搜索', code: 'search.general', tags: ['搜索', '搜索与枚举', 'search'] },
 
   // ---------- 数据结构 ----------
   { name: '并查集', code: 'ds.dsu', tags: ['并查集', 'union find', 'union-find', 'disjoint set', 'disjoint set union', 'dsu'] },
@@ -170,14 +173,25 @@ export const TAG_SYNONYM_GROUPS: TagSynonymGroup[] = [
   { name: '打表与卡常', code: 'misc.table-cast', tags: ['打表与卡常', '打表', '卡常', '常数优化'] },
   { name: '排序', code: 'misc.sorting', tags: ['排序', '排序算法', '归并排序', '基数排序', '快速排序', '堆排序', '逆序对', 'sort', 'sorting', 'sortings'] },
 
-  // ---------- 粗粒度归类（无 taxonomy code，仅作标签桶/题单分类） ----------
-  { name: '数据结构', tags: ['数据结构', 'data structures'] },
-  { name: '图论', tags: ['图论', '图论基础', '图上问题', '图的遍历', 'graph', 'graphs'] },
-  { name: '树上算法', tags: ['树上算法', '树论', '树形结构', '树上问题', 'tree', 'trees'] },
-  { name: '数学', tags: ['数学', '数学题', 'math', 'maths'] },
-  { name: '模拟', tags: ['模拟', '模拟题', 'implementation', 'simulation'] },
-  { name: '构造', tags: ['构造', '构造题', '构造算法', 'constructive', 'constructive algorithms'] },
-  { name: '交互', tags: ['交互', '交互题', 'interactive'] },
+  // ---------- 粗粒度层（为高频但无法细分的题源标签提供落点，见清洗重构 spec §2.1） ----------
+  // 这批组带 code：组名必须逐字等于 taxonomy 的 name（不变量 1），否则掌握度地图会裂成两个点。
+  // 原先无 code 的 7 个粗粒度组（数据结构 / 图论 / 树上算法 / 数学 / 模拟 / 构造 / 交互）
+  // 是**就地升级**为带 code —— 同一 tag 只能有一个归属组（不变量 4），
+  // 另起一组同名同标签的组只会静默覆盖，codeOfTag 结果取决于数组顺序。
+  // 组名取 taxonomy 长名（「数学（综合）」），故 canonicalTag('数学') 由「数学」变为「数学（综合）」——
+  // 这正是「粗粒度概念 = 一个真实知识点」的口径，消费方（题单分类目录）同步使用该长名。
+  { name: '数据结构（综合）', code: 'ds.general', tags: ['数据结构（综合）', '数据结构', 'data structures', 'data structure'] },
+  { name: '图论（综合）', code: 'graph.general', tags: ['图论（综合）', '图论', '图论基础', '图上问题', '图的遍历', 'graph', 'graphs'] },
+  { name: '树上算法（综合）', code: 'tree.general', tags: ['树上算法（综合）', '树上算法', '树论', '树形结构', '树上问题', 'tree', 'trees'] },
+  { name: '数学（综合）', code: 'math.general', tags: ['数学（综合）', '数学', '数学题', '数论与组合数学', 'mathematics', 'math', 'maths'] },
+  { name: '模拟', code: 'misc.simulation', tags: ['模拟', '模拟题', 'simulation', 'implement', 'implementation'] },
+  { name: '构造', code: 'misc.construction', tags: ['构造', '构造题', '构造算法', 'constructive', 'constructive algorithms', 'construction'] },
+  { name: '交互', code: 'misc.interactive', tags: ['交互', '交互题', 'interactive', 'interactive problem'] },
+  { name: '暴力枚举', code: 'basic.brute-force', tags: ['暴力枚举', '暴力', 'brute force', 'brute-force', 'bruteforce'] },
+  { name: '数组与实现', code: 'misc.array', tags: ['数组与实现', 'array', 'arrays'] },
+  { name: '计数', code: 'misc.counting', tags: ['计数', 'counting', 'count'] },
+  { name: '栈', code: 'misc.stack', tags: ['栈', 'stack', 'stacks'] },
+  { name: '枚举', code: 'basic.enumeration', tags: ['枚举', 'enumeration', 'enumerate'] },
 ];
 
 const GROUP_BY_NAME = new Map(TAG_SYNONYM_GROUPS.map((g) => [g.name, g]));

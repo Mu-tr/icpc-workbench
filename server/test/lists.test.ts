@@ -165,9 +165,9 @@ test('lists: 洛谷 CF/AtCoder 镜像题回退到源平台题库取 tags 分类'
       items: Array<{ problem_key: string; category: string }>;
     };
     const byKey = new Map(detail.items.map((i) => [i.problem_key, i]));
-    // 导入时即通过镜像回退命中源平台 tags：dp → 动态规划、graphs → 图论
+    // 导入时即通过镜像回退命中源平台 tags：dp → 动态规划、graphs → 图论（综合）
     assert.equal(byKey.get('CF351E')!.category, '动态规划');
-    assert.equal(byKey.get('at_agc018_c')!.category, '图论');
+    assert.equal(byKey.get('at_agc018_c')!.category, '图论（综合）');
 
     // 再跑规则分类（幂等）：镜像题不回落到「其他」
     const cls = (await (await fetch(`${base}/${listId}/classify`, { method: 'POST' })).json()) as {
@@ -179,7 +179,7 @@ test('lists: 洛谷 CF/AtCoder 镜像题回退到源平台题库取 tags 分类'
       .all() as Array<{ problem_key: string; category: string }>;
     const catByKey = new Map(after.map((r) => [r.problem_key, r.category]));
     assert.equal(catByKey.get('CF351E'), '动态规划');
-    assert.equal(catByKey.get('at_agc018_c'), '图论');
+    assert.equal(catByKey.get('at_agc018_c'), '图论（综合）');
   });
 });
 

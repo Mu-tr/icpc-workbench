@@ -131,9 +131,9 @@ describe('problemFilter.ts', () => {
       // dp 和 动态规划 合并为「动态规划」（count=2）
       assert.equal(m.get('动态规划'), 2)
       assert.equal(m.get('dp'), undefined)
-      // greedy → 贪心, math → 数学
+      // greedy → 贪心, math → 数学（综合）（粗粒度层 math.general 的规范名）
       assert.equal(m.get('贪心'), 1)
-      assert.equal(m.get('数学'), 1)
+      assert.equal(m.get('数学（综合）'), 1)
     })
 
     it('excludes noise tags from sidebar counts', () => {

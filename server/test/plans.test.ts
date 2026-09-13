@@ -461,14 +461,14 @@ function seedGrouped(): void {
 
 test('recommendProblemsByWeakTag groups by weak tag, limits per tag, AC only as review', () => {
   seedGrouped();
-  const groups = recommendProblemsByWeakTag(db, PROFILE(['动态规划', '图论']) as never, {
+  const groups = recommendProblemsByWeakTag(db, PROFILE(['动态规划', '图论（综合）']) as never, {
     perTag: 5,
     reviewPerTag: 1,
     level: null, // 不过滤难度，聚焦分组语义
   });
   const tags = groups.map((g) => g.tag);
   assert.ok(tags.includes('动态规划'), `应包含动态规划组: ${tags}`);
-  assert.ok(tags.includes('图论'), `应包含图论组: ${tags}`);
+  assert.ok(tags.includes('图论（综合）'), `应包含图论（综合）组: ${tags}`);
   assert.ok(tags.includes('综合练习'), `应包含兜底组: ${tags}`);
 
   const dp = groups.find((g) => g.tag === '动态规划')!;
@@ -506,13 +506,13 @@ test('recommendProblemsByWeakTag respects perTag limit and difficulty range', ()
 test('recommendProblemsByWeakTag picks oldest-AC problem for review slot', () => {
   seedGrouped();
   // A 的 AC 时间（07-20）早于 B（07-25）；dp 组复习位应取 A（久未重做）
-  const groups = recommendProblemsByWeakTag(db, PROFILE(['动态规划', '图论']) as never, {
+  const groups = recommendProblemsByWeakTag(db, PROFILE(['动态规划', '图论（综合）']) as never, {
     perTag: 5,
     reviewPerTag: 1,
     level: null,
   });
   const dp = groups.find((g) => g.tag === '动态规划')!;
-  const graphs = groups.find((g) => g.tag === '图论')!;
+  const graphs = groups.find((g) => g.tag === '图论（综合）')!;
   assert.equal(dp.problems.find((p) => p.role === 'review')?.problemKey, 'A');
   assert.equal(graphs.problems.find((p) => p.role === 'review')?.problemKey, 'B'); // graphs 组内唯一 AC
 });

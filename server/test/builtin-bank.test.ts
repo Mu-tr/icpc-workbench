@@ -176,7 +176,7 @@ test('seedBuiltinBank: 版本升级重新 upsert，保留用户已标难度', ()
   };
   assert.equal(row.title, '内置题A（新版标题）'); // 新版本标题覆盖
   assert.equal(row.difficulty, 2100); // 用户难度保留（manual(4) > bank(1)）
-  assert.deepEqual(JSON.parse(row.tags), ['动态规划', '数学']); // 写入即净化：dp/math → 规范名
+  assert.deepEqual(JSON.parse(row.tags), ['动态规划', '数学（综合）']); // 写入即净化：dp/math → 规范名（粗粒度层 math.general 的 name 即「数学（综合）」）
   const v = db.prepare('SELECT value FROM settings WHERE key = ?').get(BUILTIN_BANK_VERSION_KEY) as {
     value: string;
   };
