@@ -112,12 +112,13 @@ export function aiConfigFromDb(db: Db, cfg: AppConfig): AiConfig {
   const searchEngine = searchEngineRaw === 'tavily' || searchEngineRaw === 'brave'
     ? searchEngineRaw
     : cfg.ai.searchEngine;
-  const searchApiKey = process.env.SEARCH_API_KEY ?? get('ai.searchApiKey') ?? cfg.ai.searchApiKey;
+  const searchApiKey = (process.env.SEARCH_API_KEY ?? get('ai.searchApiKey') ?? cfg.ai.searchApiKey)?.trim();
   return {
     enabled: enabledRaw !== undefined ? enabledRaw === 'true' : cfg.ai.enabled,
-    baseURL: get('ai.baseURL') ?? cfg.ai.baseURL,
-    model: get('ai.model') ?? cfg.ai.model,
-    apiKey: process.env.AI_API_KEY ?? get('ai.apiKey') ?? cfg.ai.apiKey,
+    // trim：用户粘贴 baseURL/apiKey 时常带首尾空格/换行，会导致 URL 解析失败或鉴权头异常
+    baseURL: (get('ai.baseURL') ?? cfg.ai.baseURL).trim(),
+    model: (get('ai.model') ?? cfg.ai.model).trim(),
+    apiKey: (process.env.AI_API_KEY ?? get('ai.apiKey') ?? cfg.ai.apiKey).trim(),
     ...(Number.isFinite(timeoutMs) && timeoutMs! > 0 ? { timeoutMs: timeoutMs! } : {}),
     ...(Number.isFinite(maxTokens) && maxTokens! > 0 ? { maxTokens: maxTokens! } : {}),
     ...(Number.isFinite(contextWindow) && contextWindow! > 0 ? { contextWindow: contextWindow! } : {}),
@@ -133,9 +134,10 @@ export function saveAiConfig(db: Db, cfg: AppConfig, patch: Partial<AiConfig>): 
   );
   const entries: [string, string | undefined][] = [
     ['ai.enabled', patch.enabled === undefined ? undefined : String(patch.enabled)],
-    ['ai.baseURL', patch.baseURL],
-    ['ai.apiKey', patch.apiKey],
-    ['ai.model', patch.model],
+    // 存库前 trim，从源头避免带空格的粘贴值入库
+    ['ai.baseURL', patch.baseURL?.trim()],
+    ['ai.apiKey', patch.apiKey?.trim()],
+    ['ai.model', patch.model?.trim()],
     ['ai.timeoutMs', patch.timeoutMs === undefined ? undefined : String(patch.timeoutMs)],
     ['ai.maxTokens', patch.maxTokens === undefined ? undefined : String(patch.maxTokens)],
     ['ai.contextWindow', patch.contextWindow === undefined ? undefined : String(patch.contextWindow)],

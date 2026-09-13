@@ -1,7 +1,7 @@
 // 跨端共享类型与常量（server / client 通过相对路径 import）
 // 1.2 阶段会扩展 Submission / Problem / Plan 等数据结构。
 
-export type PlatformId = 'codeforces' | 'atcoder' | 'luogu' | 'nowcoder' | 'daimayuan' | 'leetcode';
+export type PlatformId = 'codeforces' | 'atcoder' | 'luogu' | 'nowcoder' | 'daimayuan' | 'leetcode' | 'jisuanke';
 
 export type PlatformSync = 'auto' | 'cookie' | 'manual';
 
@@ -25,6 +25,9 @@ export const PLATFORMS: PlatformMeta[] = [
   // 力扣（leetcode.cn）：GraphQL 接口无官方公开 API；提交记录需登录 Cookie，题库匿名可访问。
   // 仅接入了力扣中国（leetcode.cn）——国际版 leetcode.com 的 GraphQL schema 不同，未接入。
   { id: 'leetcode', name: 'LeetCode', nameEn: 'LeetCode', hasOfficialApi: false, homepage: 'https://leetcode.cn', sync: 'cookie' },
+  // 计蒜客（www.jisuanke.com，原 nanti.jisuanke.com 竞赛 OJ）：无公开 API；
+  // 提交记录按「参加过的比赛」组织，需登录 Cookie 后逐赛拉取，题库非独立公开页。
+  { id: 'jisuanke', name: '计蒜客', nameEn: 'Jisuanke', hasOfficialApi: false, homepage: 'https://www.jisuanke.com', sync: 'cookie' },
 ];
 
 export function platformMeta(id: PlatformId): PlatformMeta {

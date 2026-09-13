@@ -48,6 +48,8 @@ const URL_PATTERNS: UrlPattern[] = [
   { re: /bs\.daimayuan\.top\/p\/(\d+)/, platform: 'daimayuan', key: (m) => m[1] },
   { re: /oj\.daimayuan\.top\/(?:problem|course\/\d+)\/(\d+)/, platform: 'daimayuan', key: (m) => m[1] },
   { re: /ac\.nowcoder\.com\/acm\/problem\/(\d+)/, platform: 'nowcoder', key: (m) => m[1] },
+  // 计蒜客比赛题：www.jisuanke.com/contest/37176/problem/12345 → key 37176-12345（与同步适配器同键）
+  { re: /jisuanke\.com\/contest\/(\d+)\/problem\/([A-Za-z0-9_-]+)/, platform: 'jisuanke', key: (m) => `${m[1]}-${m[2]}` },
   // 力扣题单：slug 即 problemKey（同步/题库同键）。cn 为接入平台，com 链接同 slug 一并识别
   { re: /leetcode\.cn\/problems\/([a-z0-9_-]+)/i, platform: 'leetcode', key: (m) => m[1].toLowerCase() },
   { re: /leetcode\.com\/problems\/([a-z0-9_-]+)/i, platform: 'leetcode', key: (m) => m[1].toLowerCase() },

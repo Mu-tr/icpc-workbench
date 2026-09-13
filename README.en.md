@@ -2,11 +2,11 @@
 
 [中文](./README.md) | **English**
 
-A **local web app** that analyzes your competitive programming weaknesses from submission history (Codeforces / AtCoder / Luogu / Nowcoder / Daimayuan / LeetCode), generates personalized training plans via AI, and provides calendar-based check-ins.
+A **local web app** that analyzes your competitive programming weaknesses from submission history (Codeforces / AtCoder / Luogu / Nowcoder / Daimayuan / LeetCode / Jisuanke), generates personalized training plans via AI, and provides calendar-based check-ins.
 
 ## Features
 
-- **Multi-Platform Submission Import**: Codeforces / AtCoder auto-sync (official/community public API, incremental dedup); Luogu / Daimayuan / LeetCode auto-sync after configuring cookies; all platforms support manual import (JSON / CSV / form)
+- **Multi-Platform Submission Import**: Codeforces / AtCoder auto-sync (official/community public API, incremental dedup); Luogu / Daimayuan / LeetCode / Jisuanke auto-sync after configuring cookies; all platforms support manual import (JSON / CSV / form)
 - **Built-in Problem Bank**: Ships with ~13,000 offline problems (full Codeforces + Luogu popularizer/advanced- and above, with difficulty and algorithm tags); auto-loaded on first launch for immediate use in training plans and problem lists; expandable per-platform via "Problem Management → Fetch Problem Bank" (CF in seconds, Luogu/Nowcoder paginated)
 - **Weakness Analysis**: AC rate statistics by tag / difficulty range / platform, outputting a weakness profile relative to your own average; 12-week trend
 - **Mastery Map**: Five-level mastery assessment per knowledge point (Not Started → Touched → Intro → Grasped → Proficient), linking submission data, weakness profile, and template curriculum; each knowledge point links directly to relevant practice problems (including unsolved ones from the bank, sorted by difficulty) and courses; English tags from CF etc. auto-merge with Chinese knowledge points (binary search ↔ 二分), keeping the same topic unified; Grasped/Proficient levels show ⭐/🏆 badges, promotion progress bars, and new-achievement 🎉 markers
@@ -29,7 +29,7 @@ A **local web app** that analyzes your competitive programming weaknesses from s
   - **Enhanced Math Formula Rendering**: Bare math expressions in AI output (subscripts/superscripts/LaTeX commands without `$` delimiters) are auto-detected and wrapped for rendering; `\(...\)` / `\[...\]` delimiters are normalized to `$` / `$$`; Unicode math symbols (≤ ≥ ≠ ⊕ ⊗ ℓ, etc.) are auto-converted to LaTeX commands; parse failures fall back to plain text rather than jarring red errors
   - **Configurable Output Limits**: "Settings → AI Config" lets you adjust max output tokens (default 384K, increase for long-output scenarios) and model context length (default 1000K, auto-trims oldest messages with a notice when exceeded); replies truncated due to the limit show a notice at the end
   - Image attachments: messages can include problem statements / judge screenshots (JPEG/PNG/GIF/WebP, ≤64 MiB), uploaded via OpenAI-compatible Files API and referenced as file content blocks
-- **Problem Lists**: Paste platform problem set entries (Luogu / Codeforces / AtCoder / Daimayuan / Nowcoder / LeetCode problem IDs or links, one per line) for auto-recognition and list creation; classify by knowledge point (synced problem bank tag rules + AI classification + manual adjustment); look up difficulty and AC status from the bank; CF/AtCoder mirrored problems in Luogu lists auto-fallback to native platform for tags; rule-based classification only updates problems with bank tags—those without tags retain their existing category (won't be wiped to "Other"); AI reads list content and gives practice suggestions based on your weakness profile
+- **Problem Lists**: Paste platform problem set entries (Luogu / Codeforces / AtCoder / Daimayuan / Nowcoder / LeetCode / Jisuanke problem IDs or links, one per line) for auto-recognition and list creation; classify by knowledge point (synced problem bank tag rules + AI classification + manual adjustment); look up difficulty and AC status from the bank; CF/AtCoder mirrored problems in Luogu lists auto-fallback to native platform for tags; rule-based classification only updates problems with bank tags—those without tags retain their existing category (won't be wiped to "Other"); AI reads list content and gives practice suggestions based on your weakness profile
 - **Review Bank**: Problem re-evaluation with forgetting-curve scheduling (due-count reminders, positive/negative feedback adjusts review intervals)
 - **Template Library**: 114 built-in algorithm template lessons (10 major categories), with study status/notes/progress tracking; custom templates support Tab-indent code editors (Tab indent, Shift+Tab outdent, Enter auto-indent, undo stack preserved); idea notes support full Markdown rendering (GFM tables/strikethrough/code blocks + math formulas, inline `$...$` and block `$$...$$`, Obsidian-compatible syntax); header toggles indent width (2/4 spaces, locally persisted)
 - **Contest Center**: Aggregates contests from Codeforces / AtCoder / Luogu / Nowcoder (upcoming / finished, auto-degrades on single-source failure); pre-contest selection, post-contest upsolving
@@ -43,7 +43,7 @@ A **local web app** that analyzes your competitive programming weaknesses from s
 ```
 icpc-workbench/
 ├── server/          # Node.js + Express + node:sqlite (built-in SQLite, zero native deps)
-│   ├── adapters/    # Platform adapters (CF/AtCoder auto; Luogu/Nowcoder/Daimayuan/LeetCode limited) + incremental sync
+│   ├── adapters/    # Platform adapters (CF/AtCoder auto; Luogu/Nowcoder/Daimayuan/LeetCode/Jisuanke limited) + incremental sync
 │   ├── analysis/    # Aggregate stats / weakness profile / weekly trends
 │   ├── ai/          # OpenAI-compatible provider + plan-prompt.md / assistant-prompt.md templates + function calling tools (fetch-url / pdf-parse / web search) + document converters (Word/Excel/PPT/HTML/CSV/JSON/XML/EPub → Markdown)
 │   ├── contests/    # Four-platform contest aggregation (CF/AtCoder/Luogu/Nowcoder, auto-degrade on source failure)
@@ -172,17 +172,19 @@ Advanced settings (all in "Settings → AI Config"):
 | Nowcoder | ✅ | Public HTML `acm/contest/profile/{uid}/practice-coding` | No login/cookie required (Nowcoder deprecated its JSON API); parses submission table, supports incremental and pagination; problems have no difficulty/tag fields (data source limitation) |
 | Daimayuan | ✅ (Cookie required) | Hydro JSON API `/record?uidOrName=` (`Accept: application/json`) | Configure `sid` session cookie in Settings to auto-sync (100 per page, incremental early termination); uses Hydro native JSON content negotiation to directly fetch rdocs array—no HTML template parsing, so Hydro frontend template changes won't break the adapter; status mapped to unified Verdict via Hydro STATUS enum; non-contest submissions only; problem bank page `/p/{id}` is public |
 | LeetCode | ✅ (Cookie required) | leetcode.cn GraphQL `submissionList` | Configure cookies in Settings to auto-sync (40 per page, up to 250 pages); LeetCode China (leetcode.cn) only—international edition has a different API structure; problem bank is anonymously accessible |
+| Jisuanke | ✅ (Cookie required) | `/api/contests?hasParticipated=true` + per-contest `/api/contest/submissions` | Paste the entire logged-in Cookie header in Settings to auto-sync (the site issues a guest `s` session even to logged-out visitors—confirm login first, then copy from a Network request header); no unified record page—submissions are fetched contest by contest from participated contests (up to 2 requests per contest, 30 contests per sync batch); contest index is used as the backfill cursor; coursework/practice problems outside contests are not synced |
 
 > Luogu uses a community-maintained unofficial API whose structure may change with platform updates. If sync fails, update your cookies and retry. Cookies are stored only in the local database—do not leak them.
 
-## Cookie Configuration (Required for Luogu / Daimayuan / LeetCode)
+## Cookie Configuration (Required for Luogu / Daimayuan / LeetCode / Jisuanke)
 
 1. After logging into Luogu in your browser: F12 → Application → Cookies → `https://www.luogu.com.cn`
 2. Copy the values of `_uid` and `__client_id`, paste them into the two input fields under "Settings → Luogu" and save (the app assembles the Cookie header; C3VK and other cookies auto-renew—no need to enter them)
 3. Daimayuan: after logging into bs.daimayuan.top: F12 → Application → Cookies, copy the `sid` entry (session cookie), paste into "Settings → Daimayuan" and save (supports pasting the entire Cookie header—auto-extracts fields; re-copy when expired)
 4. LeetCode: after logging into leetcode.cn: F12 → Application → Cookies, copy `LEETCODE_SESSION` and `csrftoken`, paste into "Settings → LeetCode" and save
-5. Go to "Problem Management" → Platform Sync → enter username/uid → Sync
-6. When rebinding accounts, the new sync automatically clears the old account's submission data for that platform
+5. Jisuanke: first make sure you are logged into www.jisuanke.com (avatar shown at top right), then F12 → Network → refresh → click any api request → Request Headers, copy the entire Cookie header, paste into "Settings → Jisuanke" and save (the handle field can be your nickname for reference only). Note: the site issues a guest `s` session even to logged-out visitors—copying `s` from the Application tab is usually a guest session and will be rejected
+6. Go to "Problem Management" → Platform Sync → enter username/uid → Sync
+7. When rebinding accounts, the new sync automatically clears the old account's submission data for that platform
 
 ## API Overview
 

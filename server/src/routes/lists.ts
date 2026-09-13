@@ -216,6 +216,39 @@ export function listsRoutes(
     res.json({ ok: true });
   });
 
+  // POST /api/lists/:id/reorder  body: { orderedIds: number[] } → 拖拽排序（全量重写 position）
+  // 客户端拖拽后把整单的新顺序传回；分类不受影响（分组视图由 position + category 派生）。
+  r.post('/:id/reorder', (req, res) => {
+    const id = Number(req.params.id);
+    const orderedIds = req.body?.orderedIds;
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'id 非法' });
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0 || !orderedIds.every((v: unknown) => Number.isInteger(v))) {
+      return res.status(400).json({ error: 'orderedIds 需为非空的条目 id 数组' });
+    }
+    const list = db
+      .prepare('SELECT id FROM problem_lists WHERE id = ? AND user_id = ?')
+      .get(id, DEFAULT_USER_ID);
+    if (!list) return res.status(404).json({ error: '题单不存在' });
+    const items = db
+      .prepare('SELECT id FROM problem_list_items WHERE list_id = ?')
+      .all(id) as Array<{ id: number }>;
+    const currentIds = new Set(items.map((i) => i.id));
+    const ordered = [...new Set(orderedIds as number[])];
+    if (ordered.length !== currentIds.size || !ordered.every((v) => currentIds.has(v))) {
+      return res.status(400).json({ error: 'orderedIds 需恰好包含该题单的全部条目 id' });
+    }
+    try {
+      db.exec('BEGIN');
+      const upd = db.prepare('UPDATE problem_list_items SET position = ? WHERE id = ?');
+      ordered.forEach((itemId, idx) => upd.run(idx, itemId));
+      db.exec('COMMIT');
+      res.json({ ok: true });
+    } catch (e) {
+      db.exec('ROLLBACK');
+      res.status(400).json({ error: `排序失败：${(e as Error).message}` });
+    }
+  });
+
   // DELETE /api/lists/:id → 删除题单（条目级联）
   r.delete('/:id', (req, res) => {
     const id = Number(req.params.id);

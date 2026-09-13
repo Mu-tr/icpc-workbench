@@ -14,6 +14,7 @@ export const PLATFORM_COLOR: Record<PlatformId, string> = {
   nowcoder: '#69d7a5',
   daimayuan: '#f2965c',
   leetcode: '#ffa116',
+  jisuanke: '#7ee0a3', // 计蒜客品牌绿（暗色底可读版）
 }
 
 export function platformName(id: PlatformId): string {

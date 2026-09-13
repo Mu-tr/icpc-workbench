@@ -2210,3 +2210,28 @@ body {
 .list-item-row:hover {
   background: var(--panel-2, var(--overlay-2));
 }
+
+/* 题单条目拖拽排序（mouse 事件方案，手柄在行首） */
+.list-item-row .drag-handle {
+  display: inline-flex;
+  align-items: center;
+  cursor: grab;
+  color: var(--text-3, #8993a2);
+  border-radius: 4px;
+}
+
+.list-item-row .drag-handle:active {
+  cursor: grabbing;
+}
+
+.list-item-row.is-dragging {
+  opacity: 0.35;
+}
+
+.list-item-row.is-drag-over-before {
+  box-shadow: inset 0 2px 0 var(--brand);
+}
+
+.list-item-row.is-drag-over-after {
+  box-shadow: inset 0 -2px 0 var(--brand);
+}

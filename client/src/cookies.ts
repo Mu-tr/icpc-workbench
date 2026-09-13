@@ -8,6 +8,12 @@ export interface CookieFieldDef {
   cookieName: string
   placeholder: string
   password?: boolean
+  /**
+   * 透传模式（会话 Cookie 名不固定的平台，如计蒜客）：
+   * 输入整段 Cookie 头原样作为请求头使用，不加 `name=` 前缀，
+   * 容忍粘贴时带上 "Cookie: " 前缀（自动剥掉）
+   */
+  raw?: boolean
 }
 
 /** 从 Cookie 串按名提取指定项（严格模式：必须匹配 `name=` 前缀，裸值不返回） */
@@ -42,6 +48,11 @@ export function assembleCookie(
     .map((f) => {
       const raw = (values[f.key] ?? '').trim()
       if (!raw) return ''
+      if (f.raw) {
+        const stripped = raw.replace(/^cookie:\s*/i, '')
+        // 裸值（不含 =）：视为 cookieName 对应的单项会话值（如计蒜客 s），自动补名字前缀
+        return stripped.includes('=') ? stripped : `${f.cookieName}=${stripped}`
+      }
       const val =
         extractCookieItem(raw, f.cookieName) ||
         (raw.includes(';') ? '' : raw) || // 本框裸值（无 name= 前缀、非多对串）

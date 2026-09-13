@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import {
   Alert,
   Button,
@@ -20,6 +21,7 @@ import {
   BulbOutlined,
   DeleteOutlined,
   ExperimentOutlined,
+  HolderOutlined,
   PlusOutlined,
   TagsOutlined,
 } from '@ant-design/icons'
@@ -205,6 +207,72 @@ export default function Lists() {
     }
   }
 
+  // ---------- 拖拽排序（mouse 事件方案，与 SiderMenu / WebView2 兼容做法一致） ----------
+  // 拖动行首手柄可把任意题移到任意位置（跨分类组也算），position 全量持久化到服务端；
+  // 分类不受影响，分组视图由 position + category 派生。
+  const [dragItemId, setDragItemId] = useState<number | null>(null)
+  const [dragOver, setDragOver] = useState<{ id: number; pos: 'before' | 'after' } | null>(null)
+  const dragIdRef = useRef<number | null>(null)
+  const dragOverRef = useRef<{ id: number; pos: 'before' | 'after' } | null>(null)
+
+  const clearDrag = () => {
+    dragIdRef.current = null
+    dragOverRef.current = null
+    setDragItemId(null)
+    setDragOver(null)
+  }
+
+  const applyReorder = useCallback(
+    async (dragId: number, targetId: number, pos: 'before' | 'after') => {
+      if (!detail || dragId === targetId) return
+      const items = [...detail.items]
+      const from = items.findIndex((i) => i.id === dragId)
+      if (from === -1) return
+      const [moved] = items.splice(from, 1)
+      const to = items.findIndex((i) => i.id === targetId)
+      if (to === -1) return
+      items.splice(pos === 'after' ? to + 1 : to, 0, moved)
+      const prev = detail
+      setDetail({ ...detail, items }) // 乐观更新
+      try {
+        await post(`/api/lists/${detail.id}/reorder`, { orderedIds: items.map((i) => i.id) })
+      } catch (e) {
+        message.error((e as Error).message)
+        setDetail(prev) // 失败回滚
+      }
+    },
+    [detail],
+  )
+
+  // 拖拽中松手：按最近 hover 的落点执行重排（松手在列表外则丢弃）
+  useEffect(() => {
+    if (dragItemId === null) return
+    const onUp = () => {
+      const dragId = dragIdRef.current
+      const over = dragOverRef.current
+      clearDrag()
+      if (dragId !== null && over && over.id !== dragId) void applyReorder(dragId, over.id, over.pos)
+    }
+    document.addEventListener('mouseup', onUp)
+    return () => document.removeEventListener('mouseup', onUp)
+  }, [dragItemId, applyReorder])
+
+  const startDrag = (e: ReactMouseEvent, itemId: number) => {
+    e.preventDefault() // 阻止默认行为避免拖拽时选中文本
+    dragIdRef.current = itemId
+    setDragItemId(itemId)
+  }
+
+  // 落点上下半区在进入行与行内移动时都要更新：长行里指针从下半滑到上半不会重新触发 enter
+  const rowDragEnter = (e: ReactMouseEvent, itemId: number) => {
+    if (dragIdRef.current === null || dragIdRef.current === itemId) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const pos: 'before' | 'after' = e.clientY > rect.top + rect.height / 2 ? 'after' : 'before'
+    if (dragOverRef.current?.id === itemId && dragOverRef.current?.pos === pos) return
+    dragOverRef.current = { id: itemId, pos }
+    setDragOver({ id: itemId, pos })
+  }
+
   const cols: ColumnsType<ListItemRow> = [
     { title: '题单', dataIndex: 'title', render: (v: string, r) => <a onClick={() => openDetail(r.id)}>{v}</a> },
     {
@@ -251,14 +319,17 @@ export default function Lists() {
     },
   ]
 
-  // 按分类分组（保持 position 顺序）
+  // 按分类分组：同分类合并成一组，组序 = 该分类在题单中的首次出现位置，组内保持原顺序。
+  // 分类（按题库/AI）只改 category 不动 position——分组视图因此不会打乱导入时的整体先后关系。
   const groups: Array<{ category: string; items: ListItem[] }> = []
   if (detail) {
+    const byCategory = new Map<string, ListItem[]>()
     for (const it of detail.items) {
-      const last = groups[groups.length - 1]
-      if (last && last.category === it.category) last.items.push(it)
-      else groups.push({ category: it.category, items: [it] })
+      const arr = byCategory.get(it.category)
+      if (arr) arr.push(it)
+      else byCategory.set(it.category, [it])
     }
+    for (const [category, items] of byCategory) groups.push({ category, items })
   }
 
   return (
@@ -302,9 +373,10 @@ export default function Lists() {
         {!detailLoading && detail && (
           <>
             <p style={{ color: '#8993a2', fontSize: 12, marginBottom: 12 }}>
-              共 {detail.items.length} 题 · 已完成 {detail.items.filter((i) => i.solved).length} 题；
-              「按题库分类」依据已同步题库的标签，覆盖不到的用「AI 分类」或手动调整。
+              共 {detail.items.length} 题 · 已完成 {detail.items.filter((i) => i.solved).length} 题；同分类合并成组（按首次出现排序），组内保持导入原顺序；
+              「按题库分类」依据已同步题库的标签，覆盖不到的用「AI 分类」或手动调整。拖动行首手柄可调整做题顺序。
             </p>
+            <div style={{ userSelect: dragItemId !== null ? 'none' : undefined }}>
             {groups.map((g) => (
               <div key={g.category} style={{ marginBottom: 16 }}>
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>
@@ -313,9 +385,32 @@ export default function Lists() {
                 </div>
                 {g.items.map((it) => {
                   const link = it.url
+                  const isDragging = dragItemId === it.id
+                  const isDropTarget = dragOver?.id === it.id && dragItemId !== null && dragItemId !== it.id
+                  const rowClass = [
+                    'list-item-row',
+                    isDragging ? 'is-dragging' : '',
+                    isDropTarget && dragOver?.pos === 'before' ? 'is-drag-over-before' : '',
+                    isDropTarget && dragOver?.pos === 'after' ? 'is-drag-over-after' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
                   return (
-                    <div key={it.id} className="list-item-row" style={{ opacity: it.solved ? 0.55 : 1 }}>
+                    <div
+                      key={it.id}
+                      className={rowClass}
+                      style={{ opacity: it.solved ? 0.55 : 1 }}
+                      onMouseEnter={(e) => rowDragEnter(e, it.id)}
+                      onMouseMove={(e) => rowDragEnter(e, it.id)}
+                    >
                       <Space size={8} wrap style={{ flex: 1 }}>
+                        <span
+                          className="drag-handle"
+                          title="拖拽排序"
+                          onMouseDown={(e) => startDrag(e, it.id)}
+                        >
+                          <HolderOutlined />
+                        </span>
                         <PlatformTag id={it.platform as PlatformId} />
                         {link ? (
                           <a href={link} target="_blank" rel="noreferrer">
@@ -352,6 +447,7 @@ export default function Lists() {
                 })}
               </div>
             ))}
+            </div>
           </>
         )}
       </Drawer>

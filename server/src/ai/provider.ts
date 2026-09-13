@@ -89,6 +89,28 @@ function friendlyHttpError(status: number, body: string): Error {
   return new Error(`AI API HTTP ${status}: ${body.slice(0, 200)}`);
 }
 
+// ---------- max_tokens 超限自动降级 ----------
+// 部分聚合网关（如免费 LLM 中转）按 max_tokens 路由模型：请求的 max_tokens 超过
+// 目录内所有模型的上限时返回 429/400 + routing_error（"All models exhausted"）。
+// 此时沿阶梯逐级降低 max_tokens 重试。注意不能一步降到太小：推理模型的思考过程
+// 也计入输出预算，max_tokens 太小会导致思考耗尽预算、正文被截断。
+
+const MAX_TOKENS_LADDER = [65536, 16384, 8192];
+
+/** 返回阶梯中小于 cur 的下一档；没有更小的档位时返回 null */
+function nextMaxTokensLimit(cur: number): number | null {
+  for (const l of MAX_TOKENS_LADDER) {
+    if (l < cur) return l;
+  }
+  return null;
+}
+
+/** 判断是否为「max_tokens 超出网关模型上限」类路由错误（friendlyHttpError 会把状态码与响应体拼进 message） */
+function isMaxTokensRoutingError(errText: string): boolean {
+  if (!/HTTP (429|400)\b/.test(errText)) return false;
+  return /routing_error|all models exhausted|exceeds?.*(limit|maximum)|max_tokens.*too (large|big)/i.test(errText);
+}
+
 // ---------- HTTP 重试（指数退避） ----------
 // 参考opencode的shouldRetry策略：429/5xx可重试错误用指数退避+jitter，尊重Retry-After header。
 // 桌面应用用户在等待，基础间隔比opencode更短（1s vs 2s），最大重试3次（vs 8次）。
@@ -308,29 +330,40 @@ export class AiProvider {
   async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
     this.ensureEnabled();
     const timeoutMs = this.cfg.timeoutMs ?? 120000;
-    const res = await fetchWithRetry(
-      this.fetchFn,
-      chatUrl(this.cfg.baseURL),
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.cfg.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: this.cfg.model,
-          messages,
-          temperature: opts.temperature ?? 0.2,
-          max_tokens: opts.maxTokens ?? 393216,
-          ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
-        }),
+    const maxTokens = opts.maxTokens ?? 393216;
+    const buildInit = (limit: number): RequestInit => ({
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.cfg.apiKey}`,
       },
-      timeoutMs,
-      opts.signal,
-    );
+      body: JSON.stringify({
+        model: this.cfg.model,
+        messages,
+        temperature: opts.temperature ?? 0.2,
+        max_tokens: limit,
+        ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
+      }),
+    });
+    let res: Response;
+    let limit = maxTokens;
+    for (;;) {
+      try {
+        res = await fetchWithRetry(this.fetchFn, chatUrl(this.cfg.baseURL), buildInit(limit), timeoutMs, opts.signal);
+        break;
+      } catch (e) {
+        // 聚合网关按 max_tokens 路由模型时，超大 max_tokens 会把所有模型排除在外 → 沿阶梯降级重试
+        const next = nextMaxTokensLimit(limit);
+        if (next !== null && isMaxTokensRoutingError((e as Error).message ?? '')) {
+          limit = next;
+        } else {
+          throw e;
+        }
+      }
+    }
     const data = (await res.json()) as {
       choices?: Array<{
-        message?: { content?: string; tool_calls?: ToolCall[]; reasoning_content?: string };
+        message?: { content?: string; tool_calls?: ToolCall[]; reasoning_content?: string; reasoning?: string };
         finish_reason?: string | null;
       }>;
       usage?: TokenUsage;
@@ -339,9 +372,10 @@ export class AiProvider {
     const rawContent = choice?.message?.content;
     let toolCalls = choice?.message?.tool_calls;
 
-    // 推理内容（DeepSeek-R1 / o1 等模型的思维链）
-    if (choice?.message?.reasoning_content) {
-      opts.onReasoning?.(choice.message.reasoning_content);
+    // 推理内容（DeepSeek-R1 用 reasoning_content，OpenRouter 风格网关用 reasoning）
+    const reasoningText = choice?.message?.reasoning_content ?? choice?.message?.reasoning;
+    if (reasoningText) {
+      opts.onReasoning?.(reasoningText);
     }
 
     // token 用量
@@ -349,10 +383,16 @@ export class AiProvider {
       opts.onUsage?.(data.usage);
     }
 
-    // DeepSeek 有时将工具调用以 DSML 标记泄漏到 content 中，需剥离并解析为结构化 tool_calls
+    // 部分聚合网关会把完整推理文本重复一份塞进 content（reasoning 与正文完全同文），
+    // 剥离开头与推理重复的部分，避免思考过程混进正文
     let cleanContent = rawContent;
-    if (typeof rawContent === 'string' && rawContent.includes('｜DSML｜')) {
-      const stripped = stripDsml(rawContent);
+    if (typeof cleanContent === 'string' && reasoningText && cleanContent.startsWith(reasoningText)) {
+      cleanContent = cleanContent.slice(reasoningText.length);
+    }
+
+    // DeepSeek 有时将工具调用以 DSML 标记泄漏到 content 中，需剥离并解析为结构化 tool_calls
+    if (typeof cleanContent === 'string' && cleanContent.includes('｜DSML｜')) {
+      const stripped = stripDsml(cleanContent);
       cleanContent = stripped.clean;
       if (stripped.toolCalls.length > 0 && (!toolCalls || toolCalls.length === 0)) {
         toolCalls = stripped.toolCalls;
@@ -382,35 +422,57 @@ export class AiProvider {
   async *chatStream(messages: ChatMessage[], opts: ChatOptions = {}): AsyncGenerator<string, void, void> {
     this.ensureEnabled();
     const timeoutMs = this.cfg.timeoutMs ?? 120000;
-    // 流式请求：连接阶段用 timeoutMs 超时，但流式读取阶段不受 timeoutMs 限制
+    // 流式请求：超时只约束「建立连接 + 等待响应头」；流式读取阶段不受 timeoutMs 限制
     // （AI 生成回复可能耗时数分钟，不应被超时中断；仅受调用方 signal 控制）
-    // 方案：先用带超时的 fetch 建立连接，res.ok 后用 callerSignal 替代组合 signal 控制读取
-    const connectSignal = opts.signal
-      ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)])
-      : AbortSignal.timeout(timeoutMs);
-    const res = await this.fetchFn(chatUrl(this.cfg.baseURL), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.cfg.apiKey}`,
-      },
-      body: JSON.stringify({
+    // 实现注意：fetch 的 signal 会同时作用于响应体读取，AbortSignal.timeout 组合进去
+    // 会在流中途触发超时掐断输出（实际线上 bug），因此用手动 timer + 独立 controller
+    const connectController = new AbortController();
+    const onCallerAbort = () => connectController.abort();
+    opts.signal?.addEventListener('abort', onCallerAbort, { once: true });
+    const connectTimer = setTimeout(
+      () => connectController.abort(new DOMException(`AI 连接超时（${Math.ceil(timeoutMs / 1000)}s 内未收到响应头）`, 'TimeoutError')),
+      timeoutMs,
+    );
+    const maxTokens = opts.maxTokens ?? 393216;
+    const buildBody = (limit: number): string =>
+      JSON.stringify({
         model: this.cfg.model,
         messages,
         temperature: opts.temperature ?? 0.2,
-        max_tokens: opts.maxTokens ?? 393216,
+        max_tokens: limit,
         stream: true,
         // 请求 token 用量统计（OpenAI/DeepSeek 支持；不支持的 API 会忽略此字段，不影响兼容性）
         stream_options: { include_usage: true },
         ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
-      }),
-      signal: connectSignal,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      // 连接阶段可重试的错误（429/5xx）：由上层重试逻辑处理
-      // 这里直接抛出友好化错误，非流式 chat() 的重试已覆盖此场景
-      throw friendlyHttpError(res.status, text);
+      });
+    let limit = maxTokens;
+    let res: Response;
+    try {
+      for (;;) {
+        res = await this.fetchFn(chatUrl(this.cfg.baseURL), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.cfg.apiKey}`,
+          },
+          body: buildBody(limit),
+          signal: connectController.signal,
+        });
+        if (res.ok) break;
+        const text = await res.text().catch(() => '');
+        // 聚合网关按 max_tokens 路由模型时，超大 max_tokens 会把所有模型排除在外 → 沿阶梯降级重试
+        const next = nextMaxTokensLimit(limit);
+        if (next !== null && isMaxTokensRoutingError(`HTTP ${res.status}: ${text}`)) {
+          limit = next;
+          continue;
+        }
+        // 连接阶段可重试的错误（429/5xx）：由上层重试逻辑处理
+        // 这里直接抛出友好化错误，非流式 chat() 的重试已覆盖此场景
+        throw friendlyHttpError(res.status, text);
+      }
+    } finally {
+      // 响应头已到达（或连接最终失败）：关闭连接超时计时器，正文读取只受调用方中断控制
+      clearTimeout(connectTimer);
     }
     if (!res.body) throw new Error('AI API 未返回流式响应体');
 
@@ -426,6 +488,22 @@ export class AiProvider {
     let dsmlMode = false;
     // parseDsmlTools 为 false 时不解析 DSML 标记（二轮流式用，避免 DeepSeek 误触发 tool_calls）
     const enableDsml = opts.parseDsmlTools !== false;
+
+    // 思考重复门控：部分聚合网关会把完整推理文本再重复一份塞进 content。
+    // 推理先行流完，正文 delta 一到就与已积累的推理文本比对——开头一致的部分剥离，
+    // 出现分歧后恢复正常流式；整个 content 都是推理前缀时（生成被截断的极端情况）
+    // 在流结束处兜底冲刷。reasoningText 为空（无思考模型）时零开销。
+    let reasoningText = '';
+    let dupDecided = false;
+    /** 剥离 contentBuf 开头与推理重复的部分。返回 true 表示整个 buffer 仍是推理前缀，需继续暂扣 */
+    const stripDupPrefix = (): boolean => {
+      const max = Math.min(contentBuf.length, reasoningText.length);
+      let k = 0;
+      while (k < max && contentBuf[k] === reasoningText[k]) k++;
+      if (k === contentBuf.length && contentBuf.length <= reasoningText.length) return true;
+      if (k > 0) contentBuf = contentBuf.slice(k);
+      return false;
+    };
 
     /** 将 DSML tool_calls 块解析为工具调用并写入累积 Map */
     const flushDsmlBlock = (block: string): void => {
@@ -510,6 +588,7 @@ export class AiProvider {
                 delta?: {
                   content?: string;
                   reasoning_content?: string;
+                  reasoning?: string;
                   tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }>;
                 };
                 finish_reason?: string | null;
@@ -518,14 +597,23 @@ export class AiProvider {
             };
             const choice = obj.choices?.[0];
             const delta = choice?.delta;
-            // 推理内容（思维链）：通过 onReasoning 回调传出，不混入 content delta
-            if (delta?.reasoning_content) {
-              opts.onReasoning?.(delta.reasoning_content);
+            // 推理内容（思维链）：DeepSeek 用 reasoning_content，OpenRouter 风格网关用 reasoning
+            const reasoningDelta = delta?.reasoning_content ?? delta?.reasoning;
+            if (reasoningDelta) {
+              reasoningText += reasoningDelta;
+              opts.onReasoning?.(reasoningDelta);
             }
-            // content delta：先入缓冲，经 DSML 过滤后再 yield
+            // content delta：先入缓冲；若网关把推理文本重复进了正文开头，剥离后再 yield
             if (delta?.content) {
               contentBuf += delta.content;
-              for (const s of processContentBuf()) yield s;
+              let gated = false;
+              if (!dupDecided && reasoningText && contentBuf) {
+                gated = stripDupPrefix();
+                if (!gated) dupDecided = true; // 已出现分歧，之后正文正常流式
+              }
+              if (!gated) {
+                for (const s of processContentBuf()) yield s;
+              }
             }
             // tool_calls delta：按 index 累积 id/name/arguments 片段
             if (delta?.tool_calls) {
@@ -555,6 +643,8 @@ export class AiProvider {
       }
     } finally {
       reader.releaseLock();
+      // 流结束后移除调用方中断监听（用户点「停止」时 controller 已 abort，这里兜底防泄漏）
+      opts.signal?.removeEventListener('abort', onCallerAbort);
     }
     // 流自然结束（未收到 [DONE]）：同样冲刷剩余文本
     if (!dsmlMode && contentBuf) {
