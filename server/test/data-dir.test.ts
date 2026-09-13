@@ -8,8 +8,13 @@ import { resolveDataDir, migrateLegacyDataDir } from '../src/data-dir.ts';
 // ---------- resolveDataDir：优先级 ----------
 
 test('resolveDataDir: Windows 便携版沿用 exe 旁 data/', () => {
-  const dir = resolveDataDir({}, 'win32', 'D:\\app\\icpc-core.exe');
-  assert.equal(dir, path.join('D:\\app', 'data'));
+  // 用 path.win32 断言：CI 跑在 Linux 上，posix 的 path 无法正确解析 Windows 路径
+  assert.equal(
+    resolveDataDir({}, 'win32', 'D:\\app\\icpc-core.exe'),
+    path.win32.join('D:\\app', 'data'),
+  );
+  // 便携版的语义就是「exe 同级 data」，分隔符必须与 exe 路径一致
+  assert.equal(resolveDataDir({}, 'win32', 'D:\\app\\icpc-core.exe'), 'D:\\app\\data');
 });
 
 test('resolveDataDir: ICPC_DATA_DIR 优先级最高（含首尾空白）', () => {

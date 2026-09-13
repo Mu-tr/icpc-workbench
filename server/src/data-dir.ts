@@ -30,7 +30,7 @@ const MACOS_APP_DIR_NAME = 'icpc-workbench';
  * @param env       环境变量表，默认 process.env
  * @param platform  目标平台，默认 process.platform
  * @param execPath  Node 可执行文件路径，默认 process.execPath
- * @param home      用户主目录，默认 os.homedir() 的等价物（process.env.HOME）
+ * @param home      用户主目录（macOS 用），默认取 $HOME
  */
 export function resolveDataDir(
   env: NodeJS.ProcessEnv = process.env,
@@ -46,7 +46,9 @@ export function resolveDataDir(
     return path.join(home.trim(), 'Library', 'Application Support', MACOS_APP_DIR_NAME, 'data');
   }
 
-  return path.join(path.dirname(execPath), 'data');
+  // win32 显式用 path.win32：宿主为 Linux（CI 测试）时也能得到正确的 Windows 路径语义
+  const impl = platform === 'win32' ? path.win32 : path;
+  return impl.join(impl.dirname(execPath), 'data');
 }
 
 /**
