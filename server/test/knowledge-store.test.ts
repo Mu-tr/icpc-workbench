@@ -9,8 +9,11 @@ import {
   getCoverage,
   initKnowledgeStore,
   keypointsOfProblem,
+  knowledgeTagsCoalesceSql,
+  knowledgeTagsJoinSql,
   knowledgeTagsSql,
   loadAnnotationsIntoDb,
+  problemKeypointsCte,
   setConfidenceThreshold,
   setManualKeypoints,
 } from '../src/knowledge/store.ts';
@@ -116,21 +119,33 @@ test('未命中题入 L2 队列；命中后自动出队；manual 永不覆盖', 
   }
 });
 
-test('统计读取路径：达标标注优先，低置信回退 tags，阈值可调', () => {
+test('统计读取路径：标注优先且不再受阈值过滤，无标注回退题源 tags', () => {
   const db = createDb(':memory:');
   try {
     insertProblem(db, 'codeforces', '4A', '题A', '["greedy"]');
-    db.prepare(
+    insertProblem(db, 'codeforces', '4B', '题B', '["greedy"]');
+    insertProblem(db, 'codeforces', '4C', '题C', '["greedy"]');
+    const ins = db.prepare(
       `INSERT INTO problem_keypoints (platform, problem_key, code, name, confidence, source, method, taxonomy_version, pipeline_version, annotated_at)
-       VALUES ('codeforces', '4A', 'basic.binary-search', '二分查找', 0.9, 'rule', 'rule#r002', 1, 1, '2026-01-01T00:00:00Z')`,
-    ).run();
-    const row1 = db.prepare(`SELECT p.id, ${knowledgeTagsSql(db)} FROM problems p`).get() as { tags: string };
-    assert.deepEqual(JSON.parse(row1.tags), ['二分查找']);
+       VALUES ('codeforces', ?, ?, ?, ?, 'rule', 'rule#r002', 1, 1, '2026-01-01T00:00:00Z')`,
+    );
+    ins.run('4A', 'basic.binary-search', '二分查找', 0.9);
+    // 低于历史默认阈值 0.6 的标注：confidence 已降级为「来源内排序权重」，
+    // 不再充当读取路径的可信度门槛（见 knowledge/store.ts 二来源注释）
+    ins.run('4B', 'basic.greedy', '贪心', 0.3);
+    const tagsOf = (key: string): string[] => {
+      const row = db.prepare(`SELECT ${knowledgeTagsSql(db)} FROM problems p WHERE p.problem_key = ?`).get(key) as {
+        tags: string;
+      };
+      return JSON.parse(row.tags) as string[];
+    };
+    assert.deepEqual(tagsOf('4A'), ['二分查找']);
+    assert.deepEqual(tagsOf('4B'), ['贪心']); // 0.3 的标注照读，不被阈值滤掉
+    assert.deepEqual(tagsOf('4C'), ['greedy']); // 无标注 → 回退题源 tags
 
-    // 阈值调到 0.95 后该标注被过滤 → 回退题源 tags
+    // 阈值设置本身仍可用（设置页与覆盖率报告仍在读它），但它不再影响本读取路径
     setConfidenceThreshold(db, 0.95);
-    const row2 = db.prepare(`SELECT p.id, ${knowledgeTagsSql(db)} FROM problems p`).get() as { tags: string };
-    assert.deepEqual(JSON.parse(row2.tags), ['greedy']);
+    assert.deepEqual(tagsOf('4B'), ['贪心']);
     assert.equal(getConfidenceThreshold(db), 0.95);
     assert.throws(() => setConfidenceThreshold(db, 1.5));
   } finally {
@@ -161,4 +176,62 @@ test('覆盖率报告：bySource / 低置信 / 待标注统计正确', () => {
     db.close();
     initKnowledgeStore(null);
   }
+});
+
+test('读取路径只认 tag/rule，忽略 ai 与 v1 problem_topics', () => {
+  const db = createDb(':memory:');
+  db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
+  db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (1,'codeforces','1A','T',1500,'[\"题源标签\"]')").run();
+  // v1 遗留层有数据，但不得再被读取
+  db.prepare("INSERT INTO problem_topics (problem_id,topic_id,confidence,method,pipeline_version) VALUES (1,'v1主题',1,'manual','x')").run();
+  // ai 标注存在，也不得再被读取
+  db.prepare(`INSERT INTO problem_keypoints
+    (platform,problem_key,code,name,confidence,source,method,taxonomy_version,pipeline_version,annotated_at)
+    VALUES ('codeforces','1A','basic.greedy','贪心',1,'ai','ai',1,1,'2026-01-01')`).run();
+  const row = db.prepare(`SELECT ${knowledgeTagsSql(db)} FROM problems p WHERE p.id = 1`).get() as { tags: string };
+  // 无 tag/rule 标注 → 回退到题源 tags（既不是 v1 主题，也不是 ai 标注）
+  assert.deepEqual(JSON.parse(row.tags), ['题源标签']);
+  db.close();
+});
+
+test('tag 与 rule 标注并存时全部返回（多 code 不压缩）', () => {
+  const db = createDb(':memory:');
+  db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
+  db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (2,'codeforces','2B','T',1500,'[]')").run();
+  const ins = db.prepare(`INSERT INTO problem_keypoints
+    (platform,problem_key,code,name,confidence,source,method,taxonomy_version,pipeline_version,annotated_at)
+    VALUES ('codeforces','2B',?,?,1,?,'x',1,1,'2026-01-01')`);
+  ins.run('basic.greedy', '贪心', 'tag');
+  ins.run('dp.general', '动态规划', 'rule');
+  const row = db.prepare(`SELECT ${knowledgeTagsSql(db)} FROM problems p WHERE p.id = 2`).get() as { tags: string };
+  // 读取路径回传的是标注的展示名（既有契约：pk.tags 是 name 数组，见现有 4A 用例）
+  assert.deepEqual((JSON.parse(row.tags) as string[]).sort(), ['贪心', '动态规划'].sort());
+  db.close();
+});
+
+test('CTE/join 形态与标量形态同口径：两来源聚合、v1 表不参与、无标注回退 p.tags', () => {
+  const db = createDb(':memory:');
+  db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
+  // 12A：无标注，但有 v1 遗留行 —— 若 pt 分支未摘除，这里会读出「v1主题」
+  db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (12,'codeforces','12A','T',1500,'[\"题源标签\"]')").run();
+  db.prepare("INSERT INTO problem_topics (problem_id,topic_id,confidence,method,pipeline_version) VALUES (12,'v1主题',1,'manual','x')").run();
+  // 13B：tag + rule 两来源同在 —— 必须全部返回，且 ai 行不参与
+  db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (13,'codeforces','13B','T',1500,'[]')").run();
+  const ins = db.prepare(`INSERT INTO problem_keypoints
+    (platform,problem_key,code,name,confidence,source,method,taxonomy_version,pipeline_version,annotated_at)
+    VALUES ('codeforces',?,?,?,1,?,'x',1,1,'2026-01-01')`);
+  ins.run('13B', 'basic.greedy', '贪心', 'tag');
+  ins.run('13B', 'dp.general', '动态规划', 'rule');
+  ins.run('13B', 'misc.sorting', '排序', 'ai');
+  const rows = db
+    .prepare(
+      `WITH ${problemKeypointsCte(db)} SELECT p.id, ${knowledgeTagsCoalesceSql()} FROM problems p ` +
+        `${knowledgeTagsJoinSql()} ORDER BY p.id`,
+    )
+    .all() as Array<{ id: number; tags: string }>;
+  assert.deepEqual(
+    rows.map((r) => `${r.id}:${(JSON.parse(r.tags) as string[]).sort().join(',')}`),
+    ['12:题源标签', '13:动态规划,贪心'],
+  );
+  db.close();
 });

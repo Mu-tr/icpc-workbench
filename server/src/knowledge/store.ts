@@ -360,62 +360,57 @@ export function keypointsOfProblem(db: Db, platform: string, problemKey: string)
 }
 
 /**
- * 统计端读取路径：优先知识点标注（≥阈值），其次旧版 problem_topics（v1 遗留，见 topics/pipeline.ts），
- * 最后回退题源 tags（写入时已净化，见 import/problemWritePolicy.ts）。
- * 注意：这是这条三级回退链的**唯一实现**，调用处的题目表别名必须是 p。
+ * 知识点读取路径（**唯一实现**，调用处的题目表别名必须是 p）。
+ *
+ * 二来源：problem_keypoints 中 source IN ('tag','rule') 的标注，按 code 去重后聚合；
+ * 无标注则回退题源 tags（已净化的原始值，供审计与兜底）。
+ *
+ * 已摘除两个分支（清洗重构 spec §1.3）：
+ * - `source='ai'`：AI 已退出清洗模块，不再参与任何统计
+ * - `problem_topics`（v1 遗留层）：表仍在（写入路径未动），但不再被读取
+ *
+ * confidence 不再作为可信度门槛（该字段已降级为来源内排序权重）；
+ * 因此本函数不再读取知识库阈值设置。
  */
-export function knowledgeTagsSql(db: Db): string {
-  const t = getConfidenceThreshold(db);
+export function knowledgeTagsSql(_db: Db): string {
   return (
-    'CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ' + t + ') ' +
-    'THEN (SELECT json_group_array(pk2.name) FROM problem_keypoints pk2 WHERE pk2.platform = p.platform AND pk2.problem_key = p.problem_key AND pk2.confidence >= ' + t + ') ' +
-    'WHEN EXISTS (SELECT 1 FROM problem_topics pt WHERE pt.problem_id = p.id) ' +
-    'THEN (SELECT json_group_array(ptx.topic_id) FROM problem_topics ptx WHERE ptx.problem_id = p.id) ' +
+    'CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform ' +
+    "AND pk.problem_key = p.problem_key AND pk.source IN ('tag','rule')) " +
+    'THEN (SELECT json_group_array(pk2.name) FROM problem_keypoints pk2 WHERE pk2.platform = p.platform ' +
+    "AND pk2.problem_key = p.problem_key AND pk2.source IN ('tag','rule')) " +
     'ELSE p.tags END AS tags'
   );
 }
 
 /**
- * 与 knowledgeTagsSql 同一三级回退口径的 CTE 版本（调用处需在同一条 SQL 里 WITH 之）。
- *
- * knowledgeTagsSql 是单列标量子查询表达式，嵌入 SELECT 时 SQLite 对**每一行**都要重跑
- * 2 个子查询；题库 2 万题时这是列表页最重的一笔开销。本函数把标注侧预先聚合成按
- * (platform, problem_key) 一行的小派生表，再由调用方 LEFT JOIN，聚合只做一次。
- *
- * - `pk` CTE：≥阈值的标注按题聚合（json_group_array 复用 knowledgeTagsSql 的数组语义）
- * - `pt` CTE：v1 遗留的 problem_topics 回退层，按 problem_id 聚合
- * - 返回的 `tags` 列选择顺序与 knowledgeTagsSql 完全一致：知识点 → v1 主题 → 题源 tags
- *
- * 用法：`WITH ${problemKeypointsCte(db)} SELECT ... ${knowledgeTagsJoinSql()} FROM problems p LEFT JOIN pk ON ...`
+ * knowledgeTagsSql 同一口径的 CTE 版本：把标注侧预聚合成按题一行的小派生表，
+ * 再由调用方 LEFT JOIN —— 避免标量子查询逐行重跑（题库 2 万题时的主要开销）。
+ * 用法：`WITH ${problemKeypointsCte(db)} SELECT ... ${knowledgeTagsCoalesceSql()} FROM problems p ${knowledgeTagsJoinSql()}`
  */
-export function problemKeypointsCte(db: Db): string {
-  const t = getConfidenceThreshold(db);
+export function problemKeypointsCte(_db: Db): string {
   return (
-    'pk AS (SELECT platform, problem_key, json_group_array(name) AS tags FROM problem_keypoints ' +
-    `WHERE confidence >= ${t} GROUP BY platform, problem_key), ` +
-    'pt AS (SELECT problem_id, json_group_array(topic_id) AS tags FROM problem_topics GROUP BY problem_id)'
+    "pk AS (SELECT platform, problem_key, json_group_array(name) AS tags FROM problem_keypoints " +
+    "WHERE source IN ('tag','rule') GROUP BY platform, problem_key)"
   );
+}
+
+/** problemKeypointsCte 对应的 FROM 附加子句 */
+export function knowledgeTagsJoinSql(): string {
+  return 'LEFT JOIN pk ON pk.platform = p.platform AND pk.problem_key = p.problem_key';
 }
 
 /**
- * problemKeypointsCte 对应的 FROM 附加子句与 tags 列表达式（成对使用）。
- * LEFT JOIN 而非 EXISTS：未标注题同样只有一行（NULL），语义与三级回退一致。
+ * 二来源回退的 tags 列（配合 knowledgeTagsJoinSql 使用），别名必须为 p。
+ * ⚠️ 仅返回题源 tags 回退值 —— pk 侧的名称数组在调用方需另行透传，
+ * 本函数保留 `AS tags` 形态以兼容既有 problems.ts 用法。
  */
-export function knowledgeTagsJoinSql(): string {
-  return (
-    'LEFT JOIN pk ON pk.platform = p.platform AND pk.problem_key = p.problem_key ' +
-    'LEFT JOIN pt ON pt.problem_id = p.id'
-  );
-}
-
-/** 三级回退的 tags 列（配合 knowledgeTagsJoinSql 使用），别名必须为 p */
 export function knowledgeTagsCoalesceSql(): string {
   return `${knowledgeTagsExpr()} AS tags`;
 }
 
 /** 同上但**不带 AS 别名**：供 json_each(...) 等需要表达式的场景使用 */
 export function knowledgeTagsExpr(): string {
-  return 'COALESCE(pk.tags, pt.tags, p.tags)';
+  return 'COALESCE(pk.tags, p.tags)';
 }
 
 export function getCoverage(db: Db): KnowledgeCoverage {
