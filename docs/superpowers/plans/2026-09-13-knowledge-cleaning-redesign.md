@@ -4,7 +4,7 @@
 
 **Goal:** 把知识点清洗模块从「一处概率性猜测」（AI 占 88.4% 点位）改为「可归因、可验证的证据链」——AI 退出，来源收敛为 tag/rule/intent，补齐 taxonomy 粗粒度层并按实测信息量加权，新增用户意图信号，并用留出集 AUC 证明弱项判断有效。
 
-**Architecture:** 三层分工——① `problem_keypoints` 只存**题目属性**（`source ∈ {tag, rule}`，一题多 code 为正常态）；② `knowledge_concept_stats` 按难度桶物化每个概念的占比与二元熵信息量，供下游加权；③ 新增 `submission_intents` 存**用户声明**的卡点，使弱项判断不再依赖对题目的归因。AI 链路（`aiClassify.ts` 的 L2 批次、队列重试语义）从清洗链路摘除。
+**Architecture:** 三层分工——① `problem_keypoints` 只存**题目属性**（可读来源集合 `('tag','rule','manual')`，一题多 code 为正常态）；② `knowledge_concept_stats` 按难度桶物化每个概念的占比与二元熵信息量，供下游加权；③ 新增 `submission_intents` 存**用户声明**的卡点，使弱项判断不再依赖对题目的归因。AI 链路（`aiClassify.ts` 的 L2 批次、队列重试语义）从清洗链路摘除。
 
 **Tech Stack:** Node 22 + `node:sqlite`（零原生依赖）、Express、TypeScript（tsx 运行）、`node:test` + `node:assert/strict`、React 19 + Vite + Ant Design 5、npm workspaces。
 
@@ -18,6 +18,13 @@
 - **JSONL 是源真相**：任何对 `problem_keypoints` 的删除都必须在同一事务窗口内向 `data/knowledge/annotations.jsonl` 追加 tombstone 行（`knowledgePoints: []`），且 **append 先于 COMMIT**。只删库不写 tombstone 会导致下次启动重放复活数据。
 - 不新增 npm 依赖。
 - 所有 taxonomy code 必须存在于 `server/src/knowledge/taxonomy.json`；写库前用 `isValidCode` 校验，非法 code 跳过并计入 gap 报告，**不抛错**。
+- **`problem_keypoints` 的「可读来源集合」只有一个权威定义**：`('tag','rule','manual')`。
+  禁止在任何读取/统计/验证 SQL 里**漏掉其中的任何一项**（尤其别把 `manual` 落下）——
+  那会静默丢弃人工校正，使 UI 上的人工校正失效
+  （Task 3 的实现阶段正是踩了这个坑，见其 review 的 F17）。
+  `manual` 必须始终可读：`setManualKeypoints` 会先删该题全部行再只写 manual 行，
+  读取端若漏掉它就会回退到原始 `p.tags`，等于丢弃用户显式校正。
+  该集合若日后变化（例如新增来源），**必须同时更新本行与全部引用处**。
 - `confidence` 字段降级为「来源内排序权重」，**不再表示概率**。不得在任何新代码里把它当可信度使用。
 - 权重下限 `FLOOR = 0.25`（见 Task 5、Task 6）。
 - 每个任务一次 commit，提交信息用 `feat(knowledge):` / `refactor(knowledge):` / `test(knowledge):` 前缀。
@@ -465,7 +472,7 @@ Expected: FAIL —— 第一个测试实际拿到 `["v1主题"]` 或 `["贪心"]
 /**
  * 知识点读取路径（**唯一实现**，调用处的题目表别名必须是 p）。
  *
- * 二来源：problem_keypoints 中 source IN ('tag','rule') 的标注，按 code 去重后聚合；
+ * 二来源：problem_keypoints 中 source IN ('tag','rule','manual') 的标注，按 code 去重后聚合；
  * 无标注则回退题源 tags（已净化的原始值，供审计与兜底）。
  *
  * 已摘除两个分支（清洗重构 spec §1.3）：
@@ -478,9 +485,9 @@ Expected: FAIL —— 第一个测试实际拿到 `["v1主题"]` 或 `["贪心"]
 export function knowledgeTagsSql(_db: Db): string {
   return (
     'CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform ' +
-    "AND pk.problem_key = p.problem_key AND pk.source IN ('tag','rule')) " +
+    "AND pk.problem_key = p.problem_key AND pk.source IN ('tag','rule','manual')) " +
     'THEN (SELECT json_group_array(pk2.name) FROM problem_keypoints pk2 WHERE pk2.platform = p.platform ' +
-    "AND pk2.problem_key = p.problem_key AND pk2.source IN ('tag','rule')) " +
+    "AND pk2.problem_key = p.problem_key AND pk2.source IN ('tag','rule','manual')) " +
     'ELSE p.tags END AS tags'
   );
 }
@@ -497,7 +504,7 @@ export function knowledgeTagsSql(_db: Db): string {
 export function problemKeypointsCte(_db: Db): string {
   return (
     "pk AS (SELECT platform, problem_key, json_group_array(name) AS tags FROM problem_keypoints " +
-    "WHERE source IN ('tag','rule') GROUP BY platform, problem_key)"
+    "WHERE source IN ('tag','rule','manual') GROUP BY platform, problem_key)"
   );
 }
 
@@ -905,7 +912,7 @@ export function recomputeConceptStats(db: Db): number {
       `SELECT p.id, p.difficulty, pk.code
          FROM problems p JOIN problem_keypoints pk
            ON pk.platform = p.platform AND pk.problem_key = p.problem_key
-        WHERE pk.source IN ('tag','rule')`,
+        WHERE pk.source IN ('tag','rule','manual')`,
     )
     .all() as unknown as Array<{ id: number; difficulty: number | null; code: string }>;
 
@@ -1692,7 +1699,7 @@ export function gapReport(db: Db, opts: { limit?: number } = {}): GapReport {
           WHERE NOT EXISTS (
             SELECT 1 FROM problem_keypoints k
              WHERE k.platform = p.platform AND k.problem_key = p.problem_key
-               AND k.source IN ('tag','rule'))`,
+               AND k.source IN ('tag','rule','manual'))`,
       )
       .get() as { c: number }
   ).c;
@@ -1704,7 +1711,7 @@ export function gapReport(db: Db, opts: { limit?: number } = {}): GapReport {
         WHERE NOT EXISTS (
           SELECT 1 FROM problem_keypoints k
            WHERE k.platform = p.platform AND k.problem_key = p.problem_key
-             AND k.source IN ('tag','rule'))`,
+             AND k.source IN ('tag','rule','manual'))`,
     )
     .all() as unknown as Array<{ tags: string }>;
 
@@ -1922,7 +1929,7 @@ function main(): void {
 
   // 每题的知识点 code
   const kpRows = db
-    .prepare("SELECT problem_id AS problemId, code FROM problem_keypoints WHERE source IN ('tag','rule')")
+    .prepare("SELECT problem_id AS problemId, code FROM problem_keypoints WHERE source IN ('tag','rule','manual')")
     .all() as unknown as Array<{ problemId: number; code: string }>;
   const codesByProblem = new Map<number, string[]>();
   for (const k of kpRows) {
