@@ -1601,11 +1601,16 @@ git commit -m "feat(knowledge): 题目页「卡在哪」意图采集入口"
 
 ---
 
-### Task 9: 队列转词表缺口清单
+### Task 9: 队列转词表缺口清单 + 摘除已死管线
 
 **Files:**
 - Modify: `server/src/knowledge/pipeline.ts`（删除 AI 批次逻辑；新增 `gapReport`）
-- Modify: `server/src/routes/knowledge.ts`（`/build` 去掉 L2；新增 `/gaps`）
+- Modify: `server/src/routes/knowledge.ts`（`/build` 去掉 L2；新增 `/gaps`；删 AI import 与 `/retry-failed`）
+- **Delete: `server/src/knowledge/aiClassify.ts`（467 行）+ `server/test/knowledge-ai.test.ts`（374 行）**
+- **Delete: `server/src/topics/pipeline.ts`（64 行）+ `server/test/topics-pipeline.test.ts` + `problem_topics` 表**
+- **Modify: `server/src/routes/problems.ts`（删 `topics/rebuild` 端点与其 import）**
+- Modify: `server/src/db/schema.sql`（删 `problem_topics` 表与 `idx_problem_topics_topic`）
+- Modify: `server/test/knowledge-store.test.ts`（改掉对 `problem_topics` 的断言，见 Step 6）
 - Test: `server/test/knowledge-gaps.test.ts`（新建）
 
 **Interfaces:**
@@ -1614,6 +1619,17 @@ git commit -m "feat(knowledge): 题目页「卡在哪」意图采集入口"
   - `gapReport(db: Db, opts?: { limit?: number }): { gaps: Array<{ tag: string; problems: number }>; uncovered: number }`
   - `GET /api/knowledge/gaps` → 上述结构
 - 移除导出：`pendingAiCount`、`markBatchRetry`、`retryFailedQueue`、`failedAiCount`、`commitAiAnnotations`、`fetchAiBatch`、`markQueueStatus`、`MAX_ATTEMPTS`
+
+**为什么本任务额外删这些（控制器裁定 — 请勿省略）**
+
+用户决策「AI 退出题目清洗模块」后，实测确认这两块已无任何生产用途：
+
+| 删除对象 | 生产引用 | 判定依据 |
+| --- | --- | --- |
+| `aiClassify.ts` + 其测试 | **仅** `routes/knowledge.ts:19` 的 import，而本任务正要删掉那三个端点 | 计划原先写「保留作离线导出通道」——该通道（导出题目包 → 外部 AI 标注 → 回填）**做的就是「让 AI 清洗知识点」这件事本身**，与用户决策矛盾，故理据不成立。删除后清洗链路再无 AI。 |
+| `topics/pipeline.ts` + `problem_topics` 表 + `/api/problems/topics/rebuild` | `problems.ts:12` 的 import 与 `:412` 的端点 | Task 3 已把该表从读取路径摘除 → **写入不再影响任何统计**。留着一张在写、没人读的表 + 一个端点属纯负债。（原先记作「留给优化方案 P2-7 单独决策」，现并入本任务一次做完，避免二次改动同批文件。） |
+
+**迁移后的实测投影支持这些删除**：tag ∪ rule 覆盖 17,163 / 19,144 题（**89.7%**），101/134 个 taxonomy code 仍有命中 —— 即核心管线（`tagAnnotate` / `ruleEngine` / `store` / `pipeline` / `taxonomy`）**确有价值，不得删**；上述两块与该结论无关。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1780,11 +1796,50 @@ Expected: PASS（3 个测试）
 Run: `cd "D:\01-代码项目\工作台" && npm run typecheck && npm test`
 Expected: 全绿。若有 client 代码调用被删除的端点（`/api/knowledge/build` 的 `mode: 'l2'`、`/retry-failed`），同步改掉：`client/src/pages/Problems.tsx` 的 `runFullPipeline` 与 `retryFailed` 函数需相应简化或移除。
 
+- [ ] **Step 6b: 删除已死管线（aiClassify 与 v1 topics）**
+
+**6b-1 删 `aiClassify.ts` 与其测试**
+
+```bash
+git rm server/src/knowledge/aiClassify.ts server/test/knowledge-ai.test.ts
+```
+
+删前确认已无其他引用：`grep -rn "aiClassify" server/src server/test` 应只剩 0 处（Step 5 已删掉 `routes/knowledge.ts:19` 的 import）。
+若 `shared/src/index.ts` 中有仅为该模块服务的类型（如导出队列包结构），一并删除并在报告中列出。
+
+**6b-2 删 v1 topics 层**
+
+```bash
+git rm server/src/topics/pipeline.ts server/test/topics-pipeline.test.ts
+```
+
+然后：
+1. `routes/problems.ts`：删 `import { rebuildTopicAnnotations } from '../topics/pipeline.ts';`（`:12`）与整个 `POST /api/problems/topics/rebuild` 端点（`:407-412` 附近）。
+2. `schema.sql`：删 `problem_topics` 表定义与其索引 `idx_problem_topics_topic`。
+   ⚠️ **`CREATE TABLE IF NOT EXISTS` 的既有库不会自动丢表** —— 但本表的**写入与读取路径已全部删除**，遗留的库内空表不影响任何行为。本计划**不加** `DROP TABLE`（无收益且不可逆）；若要物理清理需另议。
+3. `store.ts:377` 的注释仍写「`problem_topics`（v1 遗留层）：表仍在（写入路径未动），但不再被读取」—— 改为说明该层已被彻底移除。
+
+**6b-3 改掉 `knowledge-store.test.ts` 里对 `problem_topics` 的断言**
+
+现状：`knowledge-store.test.ts:187` 与 `:253` 会 `INSERT INTO problem_topics ...`，用于证明「读取路径忽略 v1 层」。表删除后这些 INSERT 会失败。
+
+**不要把这两条断言删掉了事** —— 它们验证的是「读取路径不读 v1」。改为：
+- 删掉 `INSERT INTO problem_topics` 行；
+- 把该测试的**意图**保留为一句注释 + 断言现有语义（读取只认 `tag/rule/manual`，无标注则回退 `p.tags`）；
+- 在报告中明确写出「此断言随该层被移除而失去对象，已改写为…」，**不要静默削弱**。
+
+**6b-4 验证删除是彻底的**
+
+```bash
+grep -rn "problem_topics\|rebuildTopicAnnotations\|aiClassify\|runAiPass\|importAiResults\|exportQueuePackage" server/src server/test shared/src
+```
+Expected: **0 处命中**（`docs/` 与历史计划文档除外）。若有残留，说明还有引用未清，修掉再继续。
+
 - [ ] **Step 7: Commit**
 
 ```bash
-git add server/src/knowledge/pipeline.ts server/src/routes/knowledge.ts server/test/knowledge-gaps.test.ts client/src/pages/Problems.tsx
-git commit -m "refactor(knowledge): 队列转词表缺口清单，删除 AI 批次链路"
+git add -A server/src server/test shared/src client/src
+git commit -m "refactor(knowledge): 队列转词表缺口清单，摘除已死的 AI 分类与 v1 topics 层"
 ```
 
 ---
@@ -2156,4 +2211,6 @@ git commit -m "docs(knowledge): 消费端口径同步与 README 更新（中英�
 - 不补 `misc.simulation` 之外的更多细粒度拆分（如把「数学」拆成数论/组合/概率）——先看粗粒度层把覆盖率推到多少再决定
 - 不做意图采集的历史回溯（不能补记过去的提交）
 - 不在「今日训练」/「复习库」页加「卡在哪」入口（Task 8 只在题目管理页落地，其余作为后续增量）
-- 不删除 `aiClassify.ts` 文件与 `problem_topics` 表（前者保留作离线导出通道，后者留给优化方案 P2-7 单独决策）
+- ~~不删除 `aiClassify.ts` 文件与 `problem_topics` 表~~ → **已于 2026-09-13 改为在 Task 9 一并删除**（见 Task 9 的「为什么本任务额外删这些」）。原判断「保留作离线导出通道」理据不成立：该通道做的就是让 AI 清洗知识点本身，与用户「AI 退出清洗模块」的决策矛盾；`problem_topics` 则因 Task 3 摘除读取后已成纯负债。
+- 不做 `DROP TABLE problem_topics` 的物理清理（老库会留下该空表；写入/读取路径已全删，不影响行为；物理删表不可逆且无收益）
+- 不补 `tagAnnotate` 的「同义组细化」——先看 89.7% 覆盖率稳定后，再按 `GET /api/knowledge/gaps` 的缺口排行决定补哪些词表
