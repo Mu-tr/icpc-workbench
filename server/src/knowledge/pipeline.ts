@@ -122,15 +122,18 @@ export function annotateProblemsL1(
     }
     const result = writeAnnotationsToDb(db, writes);
     // tag 来源与 rule 来源并联：两者互相独立（rule 已有标注的题仍可能有 tag 标注）。
-    // 必须在 rule 写入**之后**调用：同一 (platform, problem_key, code) 在表里只有一行，
-    // tag 层据此跳过已被 rule/manual/ai 认领的 code；反过来先写 tag 会让 rule 的插入
-    // 撞主键（UNIQUE constraint）而回滚整批。
+    // 与 rule 的先后顺序不影响结果：同 code 跨来源冲突由 writeAnnotationsToDb 按
+    // SOURCE_PRECEDENCE 显式让位（rule 接管 tag 占用的 code，tag 遇 rule 占位则让开）。
+    // tags 的解析口径归 tagAnnotate 一处所有，这里只筛「有没有 tags 字段」。
     const tagWrites = rows
-      .filter((r) => r.tags !== undefined && r.tags !== '[]')
+      .filter((r) => r.tags !== undefined)
       .map((r) => ({ platform: r.platform, problemKey: r.problemKey, tags: r.tags! }));
-    // dataDir 传 null：JSONL 由本函数统一追加（把 tagResult.lines 一并带上），
-    // 避免同一事务窗口内追加两次
+    // dataDir 显式传 null：本函数统一追加 JSONL（把 tagResult.lines 一并带上），
+    // 避免同一事务窗口内追加两次（tagAnnotate 对显式 null 的语义见其文档注释）
     const tagResult = annotateProblemsFromTags(db, tagWrites, { dataDir: null });
+    if (tagResult.malformedTags > 0) {
+      console.warn(`[knowledge] ${tagResult.malformedTags} 题的 problems.tags 不是合法 JSON 数组，已按无标签处理`);
+    }
     const dataDir = effectiveDataDir(opts.dataDir);
     if (dataDir) appendAnnotations(dataDir, [...result.lines, ...tagResult.lines, ...tombstones]);
     db.exec('COMMIT');

@@ -79,6 +79,14 @@ function rowsOf(key: string): string[] {
   return rows.map((x) => `${x.code}:${x.source}:${x.confidence}`);
 }
 
+/** 只看 code:source（规则表 confidence 属于 rules.json 的口径，不在此断言）；可指定自带 dataDir 的用例的连接 */
+function codeSourcesOf(key: string, target: Db = db): string[] {
+  const rows = target
+    .prepare("SELECT code, source FROM problem_keypoints WHERE platform='codeforces' AND problem_key=? ORDER BY code")
+    .all(key) as Array<{ code: string; source: string }>;
+  return rows.map((x) => `${x.code}:${x.source}`);
+}
+
 test('annotateProblemsFromTags: 已被 rule 占用的 code 留给 rule（主键不含 source，不可重复写）', () => {
   insertProblem('3C', '线段树与贪心', '[]');
   db.prepare(
@@ -96,15 +104,22 @@ test('annotateProblemsFromTags: 已被 rule 占用的 code 留给 rule（主键�
   assert.deepEqual(rowsOf('3C'), ['basic.greedy:tag:1', 'ds.segtree:rule:0.9']);
 });
 
-test('annotateProblemsFromTags: 增量幂等（二次调用不重复写、不新增行）', () => {
+test('annotateProblemsFromTags: 增量幂等（二次调用不重复写库、不重复追加 JSONL）', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-tag-idem-'));
   insertProblem('3D', 'T', '[]');
   const rows = [{ platform: 'codeforces', problemKey: '3D', tags: JSON.stringify(['贪心']) }];
-  const first = annotateProblemsFromTags(db, rows, { dataDir: null });
-  const second = annotateProblemsFromTags(db, rows, { dataDir: null });
+  const first = annotateProblemsFromTags(db, rows, { dataDir });
+  const jsonlAfterFirst = fs.readFileSync(annotationsPath(dataDir), 'utf8').trim().split('\n').length;
+  const second = annotateProblemsFromTags(db, rows, { dataDir });
   assert.equal(first.annotated, 1);
-  assert.equal(second.scanned, 0);
-  assert.equal(second.annotated, 0);
-  assert.equal(rowsOf('3D').length, 1);
+  assert.equal(second.annotated, 0, '应持有的 code 都已在库 → 不重复写');
+  assert.equal(second.scanned, 1, 'scanned 统计参与扫描的题（含已覆盖而跳过的）');
+  assert.deepEqual(rowsOf('3D'), ['basic.greedy:tag:1'], '行集不变');
+  assert.equal(
+    fs.readFileSync(annotationsPath(dataDir), 'utf8').trim().split('\n').length,
+    jsonlAfterFirst,
+    '幂等重跑不得重复追加 JSONL',
+  );
 });
 
 test('annotateProblemsFromTags: 在外层事务内调用不自行提交（回滚外层即整体回滚）', () => {
@@ -121,7 +136,7 @@ test('annotateProblemsFromTags: 在外层事务内调用不自行提交（回滚
   assert.equal(rowsOf('3E').length, 0); // 未自行提交，随外层一起回滚
 });
 
-test('L1 钩子：tag 与 rule 并联落库，JSONL 记两个来源且可重建', () => {
+test('L1 钩子：tag 与 rule 并联落库，JSONL 恰好两行且可重建', () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-tag-test-'));
   initKnowledgeStore(dataDir);
   const db1 = createDb(':memory:');
@@ -145,8 +160,15 @@ test('L1 钩子：tag 与 rule 并联落库，JSONL 记两个来源且可重建'
       .readFileSync(annotationsPath(dataDir), 'utf8')
       .trim()
       .split('\n')
-      .map((l) => JSON.parse(l) as { writeSource: string });
-    assert.deepEqual([...new Set(lines.map((l) => l.writeSource))].sort(), ['rule', 'tag']);
+      .map((l) => JSON.parse(l) as { writeSource: string; knowledgePoints: Array<{ code: string }> });
+    // 精确断言行数与来源：每个来源每道题只追加一行（内层 dataDir:null + 外层统一追加，
+    // 不得出现重复的 tag 行）
+    assert.equal(lines.length, 2, `JSONL 应恰好两行，实得 ${JSON.stringify(lines.map((l) => l.writeSource))}`);
+    assert.deepEqual([...lines.map((l) => l.writeSource)].sort(), ['rule', 'tag']);
+    assert.deepEqual(
+      lines.find((l) => l.writeSource === 'tag')!.knowledgePoints.map((p) => p.code),
+      ['basic.greedy'],
+    );
 
     // 源真相可重建：全新库从 JSONL 重放后行集与直写一致
     const db2 = createDb(':memory:');
@@ -168,14 +190,94 @@ test('L1 钩子：tag 与 rule 并联落库，JSONL 记两个来源且可重建'
   }
 });
 
-test('annotateProblemsFromTags: 非 JSON / 非数组的 tags 视为无标签，不抛错', () => {
-  insertProblem('3F', 'T', '[]');
+test('L1 钩子：rule 想接管 tag 已占用的 code 时不撞主键（标题修复 + 差量重跑）', () => {
+  // 场景即评审 C1：先由 tag 占住 basic.greedy，随后标题修复让 rule 也命中同一 code
+  insertProblem('7B', 'A. 线段树', JSON.stringify(['贪心']));
+  const first = runRulePass(db);
+  assert.equal(first.tagAnnotated, 1);
+  assert.ok(codeSourcesOf('7B').includes('basic.greedy:tag'));
+  assert.ok(codeSourcesOf('7B').includes('ds.segtree:rule'));
+
+  db.prepare("UPDATE problems SET title = 'A. 贪心' WHERE platform='codeforces' AND problem_key='7B'").run();
+  const rerun = runRulePass(db, { rerun: true }); // 修复前：UNIQUE constraint failed → 整批回滚
+  assert.equal(rerun.scanned, 1);
+  assert.deepEqual(codeSourcesOf('7B'), ['basic.greedy:rule'], 'rule 按优先级接管该 code，tag 行让位');
+});
+
+test('L1 钩子：rule 行被清除后 tag 层重新认领回来（否则该题永久丢 code）', () => {
+  // 评审 M9：tags[线段树,排序] 中 线段树 被 rule 占着（tag 只写了 排序，于是该题有了 tag 行）；
+  // 标题修复后 rule 不再命中，清除快照删掉 rule 行 —— 若「已有 tag 行就整题跳过」，
+  // 线段树 这个可映射的 code 就永久丢了
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-tag-reclaim-'));
+  initKnowledgeStore(dataDir);
+  const db1 = createDb(':memory:');
+  try {
+    db1
+      .prepare("INSERT INTO problems (platform,problem_key,title,difficulty,tags) VALUES ('codeforces','7C','A. 线段树',1500,?)")
+      .run(JSON.stringify(['线段树', '排序']));
+    const first = runRulePass(db1);
+    assert.equal(first.tagAnnotated, 1);
+    assert.deepEqual(
+      codeSourcesOf('7C', db1),
+      ['ds.segtree:rule', 'misc.sorting:tag'],
+      'rule 占位时 tag 只写空缺',
+    );
+
+    db1.prepare("UPDATE problems SET title = 'A. 无信息题' WHERE platform='codeforces' AND problem_key='7C'").run();
+    runRulePass(db1, { rerun: true });
+    assert.deepEqual(
+      codeSourcesOf('7C', db1),
+      ['ds.segtree:tag', 'misc.sorting:tag'],
+      'rule 行被清除后由 tag 接管，题目不失去覆盖',
+    );
+
+    // 清除快照（rule 墓碑）+ tag 重新认领 必须能重放：源真相重建后行集一致
+    const before = db1.prepare('SELECT * FROM problem_keypoints ORDER BY platform, problem_key, code').all();
+    const db2 = createDb(':memory:');
+    try {
+      loadAnnotationsIntoDb(db2, dataDir);
+      const after = db2.prepare('SELECT * FROM problem_keypoints ORDER BY platform, problem_key, code').all();
+      assert.deepEqual(
+        after.map((x) => JSON.stringify(x)),
+        before.map((x) => JSON.stringify(x)),
+      );
+    } finally {
+      db2.close();
+    }
+  } finally {
+    db1.close();
+    initKnowledgeStore(null);
+  }
+});
+
+test('annotateProblemsFromTags: 部分未映射的标签同样进 unmappedTags', () => {
+  insertProblem('3G', 'T', '[]');
   const r = annotateProblemsFromTags(
+    db,
+    [{ platform: 'codeforces', problemKey: '3G', tags: JSON.stringify(['贪心', '某不存在的标签']) }],
+    { dataDir: null },
+  );
+  assert.equal(r.annotated, 1);
+  assert.deepEqual(r.unmappedTags, ['某不存在的标签']);
+});
+
+test('annotateProblemsFromTags: 非 JSON / 非数组的 tags 视为无标签，不抛错且计入 malformedTags', () => {
+  insertProblem('3F', 'T', '[]');
+  const broken = annotateProblemsFromTags(
     db,
     [{ platform: 'codeforces', problemKey: '3F', tags: '{不是数组' }],
     { dataDir: null },
   );
-  assert.equal(r.annotated, 0);
-  assert.deepEqual(r.unmappedTags, []);
+  assert.equal(broken.annotated, 0);
+  assert.deepEqual(broken.unmappedTags, []);
+  assert.equal(broken.malformedTags, 1);
   assert.equal(rowsOf('3F').length, 0);
+
+  const empty = annotateProblemsFromTags(
+    db,
+    [{ platform: 'codeforces', problemKey: '3F', tags: '[]' }],
+    { dataDir: null },
+  );
+  assert.equal(empty.malformedTags, 0, "'[]' 是合法空标签，不算脏数据");
 });
+

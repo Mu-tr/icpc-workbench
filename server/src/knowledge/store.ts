@@ -45,6 +45,17 @@ export function tombstoneLine(platform: string, problemKey: string, source: Know
   };
 }
 
+/**
+ * 同 code 冲突时的来源优先级（必须两两不同）。
+ *
+ * `problem_keypoints` 主键是 `(platform, problem_key, code)` —— **不含 source**，
+ * 同一 code 只允许一行。因此写入路径必须按本表**显式让位**，而不是依赖调用顺序：
+ * 高优先级来源可以接管低优先级来源占用的 code，反之则放弃该 code。
+ * 读路径（`loadAnnotationsIntoDb` 从 JSONL 重建）用同一张表，保证「库内视图」与
+ * 「源真相重放结果」一致。
+ */
+export const SOURCE_PRECEDENCE: Record<KnowledgeSource, number> = { manual: 4, ai: 3, rule: 2, tag: 1 };
+
 /** 一次管线写入（同源一组知识点） */
 export interface AnnotationWrite {
   platform: string;
@@ -109,7 +120,8 @@ export function appendAnnotations(dataDir: string, lines: JsonlLine[]): void {
 
 /**
  * 启动时幂等重建：解析 JSONL，按（题目 × 来源）取最后一行快照，各来源并集落库；
- * 同 code 冲突时 manual > ai > rule。taxonomy 中不存在的 code 丢弃并计数（幻觉/废弃 code 拦截）。
+ * 同 code 冲突时按 SOURCE_PRECEDENCE 取高优先级来源。
+ * taxonomy 中不存在的 code 丢弃并计数（幻觉/废弃 code 拦截）。
  */
 export function loadAnnotationsIntoDb(
   db: Db,
@@ -135,9 +147,7 @@ export function loadAnnotationsIntoDb(
     latest.set(`${line.platform}|${line.problemKey}|${source}`, line);
   }
 
-  // 按题目并集各来源快照；同 code 取高优先级来源（manual > ai > rule > tag）
-  // 优先级必须两两不同：取 >= 比较，同优先级会退化为依赖遍历顺序
-  const precedence: Record<KnowledgeSource, number> = { manual: 4, ai: 3, rule: 2, tag: 1 };
+  // 按题目并集各来源快照；同 code 取高优先级来源（见 SOURCE_PRECEDENCE）
   const byProblem = new Map<string, Map<string, { point: JsonlLine['knowledgePoints'][number]; prio: number }>>();
   for (const line of latest.values()) {
     const problemId = `${line.platform}|${line.problemKey}`;
@@ -147,7 +157,7 @@ export function loadAnnotationsIntoDb(
       byProblem.set(problemId, codes);
     }
     for (const point of line.knowledgePoints ?? []) {
-      const prio = precedence[point.source] ?? 0;
+      const prio = SOURCE_PRECEDENCE[point.source] ?? 0;
       const existing = codes.get(point.code);
       if (!existing || prio >= existing.prio) codes.set(point.code, { point, prio });
     }
@@ -226,7 +236,10 @@ function lineAnnotatedTitle(
 
 /**
  * 批量写入标注（同源）。manual 保护：题目已有 manual 标注时整题跳过（人工校正置顶）。
- * 同来源旧行整体替换（重跑语义）。返回各题目的 JSONL 行（调用方在 COMMIT 前 appendAnnotations）。
+ * 同来源旧行整体替换（重跑语义）。
+ * 同 code 跨来源冲突按 SOURCE_PRECEDENCE 让位（见该常量注释），因此**调用顺序不影响结果**：
+ * 高优先级来源接管低优先级的同 code 行，低优先级来源遇到高优先级占位则跳过该 code。
+ * 返回各题目的 JSONL 行（调用方在 COMMIT 前 appendAnnotations）。
  */
 export function writeAnnotationsToDb(
   db: Db,
@@ -239,6 +252,11 @@ export function writeAnnotationsToDb(
   const delSameSource = db.prepare(
     'DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND source = ?',
   );
+  // 主键 (platform, problem_key, code) 不含 source：同 code 只能一行，写入前必须查占位者
+  const holderOfCode = db.prepare(
+    'SELECT source FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND code = ? LIMIT 1',
+  );
+  const delCode = db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND code = ?');
   const insert = db.prepare(
     `INSERT INTO problem_keypoints
        (platform, problem_key, code, name, confidence, source, method, taxonomy_version, pipeline_version, annotated_title, annotated_at)
@@ -258,6 +276,12 @@ export function writeAnnotationsToDb(
     for (const p of w.points) {
       const name = nameOfCode(p.code);
       if (name === null) continue; // 幻觉 / 废弃 code 拦截
+      // 同 code 被别的来源占位时按优先级让位：优先级更高 → 删掉占位行后接管；
+      // 更低 → 放弃该 code（不写库、也不进本条 JSONL 快照，保持「快照 = 本来源实际持有」）。
+      // 这样 rule 想接管 tag 已占用的 code 时不会再撞主键、把整批事务打回。
+      const holder = holderOfCode.get(w.platform, w.problemKey, p.code) as { source: KnowledgeSource } | undefined;
+      if (holder && SOURCE_PRECEDENCE[holder.source] > SOURCE_PRECEDENCE[w.source]) continue;
+      if (holder) delCode.run(w.platform, w.problemKey, p.code);
       insert.run(
         w.platform,
         w.problemKey,

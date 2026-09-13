@@ -40,58 +40,59 @@ export function tagsToCodes(rawTags: string[]): string[] {
   return out;
 }
 
+/** 标签是否映射不到任何可用 code：无同义组，或组的 code 不在当前 taxonomy 内 */
+function isUnmappedTag(tag: string): boolean {
+  const code = codeOfTag(tag);
+  return code === undefined || !isValidCode(code);
+}
+
 export interface TagAnnotateResult {
+  /** 参与扫描的题数（含本层已覆盖、无需再写的题） */
   scanned: number;
+  /** 本层实际写库的题数 */
   annotated: number;
   /** 本批无法映射到任何 code 的原始标签（去重） */
   unmappedTags: string[];
+  /** `problems.tags` 不是合法 JSON 数组的题数（系统性脏列据此可观测，与「本来就没标签」区分开） */
+  malformedTags: number;
   /**
    * 本批写入的 JSONL 行。
-   * 调用方传 `dataDir: null`（L1 钩子即如此：JSONL 由外层统一在 COMMIT 前追加，
+   * 调用方显式传 `dataDir: null`（L1 钩子即如此：JSONL 由外层统一在 COMMIT 前追加，
    * 避免同一事务窗口内追加两次）时，必须自行把本字段一并追加，否则 tag 标注
    * 只存在于库里、不在源真相里，下次启动重建即整体丢失。
    */
   lines: JsonlLine[];
 }
 
-/** 解析 problems.tags（JSON 数组字符串）；损坏或非数组视为无标签 */
-function parseTags(tags: string): string[] {
+/** 解析 problems.tags（JSON 数组字符串）；返回 null 表示不是合法 JSON 数组（脏数据） */
+function parseTags(tags: string): string[] | null {
   try {
     const parsed = JSON.parse(tags) as unknown;
     if (Array.isArray(parsed)) return parsed.filter((t): t is string => typeof t === 'string');
   } catch {
-    return [];
+    return null;
   }
-  return [];
-}
-
-/**
- * 当前是否已处于事务中。
- * node:sqlite 的 `DatabaseSync.isTransaction`（Node ≥ 22.13 / 23.3）直接可用；
- * 更早版本没有该属性，退化为「试开一次事务」探测：BEGIN 失败即说明外层已持有事务。
- */
-function inTransaction(db: Db): boolean {
-  if (typeof db.isTransaction === 'boolean') return db.isTransaction;
-  try {
-    db.exec('BEGIN');
-    db.exec('ROLLBACK');
-    return false;
-  } catch {
-    return true;
-  }
+  return null;
 }
 
 /**
  * 批量为题目写入 tag 来源标注。
- * 已有人工标注（source='manual'）的题整题跳过（人工置顶）；
- * 已有 tag 标注的题跳过（增量语义）。
- * 其它来源已占用的 code 跳过：`problem_keypoints` 主键是 `(platform, problem_key, code)`，
- * 不含 source —— 同一 code 只允许一行。rule/manual/ai 已认领的 code 由它们保留
- * （与 `loadAnnotationsIntoDb` 重放时的来源优先级 rule > tag 一致），本层只补空缺，
- * 否则重复插入会触发 UNIQUE 约束、把整个 L1 批事务回滚。
+ *
+ * 跳过规则：
+ * - 已有人工标注（source='manual'）的题整题跳过（人工校正置顶）；
+ * - 本层「应持有的 code 全都已在库」的题跳过（增量语义：不重复写、不重复追加 JSONL）。
+ *
+ * 主键让位：`problem_keypoints` 主键是 `(platform, problem_key, code)`，不含 source，
+ * 同一 code 只能一行。本层优先级最低（见 store.ts 的 SOURCE_PRECEDENCE），
+ * 因此被 rule/ai/manual 占用的 code 一律不写（`writeAnnotationsToDb` 按优先级兜底），
+ * 而**空缺的** code 一律补齐 —— 后者的必要性：规则命中会随时间变化（标题修复 / rules.json
+ * 改版），某 code 被 rule 占着时本层不能重复写，但等 rule 那行被清除（差量重跑的清除快照）后，
+ * 本层必须能把它重新认领回来，否则这道题会永久丢掉一个可映射的 code。
  *
  * 事务：本函数自带事务（BEGIN → 写库 → append JSONL → COMMIT，异常 ROLLBACK）。
  * 若调用方已持有事务（L1 钩子），改用 SAVEPOINT 参与外层事务，不自行提交。
+ * `opts.dataDir` 语义：`undefined` = 回退模块级默认目录（同 `effectiveDataDir`）；
+ * **显式 `null` = 本函数不追加 JSONL**（由调用方用返回的 `lines` 自行追加）。
  */
 export function annotateProblemsFromTags(
   db: Db,
@@ -101,53 +102,62 @@ export function annotateProblemsFromTags(
   const hasManual = db.prepare(
     "SELECT 1 FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND source = 'manual' LIMIT 1",
   );
-  const hasTag = db.prepare(
-    "SELECT 1 FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND source = 'tag' LIMIT 1",
-  );
-  const takenCodes = db.prepare(
-    'SELECT code FROM problem_keypoints WHERE platform = ? AND problem_key = ?',
+  const existingRows = db.prepare(
+    'SELECT code, source FROM problem_keypoints WHERE platform = ? AND problem_key = ?',
   );
 
   const writes: AnnotationWrite[] = [];
   const unmapped = new Set<string>();
   let scanned = 0;
+  let malformedTags = 0;
 
   for (const row of rows) {
     if (hasManual.get(row.platform, row.problemKey)) continue;
-    if (hasTag.get(row.platform, row.problemKey)) continue;
     scanned += 1;
 
     const raw = parseTags(row.tags);
-    const codes = tagsToCodes(raw);
-    if (codes.length === 0) {
-      for (const t of raw) if (codeOfTag(t) === undefined) unmapped.add(t);
+    if (raw === null) {
+      malformedTags += 1;
       continue;
     }
-    // 已被其它来源占用的 code 不再写本层（见函数注释：主键不含 source）
-    const taken = new Set((takenCodes.all(row.platform, row.problemKey) as Array<{ code: string }>).map((x) => x.code));
-    const fresh = codes.filter((code) => !taken.has(code));
-    if (fresh.length === 0) continue;
+    for (const t of raw) if (isUnmappedTag(t)) unmapped.add(t);
+
+    const codes = tagsToCodes(raw);
+    if (codes.length === 0) continue;
+
+    // 本层应持有的 code：映射出来的、且没有被**更高优先级**来源占用的
+    const holders = new Map(
+      (existingRows.all(row.platform, row.problemKey) as Array<{ code: string; source: string }>).map((r) => [
+        r.code,
+        r.source,
+      ]),
+    );
+    const wanted = codes.filter((code) => holders.get(code) === undefined || holders.get(code) === 'tag');
+    if (wanted.length === 0) continue; // 全被高优先级来源占用：本层既不写也不动旧行
+    // 增量：应持有的 code 都已在库 → 跳过（不重复写库、不重复追加 JSONL）
+    if (wanted.every((code) => holders.get(code) === 'tag')) continue;
 
     // 落库 confidence 固定 1：本字段已降级为「来源内排序权重」，不再是可信度
     writes.push({
       platform: row.platform,
       problemKey: row.problemKey,
       source: 'tag',
-      points: fresh.map((code) => ({ code, confidence: 1, method: 'tag' })),
+      points: wanted.map((code) => ({ code, confidence: 1, method: 'tag' })),
     });
   }
 
-  const nested = inTransaction(db);
+  const nested = db.isTransaction;
   if (nested) db.exec('SAVEPOINT tag_annotate');
   else db.exec('BEGIN');
   try {
     const result = writeAnnotationsToDb(db, writes);
-    const dataDir = effectiveDataDir(opts.dataDir);
+    // 显式 null = 本函数不追加（外层统一追加）；undefined 才回退模块级默认目录
+    const dataDir = opts.dataDir === null ? null : effectiveDataDir(opts.dataDir);
     // 源真相：JSONL 追加必须先于 COMMIT
     if (dataDir) appendAnnotations(dataDir, result.lines);
     if (nested) db.exec('RELEASE tag_annotate');
     else db.exec('COMMIT');
-    return { scanned, annotated: result.written, unmappedTags: [...unmapped], lines: result.lines };
+    return { scanned, annotated: result.written, unmappedTags: [...unmapped], malformedTags, lines: result.lines };
   } catch (e) {
     if (nested) {
       db.exec('ROLLBACK TO tag_annotate');
