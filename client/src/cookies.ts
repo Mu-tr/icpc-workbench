@@ -7,6 +7,8 @@ export interface CookieFieldDef {
   key: string
   cookieName: string
   placeholder: string
+  /** 输入框上方的静态说明（Cookie 名称 + 获取方式）；缺省时不显示标签行 */
+  label?: string
   password?: boolean
   /**
    * 透传模式（会话 Cookie 名不固定的平台，如计蒜客）：

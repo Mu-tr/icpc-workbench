@@ -59,26 +59,37 @@ function assembleCookie(platform: PlatformId, values: Record<string, string> | u
   return assembleCookieHeader(COOKIE_FORM[platform] ?? [], values)
 }
 
-/** 需配置 Cookie 的平台输入项定义：用户只填各字段值（或整段粘贴），请求头 Cookie 由 assembleCookie 统一拼装 */
+/** 需配置 Cookie 的平台输入项定义：每个 Cookie 一个输入框，label 标明名称与获取方式。
+ *  请求头 Cookie 由 assembleCookie 统一拼装；raw 框支持只填值（自动补 name=）或整段/整对粘贴。 */
 const COOKIE_FORM: Partial<Record<PlatformId, CookieFieldDef[]>> = {
   luogu: [
-    { key: 'uid', cookieName: '_uid', placeholder: '_uid（洛谷用户 uid，纯数字）' },
-    { key: 'clientId', cookieName: '__client_id', placeholder: '__client_id（登录令牌，F12 → Application → Cookies 复制）', password: true },
+    { key: 'uid', cookieName: '_uid', label: '洛谷用户 uid（纯数字）', placeholder: '粘贴 _uid 的值' },
+    { key: 'clientId', cookieName: '__client_id', label: '登录令牌', placeholder: '粘贴 __client_id 的值', password: true },
   ],
   daimayuan: [
-    { key: 'sid', cookieName: 'sid', placeholder: 'sid（登录会话，F12 → Application → Cookies 复制）', password: true },
+    { key: 'sid', cookieName: 'sid', label: '登录会话（代码源基于 Hydro，只需 sid 一项）', placeholder: '粘贴 sid 的值', password: true },
   ],
   leetcode: [
-    { key: 'session', cookieName: 'LEETCODE_SESSION', placeholder: 'LEETCODE_SESSION（登录会话，F12 → Application → Cookies 复制）', password: true },
-    { key: 'csrftoken', cookieName: 'csrftoken', placeholder: 'csrftoken（CSRF 令牌，同处复制；支持整段粘贴）', password: true },
+    { key: 'session', cookieName: 'LEETCODE_SESSION', label: '登录会话（力扣中国 leetcode.cn）', placeholder: '粘贴 LEETCODE_SESSION 的值', password: true },
+    { key: 'csrftoken', cookieName: 'csrftoken', label: 'CSRF 令牌', placeholder: '粘贴 csrftoken 的值' },
   ],
-  // 计蒜客：整段粘贴请求头里的 Cookie 原样透传。站点给每个访客（含未登录）都发游客 s 会话，
-  // 只抄 Application 里的 s 容易拿到游客会话——推荐从 Network 真实 /api 请求的 Request Headers 复制
+  // 计蒜客：Laravel 会话，登录态分散在 s（会话）+ remember_web_*（登录保持）两项。
+  // 站点给每个访客（含未登录）都发游客 s 会话——只抄 Application 里的 s 容易拿到游客会话，
+  // 建议从 Network 真实 /api 请求的 Request Headers 里取；两个框都支持整段粘贴（首框贴完整头亦可）。
   jisuanke: [
     {
-      key: 'cookie',
-      cookieName: 'cookie',
-      placeholder: '登录 www.jisuanke.com → F12 → Network → 刷新 → 点任一 api 请求 → Request Headers → 右键 Copy → Copy value 复制完整 Cookie 值（必须包含全部 Cookie，只有单值不够）',
+      key: 's',
+      cookieName: 's',
+      label: 's — 登录会话（必需）。F12 → Network → 刷新 → 点任一 api 请求 → Request Headers 里找 s=…；Application → Cookies 里直接抄到的 s 可能是游客会话',
+      placeholder: '粘贴 s 的值（或整段完整 Cookie 头）',
+      password: true,
+      raw: true,
+    },
+    {
+      key: 'remember',
+      cookieName: 'remember_web',
+      label: 'remember_web_… — 登录保持（建议，名称以 remember_web_ 开头、带哈希后缀）：Application → Cookies 整对复制 name=value 粘到本框',
+      placeholder: '整对粘贴 remember_web_xxx=值',
       password: true,
       raw: true,
     },
@@ -511,10 +522,9 @@ export default function Settings() {
                                 {configured ? '已配置' : '未配置'}
                               </Tag>
                               {fields.map((f) => {
-                                const ph = configured ? `已配置 · 粘贴新值可覆盖（原提示：${f.placeholder}）` : f.placeholder
-                                return f.password ? (
+                                const ph = configured ? `已配置 · 粘贴新值可覆盖（${f.placeholder}）` : f.placeholder
+                                const input = f.password ? (
                                   <Input.Password
-                                    key={f.key}
                                     placeholder={ph}
                                     style={{ width: 300 }}
                                     value={c[f.key] ?? ''}
@@ -524,7 +534,6 @@ export default function Settings() {
                                   />
                                 ) : (
                                   <Input
-                                    key={f.key}
                                     placeholder={ph}
                                     style={{ width: 200 }}
                                     value={c[f.key] ?? ''}
@@ -532,6 +541,17 @@ export default function Settings() {
                                       setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
                                     }
                                   />
+                                )
+                                return f.label ? (
+                                  <div key={f.key} style={{ maxWidth: 320 }}>
+                                    <div style={{ fontSize: 12, color: '#8993a2', marginBottom: 4, lineHeight: 1.5 }}>
+                                      <code style={{ fontSize: 12 }}>{f.label.split(' — ')[0]}</code>
+                                      {f.label.includes(' — ') ? ` — ${f.label.split(' — ').slice(1).join(' — ')}` : ''}
+                                    </div>
+                                    {input}
+                                  </div>
+                                ) : (
+                                  <div key={f.key}>{input}</div>
                                 )
                               })}
                               <Button size="small" onClick={() => saveCookie(p.id)}>
@@ -560,7 +580,7 @@ export default function Settings() {
             })}
           />
           <p className="muted-note">
-            说明：Codeforces / AtCoder / 牛客自动同步；洛谷、代码源、LeetCode、计蒜客填写 Cookie 后自动同步（未配置时请在「题目管理」手动导入）。代码源基于 Hydro 搭建，只需复制 sid 一项会话 Cookie；LeetCode 为力扣中国（leetcode.cn），需复制 LEETCODE_SESSION 与 csrftoken 两项 Cookie；计蒜客提交记录按参加过的比赛组织，需登录后从 Network 的 api 请求头整段复制 Cookie（注意：未登录时站点也会发游客 s 会话，直接复制会提示无效）。
+            说明：Codeforces / AtCoder / 牛客自动同步；洛谷、代码源、LeetCode、计蒜客填写 Cookie 后自动同步（未配置时请在「题目管理」手动导入）。每个 Cookie 单独一框，名称以输入框上方灰色说明为准（F12 → Application → Cookies 按名复制值即可；框内也容忍整段粘贴）。代码源基于 Hydro 搭建，只需复制 sid 一项；LeetCode 为力扣中国（leetcode.cn），需 LEETCODE_SESSION 与 csrftoken 两项；计蒜客需 s（登录会话，必需）与 remember_web_…（登录保持，建议）两项——建议先确认浏览器已登录，再从 Network 的 api 请求头取值，未登录时站点发的游客 s 会话校验不过。
           </p>
           <div style={{ marginTop: 4 }}>
             <Space>

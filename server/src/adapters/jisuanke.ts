@@ -240,11 +240,11 @@ export async function fetchParticipatedContests(
 
 export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAdapter {
   const requireCookie = (opts?: FetchOptions): string => {
-    const cookie = opts?.cookie?.trim();
+      const cookie = opts?.cookie?.trim();
       if (!cookie) {
         throw new ManualImportRequiredError(
           'jisuanke',
-          '计蒜客提交记录按「参加过的比赛」组织且需登录访问：请先确认浏览器登录了 www.jisuanke.com（右上角显示头像），再在设置页整段粘贴 Cookie —— F12 → Network → 刷新页面 → 点任一 api 请求 → Request Headers → 复制整段 Cookie（未登录时站点也会发游客 s 会话，直接抄 Application 里的 s 会提示无效）',
+          '计蒜客提交记录按「参加过的比赛」组织且需登录访问：请在设置页「计蒜客」分别填写 s（登录会话，必需）与 remember_web_…（登录保持，建议）两项 Cookie —— 确认浏览器已登录 www.jisuanke.com（右上角显示头像），F12 → Application → Cookies 按名复制值；未登录时站点也会发游客 s 会话，建议从 F12 → Network 的真实 /api 请求 Request Headers 里取',
         );
       }
     return cookie;
@@ -400,7 +400,7 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
           signal: AbortSignal.timeout(15000),
         });
         if (res.status === 302 || res.status === 401) {
-          return { ok: false, message: 'Cookie 未通过登录校验：登录态分散在多个 Cookie（s 会话 + remember_web 等登录保持项），只复制单个值不够——请在 F12 → Network 点任一 api 请求，从 Request Headers 复制完整 Cookie 头再保存' };
+          return { ok: false, message: 'Cookie 未通过登录校验：登录态分散在 s（会话）与 remember_web_…（登录保持）两项里，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 或 Network 的 api 请求头按名复制）' };
         }
         if (!res.ok) {
           return { ok: false, message: `计蒜客返回 HTTP ${res.status}，请稍后重试` };
@@ -409,7 +409,7 @@ export function createJisuankeAdapter(fetchFn: typeof fetch = fetch): PlatformAd
         if (body && typeof body.uuid === 'string' && body.uuid) {
           return { ok: true, message: `Cookie 有效${body.name ? `，当前用户：${body.name}` : ''}` };
         }
-        return { ok: false, message: 'Cookie 未通过登录校验：登录态分散在多个 Cookie（s 会话 + remember_web 等登录保持项），只复制单个值不够——请在 F12 → Network 点任一 api 请求，从 Request Headers 复制完整 Cookie 头再保存' };
+        return { ok: false, message: 'Cookie 未通过登录校验：登录态分散在 s（会话）与 remember_web_…（登录保持）两项里，只填 s 一项不够——请在设置页「计蒜客」两个输入框分别填写（确认浏览器已登录后，从 F12 → Application → Cookies 或 Network 的 api 请求头按名复制）' };
       } catch (e) {
         return { ok: false, message: `无法连接计蒜客：${(e as Error).message}` };
       }

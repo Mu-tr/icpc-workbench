@@ -299,3 +299,36 @@ describe('cookies.ts assembleCookie raw', () => {
     )
   })
 })
+
+describe('cookies.ts 计蒜客双框拼装（s + remember_web）', () => {
+  const def = [
+    { key: 's', cookieName: 's', placeholder: '', raw: true },
+    { key: 'remember', cookieName: 'remember_web', placeholder: '', raw: true },
+  ]
+
+  it('两框分别只填值：各自补名字前缀后拼接', () => {
+    const out = assembleCookie(def, { s: 'session-value', remember: 'eyJremember' })
+    assert.equal(out, 's=session-value; remember_web=eyJremember')
+  })
+
+  it('remember 框整对粘贴（名称带哈希后缀）原样透传', () => {
+    const out = assembleCookie(def, {
+      s: 'session-value',
+      remember: 'remember_web_59ba36addc7b1f220a5e8d7bdca1b7e2ca8eb50e=eyJpdiI',
+    })
+    assert.equal(
+      out,
+      's=session-value; remember_web_59ba36addc7b1f220a5e8d7bdca1b7e2ca8eb50e=eyJpdiI',
+    )
+  })
+
+  it('只填 s、remember 留空：不产生空片段', () => {
+    assert.equal(assembleCookie(def, { s: 'only-s' }), 's=only-s')
+    assert.equal(assembleCookie(def, {}), '')
+  })
+
+  it('旧流程兼容：完整 Cookie 头整段贴进 s 框仍原样透传', () => {
+    const header = 's=abc; XSRF-TOKEN=tok; remember_web_59ba36=yz'
+    assert.equal(assembleCookie(def, { s: 'Cookie: ' + header }), header)
+  })
+})
