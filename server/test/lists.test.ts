@@ -99,11 +99,11 @@ async function withServer(fn: (s: TestServer) => Promise<void>): Promise<void> {
         enabled: true,
         chat: async (messages) => {
           providerChats.push(messages.map((m) => m.content).join('\n'));
-          // ai-classify：把所有题归入「二分」；ai-suggest：返回建议文本
+          // ai-classify：把所有题归入「二分查找」（TAXONOMY 用的是 taxonomy 规范名）；ai-suggest：返回建议文本
           const prompt = messages[messages.length - 1]!.content as string;
           if (prompt.includes('分类目录')) {
             const n = (prompt.match(/^\d+\. \[/gm) ?? []).length; // ai-classify 条目行形如 "0. [luogu/P1001]"
-            return JSON.stringify(Array.from({ length: n }, (_, i) => ({ i, category: '二分' })));
+            return JSON.stringify(Array.from({ length: n }, (_, i) => ({ i, category: '二分查找' })));
           }
           return '建议优先做前两道题。';
         },
@@ -216,7 +216,7 @@ test('lists: 规则分类不覆盖查不到 tags 的题的已有分类', async (
       .prepare('SELECT problem_key, category FROM problem_list_items')
       .all() as Array<{ problem_key: string; category: string }>;
     const catByKey = new Map(cats.map((r) => [r.problem_key, r.category]));
-    assert.equal(catByKey.get('P1001'), '二分');
+    assert.equal(catByKey.get('P1001'), '二分查找'); // 写入即净化：题源「二分」→ 规范名「二分查找」
     assert.equal(catByKey.get('P9999'), '数据结构', '查不到 tags 的题不应被抹成其他');
   });
 });
@@ -242,9 +242,9 @@ test('lists: import parses text, rule-classifies from bank tags, detail shows so
       items: Array<{ platform: string; problem_key: string; category: string; solved: boolean; url: string }>;
     };
     assert.equal(detail.items.length, 3);
-    // P1001 命中题库「二分」tag → 规则分类；CF greedy → canonical 贪心；代码源无题库 → 未分类
+    // P1001 命中题库「二分」tag → 规则分类（规范名「二分查找」）；CF greedy → canonical 贪心；代码源无题库 → 未分类
     const byKey = new Map(detail.items.map((i) => [i.problem_key, i]));
-    assert.equal(byKey.get('P1001')!.category, '二分');
+    assert.equal(byKey.get('P1001')!.category, '二分查找');
     assert.equal(byKey.get('1234A')!.category, '贪心');
     assert.equal(byKey.get('7')!.category, '未分类');
     assert.equal(byKey.get('1234A')!.solved, true); // 题库 AC 联查
@@ -295,11 +295,11 @@ test('lists: ai-classify updates categories via mock provider; ai-suggest return
     const listId = (db.prepare('SELECT id FROM problem_lists').get() as { id: number }).id;
 
     const cls = await (await fetch(`${base}/${listId}/ai-classify`, { method: 'POST' })).json();
-    // P1001 导入时已按题库 tag 归入「二分」，只有 CF 一道需要 AI 改分类
+    // P1001 导入时已按题库 tag 归入「二分查找」，只有 CF 一道需要 AI 改分类
     assert.equal((cls as { updated: number }).updated, 1);
     const cats = (db.prepare('SELECT DISTINCT category FROM problem_list_items').all() as Array<{ category: string }>)
       .map((c) => ({ category: c.category })); // node:sqlite 行为 null 原型，映射后比较
-    assert.deepEqual(cats, [{ category: '二分' }]);
+    assert.deepEqual(cats, [{ category: '二分查找' }]);
     assert.equal(providerChats.length, 1);
     assert.match(providerChats[0]!, /分类目录/);
 

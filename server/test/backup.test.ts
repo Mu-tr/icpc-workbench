@@ -98,3 +98,96 @@ test('maybeDailyBackup：当日幂等，次日（模拟）可再备', () => {
   assert.equal(r2.created, false, '同一天重复启动不再备份');
   assert.equal(listBackups(db, dir).length, 1);
 });
+
+// ---------- 知识点源真相（annotations.jsonl）纳入恢复点 ----------
+// 背景：启动时 loadAnnotationsIntoDb 用 JSONL 重建 problem_keypoints。
+// 只回滚 .db 不回滚 JSONL = 恢复点在知识点上无效（更晚的 JSONL 会立刻覆盖回来）。
+
+const ANNOTATIONS_LINE = (key: string): string =>
+  JSON.stringify({
+    platform: 'luogu',
+    problemKey: key,
+    knowledgePoints: [{ code: 'basic.greedy', confidence: 1, source: 'manual', method: 'manual' }],
+    taxonomyVersion: 2,
+    pipelineVersion: 4001,
+    annotatedAt: '2026-01-01T00:00:00.000Z',
+    writeSource: 'manual',
+  }) + '\n';
+
+test('恢复点含知识点源真相：annotations.jsonl 与数据库同步回滚', () => {
+  const dbPath = path.join(dir, 'main.db');
+  const real = createDb(dbPath);
+  real.prepare("INSERT INTO settings (key, value) VALUES ('k', 'v1')").run();
+  const ann = path.join(dir, 'knowledge', 'annotations.jsonl');
+  fs.mkdirSync(path.dirname(ann), { recursive: true });
+  fs.writeFileSync(ann, ANNOTATIONS_LINE('P1'), 'utf8');
+
+  const backup = createBackup(real, 'manual'); // 备份目录派生为 dir/backups
+  assert.equal(listBackups(real)[0]!.knowledge, true, '应生成伴生快照');
+
+  // 备份之后：JSONL 追加一行，数据库再加一个键
+  fs.appendFileSync(ann, ANNOTATIONS_LINE('P2'), 'utf8');
+  real.prepare("INSERT INTO settings (key, value) VALUES ('after', 'x')").run();
+  requestRestore(real, backup.file);
+  real.close();
+
+  assert.equal(applyPendingRestore(dbPath), backup.file);
+  const restored = createDb(dbPath);
+  assert.equal(restored.prepare("SELECT COUNT(*) AS c FROM settings WHERE key = 'after'").get()!.c, 0);
+  restored.close();
+  const rolledBack = fs.readFileSync(ann, 'utf8');
+  assert.ok(rolledBack.includes('P1'));
+  assert.ok(!rolledBack.includes('P2'), 'annotations.jsonl 必须与数据库回到同一时间点');
+});
+
+test('无 annotations.jsonl 时不生成伴生快照（knowledge:false）', () => {
+  const dbPath = path.join(dir, 'main.db');
+  const real = createDb(dbPath);
+  createBackup(real, 'manual');
+  const meta = listBackups(real)[0]!;
+  assert.equal(meta.knowledge, false);
+  const snap = path.join(dir, 'backups', meta.file.replace(/\.db$/, '.knowledge.json'));
+  assert.equal(fs.existsSync(snap), false);
+  real.close();
+});
+
+test('清理备份时伴生快照同生共死，不留孤立 .knowledge.json', () => {
+  const dbPath = path.join(dir, 'main.db');
+  const real = createDb(dbPath);
+  const ann = path.join(dir, 'knowledge', 'annotations.jsonl');
+  fs.mkdirSync(path.dirname(ann), { recursive: true });
+  fs.writeFileSync(ann, ANNOTATIONS_LINE('P1'), 'utf8');
+  for (let i = 0; i < 12; i += 1) createBackup(real, 'manual');
+  real.close();
+
+  const files = fs.readdirSync(path.join(dir, 'backups'));
+  // 与 backup.ts 的 FILE_RE 一致（含同秒退避的 -<毫秒> 后缀），否则统计口径与保留策略不一致
+  const dbNameRe = /^icpc-(\d{8}-\d{6})-([a-z-]+?)(?:-\d{1,3})?\.db$/;
+  const dbs = files.filter((f) => dbNameRe.test(f));
+  const snaps = files.filter((f) => f.endsWith('.knowledge.json'));
+  assert.ok(dbs.length <= 10, `manual 备份应只保留 10 份，实际 ${dbs.length}`);
+  assert.equal(snaps.length, dbs.length, '快照数应与 .db 数一致');
+  for (const s of snaps) {
+    assert.ok(files.includes(s.replace(/\.knowledge\.json$/, '.db')), `孤立快照：${s}`);
+  }
+});
+
+test('恢复升级前的旧备份（无伴生快照）：数据库回滚、JSONL 不动且不报错', () => {
+  const dbPath = path.join(dir, 'main.db');
+  const real = createDb(dbPath);
+  real.prepare("INSERT INTO settings (key, value) VALUES ('k', 'v1')").run();
+  const backup = createBackup(real, 'manual');
+  fs.rmSync(path.join(dir, 'backups', backup.file.replace(/\.db$/, '.knowledge.json')), { force: true });
+  const ann = path.join(dir, 'knowledge', 'annotations.jsonl');
+  fs.mkdirSync(path.dirname(ann), { recursive: true });
+  fs.writeFileSync(ann, ANNOTATIONS_LINE('P9'), 'utf8');
+  real.prepare("INSERT INTO settings (key, value) VALUES ('after', 'x')").run();
+  requestRestore(real, backup.file);
+  real.close();
+
+  assert.equal(applyPendingRestore(dbPath), backup.file);
+  const restored = createDb(dbPath);
+  assert.equal(restored.prepare("SELECT COUNT(*) AS c FROM settings WHERE key = 'after'").get()!.c, 0);
+  restored.close();
+  assert.ok(fs.readFileSync(ann, 'utf8').includes('P9'), '没有快照时不应动 JSONL');
+});
