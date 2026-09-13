@@ -337,3 +337,56 @@ test('题库路径：新入库题并联 tag 标注，且按库内落定标签（
   assert.deepEqual(codeSourcesOf('9B'), ['basic.greedy:tag']);
 });
 
+test('同批重复题：一题只写一次、只追加一行 JSONL、只计 1（取最后一次出现的 tags）', () => {
+  // 评审 F15：importService 按提交逐条推入，一题多提交（WA→AC）会把同一题传进来 N 次；
+  // 增量判定读的是写入前的库内状态 → 不去重就会重复写库并把 JSONL 追加成 N 行
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-tag-dup-'));
+  insertProblem('9C', 'T', '[]');
+  const r = annotateProblemsFromTags(
+    db,
+    [
+      { platform: 'codeforces', problemKey: '9C', tags: JSON.stringify(['贪心']) },
+      { platform: 'codeforces', problemKey: '9C', tags: JSON.stringify(['排序']) },
+    ],
+    { dataDir },
+  );
+  assert.equal(r.scanned, 1, '同一题只扫描一次');
+  assert.equal(r.annotated, 1, '同一题只计一次');
+  assert.deepEqual(codeSourcesOf('9C'), ['misc.sorting:tag'], '取最后一次出现的 tags（本次入参更晚，反映更新的库内标签）');
+
+  const lines = fs
+    .readFileSync(annotationsPath(dataDir), 'utf8')
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l) as { problemKey: string; writeSource: string });
+  assert.equal(lines.length, 1, `同一题只能追加一行 JSONL，实得 ${lines.length} 行`);
+  assert.equal(lines[0].problemKey, '9C');
+});
+
+test('导入路径：一题多条提交（WA→AC）只落一份 tag 标注与一行 JSONL', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-tag-dup-import-'));
+  initKnowledgeStore(dataDir);
+  const db1 = createDb(':memory:');
+  try {
+    insertNormalized(db1, 1, [
+      parseManualRow('codeforces', { problemKey: '9D', title: 'A. 无信息题', verdict: 'WA', tags: ['贪心'] }, 0),
+      parseManualRow('codeforces', { problemKey: '9D', title: 'A. 无信息题', verdict: 'AC', tags: ['贪心'] }, 1),
+    ]);
+    assert.deepEqual(codeSourcesOf('9D', db1), ['basic.greedy:tag']);
+    const lines = fs
+      .readFileSync(annotationsPath(dataDir), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { problemKey: string; writeSource: string });
+    assert.deepEqual(
+      lines.map((l) => `${l.problemKey}:${l.writeSource}`),
+      ['9D:tag'],
+      '一题两提交只应产生一行 tag JSONL',
+    );
+  } finally {
+    db1.close();
+    initKnowledgeStore(null);
+  }
+});
+

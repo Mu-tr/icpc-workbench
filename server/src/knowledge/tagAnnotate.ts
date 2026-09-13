@@ -80,7 +80,9 @@ function parseTags(tags: string): string[] | null {
  *
  * 跳过规则：
  * - 已有人工标注（source='manual'）的题整题跳过（人工校正置顶）；
- * - 本层「应持有的 code 全都已在库」的题跳过（增量语义：不重复写、不重复追加 JSONL）。
+ * - 本层「应持有的 code 全都已在库」的题跳过（增量语义：不重复写、不重复追加 JSONL）；
+ * - 同一 `(platform, problemKey)` 在一批里出现多次时只处理一次（取最后一次出现的 `tags`，
+ *   见下方去重说明）—— 否则重复写库、重复追加同一条 JSONL 行，计数也会算成 N。
  *
  * 主键让位：`problem_keypoints` 主键是 `(platform, problem_key, code)`，不含 source，
  * 同一 code 只能一行。本层优先级最低（见 store.ts 的 SOURCE_PRECEDENCE），
@@ -111,7 +113,16 @@ export function annotateProblemsFromTags(
   let scanned = 0;
   let malformedTags = 0;
 
-  for (const row of rows) {
+  // 同一题可能在一批里出现多次：importService 按**提交**逐条推入 newProblems，
+  // 一题多条提交（如先 WA 后 AC）就会把同一 (platform, problemKey) 传进来 N 次。
+  // 增量判定读的是**写入前**的库内状态（写入在循环之后统一 flush），所以不去重的话
+  // 第二次仍看不到刚写的 tag 行 → 重复写库、重复追加同一条 JSONL 行，并把计数算成 N。
+  // 去重取值取**最后一次**出现（Map.set 对已存在的键保留首次出现的位置）：
+  // 导入路径每次都是回读库内落定值，后一次反映的是更晚写入的标签，取最后 = 用最新标签映射。
+  const deduped = new Map<string, TagRow>();
+  for (const row of rows) deduped.set(`${row.platform}\u001f${row.problemKey}`, row);
+
+  for (const row of deduped.values()) {
     if (hasManual.get(row.platform, row.problemKey)) continue;
     scanned += 1;
 
