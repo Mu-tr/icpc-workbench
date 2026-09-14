@@ -69,20 +69,6 @@ CREATE TABLE IF NOT EXISTS problems (
 -- 难度过滤/排序（题库页 ORDER BY difficulty、stats 难度分布）在 2 万题规模上依赖此索引
 CREATE INDEX IF NOT EXISTS idx_problems_difficulty ON problems(difficulty);
 
--- 平台原始 tags 仅作审计数据；训练/统计只读取本表的自建知识点标注。
--- 一个题可命中多个知识点，confidence/evidence 使结果可审计、可人工复核。
-CREATE TABLE IF NOT EXISTS problem_topics (
-  problem_id  INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
-  topic_id    TEXT NOT NULL,
-  confidence  REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
-  method      TEXT NOT NULL, -- title-rule / manual / future-model
-  evidence    TEXT NOT NULL DEFAULT '[]',
-  pipeline_version TEXT NOT NULL,
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (problem_id, topic_id)
-);
-CREATE INDEX IF NOT EXISTS idx_problem_topics_topic ON problem_topics(topic_id, confidence);
-
 -- 自建知识点管线（v2）：结构化知识点标注。JSONL（dataDir/knowledge/annotations.jsonl）
 -- 为源真相，本表是启动时幂等重建的查询索引。code 锚定 taxonomy.json（稳定不可改）；
 -- name 为展示名（重载时按当前 taxonomy 刷新）。source: tag / rule / ai / manual，

@@ -9,7 +9,6 @@ import { safeTags } from '../analysis/stats.ts';
 import { backfillDifficulties } from '../analysis/difficultyBackfill.ts';
 import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBank, fetchAtcoderBank, fetchDaimayuanBank, fetchJisuankeBank } from '../adapters/problemBank.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
-import { rebuildTopicAnnotations } from '../topics/pipeline.ts';
 import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr } from '../knowledge/store.ts';
 import { isValidCode } from '../knowledge/taxonomy.ts';
 
@@ -404,14 +403,6 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
     }
     res.json({ ok: true, total: rows.length, problemsCleaned, tagsRemoved });
   }));
-
-  // POST /api/problems/topics/rebuild body: { limit? }
-  // 原始题源 tags 仅保留在 problems.tags 作审计；知识点由自建管线独立生成。
-  r.post('/topics/rebuild', (req, res) => {
-    const requested = Number(req.body?.limit);
-    const limit = Number.isInteger(requested) ? Math.min(20_000, Math.max(1, requested)) : 5000;
-    res.json({ ok: true, ...rebuildTopicAnnotations(db, limit) });
-  });
 
   // POST /api/problems/backfill-difficulty
   // 对库内未知难度的洛谷/牛客题逐题查询公开接口回填（匿名可访问）：

@@ -5,7 +5,6 @@ import type { KnowledgeCompareReport } from '../../../shared/src/index.ts';
 import { PLATFORMS } from '../../../shared/src/index.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
-import { AiProvider } from '../ai/provider.ts';
 import { allPoints, isValidCode, loadTaxonomy } from '../knowledge/taxonomy.ts';
 import {
   getConfidenceThreshold,
@@ -14,9 +13,8 @@ import {
   setConfidenceThreshold,
   setManualKeypoints,
 } from '../knowledge/store.ts';
-import { PIPELINE_CODE_VERSION, pendingAiCount, pipelineVersion, retryFailedQueue, runRulePass } from '../knowledge/pipeline.ts';
+import { PIPELINE_CODE_VERSION, gapReport, pipelineVersion, runRulePass } from '../knowledge/pipeline.ts';
 import { loadRules, rulesVersion } from '../knowledge/ruleEngine.ts';
-import { exportQueuePackage, importAiResults, runAiPass } from '../knowledge/aiClassify.ts';
 import { recomputeConceptStats } from '../knowledge/conceptStats.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
 import { rate } from '../analysis/stats.ts';
@@ -24,32 +22,24 @@ import { rate } from '../analysis/stats.ts';
 export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
   const r = Router();
 
-  // POST /api/knowledge/build  body: { mode?: 'l1'|'l2'|'all', rerun?: boolean, maxBatches? }
-  // 跑管线：L1 规则批跑（增量或版本差量重跑）；L2 需已配置 AI，无 Key 时返回待标注数与导出提示
+  // POST /api/knowledge/build  body: { rerun?: boolean }
+  // 跑 L1：规则批跑（增量或版本差量重跑）+ 题源标签映射。
+  // AI 已退出清洗模块，故不再有 L2 分支；未覆盖的题进「词表缺口」报告（GET /gaps）。
   r.post('/build', asyncHandler(async (req, res) => {
-    const mode = ['l1', 'l2', 'all'].includes(String(req.body?.mode)) ? String(req.body.mode) : 'all';
     const rerun = req.body?.rerun === true;
-    const maxBatches = Number.isInteger(req.body?.maxBatches) ? Math.max(1, Number(req.body.maxBatches)) : undefined;
-    const result: Record<string, unknown> = { ok: true, mode };
-    if (mode !== 'l2') {
-      result.l1 = runRulePass(db, { rerun });
-      result.conceptStats = recomputeConceptStats(db);
-    }
-    if (mode !== 'l1') {
-      const provider = new AiProvider(getAiConfig());
-      if (!provider.enabled) {
-        result.l2 = { skipped: 'AI 未配置，请配置 API Key 或使用导出通道', pending: pendingAiCount(db) };
-      } else {
-        result.l2 = await runAiPass(db, provider, maxBatches !== undefined ? { maxBatches } : {});
-      }
-    }
-    result.coverage = getCoverage(db);
-    res.json(result);
+    const result = { ok: true, l1: runRulePass(db, { rerun }), conceptStats: recomputeConceptStats(db) };
+    res.json({ ...result, coverage: getCoverage(db) });
   }));
 
   // GET /api/knowledge/coverage → 覆盖率报告（题库页「待标注 N 题」与覆盖率展示）
   r.get('/coverage', (_req, res) => {
     res.json(getCoverage(db));
+  });
+
+  // GET /api/knowledge/gaps → 词表缺口报告（补 tags.ts 同义组是提升覆盖率的唯一手段）
+  r.get('/gaps', (req, res) => {
+    const limit = Number(req.query.limit);
+    res.json(gapReport(db, Number.isInteger(limit) ? { limit: Math.min(500, Math.max(1, limit)) } : {}));
   });
 
   // POST /api/knowledge/recompute-stats → 重算概念统计（覆盖率与信息量）
@@ -124,28 +114,6 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
     res.json(report);
   });
 
-  // GET /api/knowledge/export-queue?limit=50 → 无 Key 通道：下载待标注题 + 提示词（手动喂任意 AI）
-  // 上限 1000：单次 AI 对话建议 100-200 题（输出窗口限制），大包供用户自行拆分喂多轮
-  r.get('/export-queue', (req, res) => {
-    const limit = Math.min(1000, Math.max(10, Number(req.query.limit) || 50));
-    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="knowledge-queue.md"');
-    res.send(exportQueuePackage(db, limit));
-  });
-
-  // POST /api/knowledge/import  body: { raw } ← 手动喂 AI 得到的标注 JSON（同 L2 校验与落库）
-  r.post('/import', (req, res) => {
-    const raw = req.body?.raw;
-    if (typeof raw !== 'string' || raw.trim() === '') {
-      return res.status(400).json({ error: 'raw 不能为空（粘贴 AI 返回的 JSON）' });
-    }
-    try {
-      res.json({ ok: true, ...importAiResults(db, raw) });
-    } catch (e) {
-      res.status(400).json({ error: `标注 JSON 解析失败: ${(e as Error).message}` });
-    }
-  });
-
   // GET /api/knowledge/sample?rate=0.01 → 批跑后随机抽检清单（人工复核驱动规则迭代）
   r.get('/sample', (req, res) => {
     const rate01 = Math.min(1, Math.max(0.001, Number(req.query.rate) || 0.01));
@@ -188,12 +156,6 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
       rules: loadRules().length,
       codes: allPoints().length,
     });
-  });
-
-  // POST /api/knowledge/retry-failed → 把 attempts 超限转 failed 的题捞回 pending（attempts 清零）
-  r.post('/retry-failed', (_req, res) => {
-    const requeued = retryFailedQueue(db);
-    res.json({ ok: true, requeued, coverage: getCoverage(db) });
   });
 
   return r;

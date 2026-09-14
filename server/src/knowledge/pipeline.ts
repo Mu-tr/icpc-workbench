@@ -6,7 +6,7 @@
  * 崩溃时 JSONL 多出的行由下次启动重放自愈，不会丢标注。
  */
 import type { Db } from '../db/index.ts';
-import type { KnowledgeSource } from '../../../shared/src/index.ts';
+import { codeOfTag } from '../../../shared/src/index.ts';
 import { loadTaxonomy } from './taxonomy.ts';
 import { classifyTitle, rulesVersion } from './ruleEngine.ts';
 import {
@@ -233,135 +233,58 @@ export function runRulePass(
   );
 }
 
-// ---------- L2 队列（断点续跑） ----------
-
-export function pendingAiCount(db: Db): number {
-  return (db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'pending'").get() as { c: number }).c;
-}
-
-/** 取一批待 AI 标注的题（联查标题与难度——AI 输入只有这两个特征，绝不给题源 tag） */
-export function fetchAiBatch(
-  db: Db,
-  limit: number,
-): Array<{ platform: string; problemKey: string; title: string; difficulty: number | null }> {
-  return db
-    .prepare(
-      `SELECT q.platform, q.problem_key AS problemKey, p.title, p.difficulty
-       FROM knowledge_queue q JOIN problems p ON p.platform = q.platform AND p.problem_key = q.problem_key
-       WHERE q.status = 'pending'
-       ORDER BY q.enqueued_at LIMIT ?`,
-    )
-    .all(limit) as unknown as Array<{ platform: string; problemKey: string; title: string; difficulty: number | null }>;
-}
-
-export function markQueueStatus(
-  db: Db,
-  platform: string,
-  problemKey: string,
-  status: 'done' | 'uncertain' | 'failed' | 'pending',
-  error?: string,
-): void {
-  db.prepare(
-    `UPDATE knowledge_queue SET status = ?, attempts = attempts + ?, last_error = ?, updated_at = datetime('now')
-     WHERE platform = ? AND problem_key = ?`,
-  ).run(status, status === 'failed' ? 1 : 0, error ?? null, platform, problemKey);
-}
-
-/** 批次重试上限：同一题累计失败达到该次数即转为 failed 出队，避免毒批永久占用队首 */
-export const MAX_ATTEMPTS = 3;
+// ---------- 词表缺口报告（替代原「待 AI 标注队列」的用途） ----------
 
 /**
- * 批跑失败：整批记一次失败。
- * - 未达上限的题 `attempts+1` 并把 `enqueued_at` 推到队尾（关键：否则每轮都从队首重取同一批 25 题，
- *   一旦这批里有毒数据，后面的题永远排不上）
- * - 已达上限的题转 `failed` 出队，可用 retryFailedQueue 显式捞回
+ * 词表缺口报告（替代原「待 AI 标注队列」的用途）。
+ *
+ * AI 退出清洗模块后，未覆盖的题不再等待模型，而是成为**词表缺口**：
+ * 这些题的题源标签存在，但映射不到任何 taxonomy code。
+ * 补齐 shared/src/tags.ts 的同义组是唯一能真正提升覆盖率的手段（零 AI 成本）。
  */
-export function markBatchRetry(
-  db: Db,
-  batch: Array<{ platform: string; problemKey: string }>,
-  error: string,
-  maxAttempts: number = MAX_ATTEMPTS,
-): { retried: number; failed: number } {
-  const readAttempts = db.prepare(
-    'SELECT attempts FROM knowledge_queue WHERE platform = ? AND problem_key = ? AND status = ?',
-  );
-  const retry = db.prepare(
-    `UPDATE knowledge_queue
-     SET attempts = attempts + 1, last_error = ?, enqueued_at = datetime('now'), updated_at = datetime('now')
-     WHERE platform = ? AND problem_key = ? AND status = 'pending'`,
-  );
-  const giveUp = db.prepare(
-    `UPDATE knowledge_queue
-     SET attempts = attempts + 1, last_error = ?, status = 'failed', updated_at = datetime('now')
-     WHERE platform = ? AND problem_key = ? AND status = 'pending'`,
-  );
-  let retried = 0;
-  let failed = 0;
-  db.exec('BEGIN');
-  try {
-    for (const b of batch) {
-      const row = readAttempts.get(b.platform, b.problemKey, 'pending') as { attempts: number } | undefined;
-      if (!row) continue; // 已被同轮其它路径出队：跳过
-      if (row.attempts + 1 >= maxAttempts) {
-        giveUp.run(error, b.platform, b.problemKey);
-        failed += 1;
-      } else {
-        retry.run(error, b.platform, b.problemKey);
-        retried += 1;
-      }
-    }
-    db.exec('COMMIT');
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
-  }
-  return { retried, failed };
+export interface GapReport {
+  /** 无法映射的原始标签 → 影响的题数（降序） */
+  gaps: Array<{ tag: string; problems: number }>;
+  /** 完全没有可用 code 的题数（题源标签也映射不上、规则也未命中） */
+  uncovered: number;
 }
 
-/** 把 failed 的题捞回 pending（attempts 清零），供「重试失败题」按钮使用 */
-export function retryFailedQueue(db: Db): number {
-  const info = db
+export function gapReport(db: Db, opts: { limit?: number } = {}): GapReport {
+  const limit = opts.limit ?? 100;
+
+  // 未覆盖题的全部原始标签拉回内存聚合（用 codeOfTag 判定是否可映射）
+  const rows = db
     .prepare(
-      `UPDATE knowledge_queue SET status = 'pending', attempts = 0, last_error = NULL, updated_at = datetime('now')
-       WHERE status = 'failed'`,
+      `SELECT p.tags AS tags FROM problems p
+        WHERE NOT EXISTS (
+          SELECT 1 FROM problem_keypoints k
+           WHERE k.platform = p.platform AND k.problem_key = p.problem_key
+             AND k.source IN ('tag','rule','manual')
+        )`,
     )
-    .run();
-  return Number(info.changes ?? 0);
-}
+    .all() as unknown as Array<{ tags: string }>;
 
-/** failed 队列计数（coverage 之外的排查入口） */
-export function failedAiCount(db: Db): number {
-  return (db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'failed'").get() as { c: number }).c;
-}
-
-/** AI 标注写库 + 队列出队（同事务窗口，先 JSONL 后 COMMIT） */
-export function commitAiAnnotations(
-  db: Db,
-  writes: AnnotationWrite[],
-  uncertain: Array<{ platform: string; problemKey: string }>,
-  opts: { dataDir?: string | null } = {},
-): { written: number; skippedManual: number } {
-  db.exec('BEGIN');
-  try {
-    const result = writeAnnotationsToDb(db, writes);
-    const done = db.prepare(
-      "UPDATE knowledge_queue SET status = 'done', updated_at = datetime('now') WHERE platform = ? AND problem_key = ?",
-    );
-    const uncertainStmt = db.prepare(
-      "UPDATE knowledge_queue SET status = 'uncertain', updated_at = datetime('now') WHERE platform = ? AND problem_key = ?",
-    );
-    const writtenKeys = new Set(writes.map((w) => `${w.platform}|${w.problemKey}`));
-    for (const key of writtenKeys) {
-      const [platform, problemKey] = [key.slice(0, key.indexOf('|')), key.slice(key.indexOf('|') + 1)];
-      done.run(platform, problemKey);
+  const byTag = new Map<string, number>();
+  let uncovered = 0;
+  for (const r of rows) {
+    let tags: string[] = [];
+    try {
+      const parsed = JSON.parse(r.tags) as unknown;
+      if (Array.isArray(parsed)) tags = parsed.filter((t): t is string => typeof t === 'string');
+    } catch {
+      tags = [];
     }
-    for (const u of uncertain) uncertainStmt.run(u.platform, u.problemKey);
-    const dataDir = effectiveDataDir(opts.dataDir);
-    if (dataDir) appendAnnotations(dataDir, result.lines);
-    db.exec('COMMIT');
-    return { written: result.written, skippedManual: result.skippedManual };
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
+    if (!tags.some((t) => codeOfTag(t) !== undefined)) uncovered += 1;
+    for (const t of new Set(tags)) {
+      if (codeOfTag(t) !== undefined) continue;
+      byTag.set(t, (byTag.get(t) ?? 0) + 1);
+    }
   }
+
+  const gaps = [...byTag.entries()]
+    .map(([tag, problems]) => ({ tag, problems }))
+    .sort((a, b) => b.problems - a.problems || a.tag.localeCompare(b.tag))
+    .slice(0, limit);
+
+  return { gaps, uncovered };
 }

@@ -29,7 +29,6 @@ import { difficultyColor, PLATFORM_COLOR, tagColor } from '../ui'
 import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
 import { codeOptionsFromTags } from '../intentOptions'
 import { get, post, put } from '../api'
-import { saveUrlAsFile } from '../download'
 
 /** GET /api/knowledge/taxonomy 响应（服务端 taxonomy.json 结构） */
 interface TaxonomyDoc {
@@ -41,27 +40,11 @@ interface TaxonomyDoc {
   }>
 }
 
-/** POST /api/knowledge/build 响应（L1/L2 摘要 + 最新覆盖率） */
+/** POST /api/knowledge/build 响应（L1 摘要 + 最新覆盖率） */
 interface BuildResp {
-  mode: string
+  ok: boolean
   l1?: { scanned: number; annotated: number; enqueued: number; skippedManual: number }
-  l2?: {
-    skipped?: string
-    pending?: number
-    batches?: number
-    annotated?: number
-    uncertain?: number
-    failedBatch?: string
-    /** 失败批中已推到队尾待重试的题数 */
-    retried?: number
-    /** 失败批中达到重试上限、转 failed 出队的题数 */
-    gaveUp?: number
-    /** 整批无法定位题目（标识歧义）而提前收手 */
-    stalled?: boolean
-    /** 纠正重试仍无法定位、整批转存疑（人工校正池）出队的题数 */
-    demoted?: number
-    remaining?: number
-  }
+  conceptStats?: number
   coverage: KnowledgeCoverage
 }
 
@@ -165,11 +148,10 @@ export default function Problems() {
   const [pipelineOpen, setPipelineOpen] = useState(false)
   const [coverage, setCoverage] = useState<KnowledgeCoverage | null>(null)
   const [pipelineBusy, setPipelineBusy] = useState(false)
-  const [aiImportRaw, setAiImportRaw] = useState('')
+
   // 批跑后抽检清单（GET /api/knowledge/sample）
   const [sample, setSample] = useState<{ sampleSize: number; items: Array<{ platform: string; problemKey: string; code: string; name: string; confidence: number; source: string; method: string }> } | null>(null)
-  // 导出数据包题数（无 Key 通道；单次 AI 对话建议 100-200，大包自行拆分喂多轮）
-  const [exportLimit, setExportLimit] = useState(200)
+
   // 单题知识点人工校正（L3）
   const [kpEditRow, setKpEditRow] = useState<ProblemRow | null>(null)
   const [kpTree, setKpTree] = useState<NonNullable<TreeSelectProps['treeData']>>([])
@@ -256,20 +238,6 @@ export default function Problems() {
     loadCoverage()
   }, [loadCoverage])
 
-  /** 把 attempts 超限转 failed 的题捞回 L2 队列（修好 Key / 网络后据此续跑，否则它们永久停摆） */
-  const retryFailed = async () => {
-    setPipelineBusy(true)
-    try {
-      const r = await post<{ ok: boolean; requeued: number; coverage: KnowledgeCoverage }>('/api/knowledge/retry-failed', {})
-      message.success(`已把 ${r.requeued} 道放弃的题捞回 L2 队列`)
-      setCoverage(r.coverage)
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setPipelineBusy(false)
-    }
-  }
-
   /** 跑管线：L1 规则批跑 / 版本差量重跑（单请求，秒级） */
   const runPipeline = async (body: { mode: 'l1'; rerun?: boolean }) => {
     setPipelineBusy(true)
@@ -290,79 +258,6 @@ export default function Problems() {
     }
   }
 
-  /**
-   * 跑全量管线（L1 + L2）：L2 每 25 题一批、单批可能耗时数分钟，
-   * 客户端按 5 批（125 题）一轮循环请求，避免单请求挂几十分钟被环境掐断、
-   * 且每轮落库可见进度；任一轮失败保留队列，下次点按钮断点续跑。
-   */
-  const runFullPipeline = async () => {
-    setPipelineBusy(true)
-    const PROGRESS_KEY = 'kp-l2-progress'
-    let totalAnnotated = 0
-    let totalUncertain = 0
-    let totalDemoted = 0
-    try {
-      // 先跑 L1（增量）
-      const r1 = await post<BuildResp>('/api/knowledge/build', { mode: 'l1' })
-      if (r1.l1) {
-        message.info(`L1 完成：命中落库 ${r1.l1.annotated} 题，L2 队列 ${r1.l1.enqueued} 题，开始 L2 批跑…`)
-      }
-      setCoverage(r1.coverage)
-
-      // L2 分轮循环（每轮 5 批 = 125 题）
-      for (;;) {
-        const r = await post<BuildResp>('/api/knowledge/build', { mode: 'l2', maxBatches: 5 })
-        const l2 = r.l2
-        if (!l2) break
-        if (l2.skipped) {
-          message.warning(`L2 未执行：${l2.skipped}`)
-          break
-        }
-        totalAnnotated += l2.annotated ?? 0
-        totalUncertain += l2.uncertain ?? 0
-        totalDemoted += l2.demoted ?? 0
-        setCoverage(r.coverage)
-        if (l2.failedBatch) {
-          const extra =
-            (l2.gaveUp ?? 0) > 0
-              ? `本轮 ${l2.gaveUp} 题已达重试上限被移出队列（可用下方「重试已放弃的 N 题」捞回）`
-              : '这一批已挪到队列末尾，下次续跑会从别的批开始'
-          message.error(
-            `L2 批次失败已中止：${l2.failedBatch}。本轮前已落库 ${totalAnnotated} 题不会丢失；${extra}；剩余 ${l2.remaining ?? 0} 题可再次点击续跑`,
-            10,
-          )
-          break
-        }
-        if (l2.stalled) {
-          message.warning(
-            `L2 中止：这一批题无法唯一定位（模型没回抄「平台|题号」前缀），已记入审计日志待人工校正；剩余 ${l2.remaining ?? 0} 题`,
-            10,
-          )
-          break
-        }
-        if ((l2.batches ?? 0) === 0 || (l2.remaining ?? 0) === 0) {
-          message.success(
-            `L2 全部完成：落库 ${totalAnnotated} 题、存疑 ${totalUncertain} 题` +
-              (totalDemoted > 0 ? `（含 ${totalDemoted} 题因模型未回抄「平台|题号」整批转入人工校正，见审计日志）` : ''),
-          )
-          break
-        }
-        message.loading({
-          content: `L2 批跑中：已落库 ${totalAnnotated} 题（存疑 ${totalUncertain}），剩余 ${l2.remaining ?? 0} 题…`,
-          key: PROGRESS_KEY,
-          duration: 0,
-        })
-      }
-    } catch (e) {
-      message.error(`管线中断：${(e as Error).message}。已落库 ${totalAnnotated} 题不会丢失，可再次点击续跑`, 10)
-    } finally {
-      message.destroy(PROGRESS_KEY)
-      setPipelineBusy(false)
-      loadCoverage()
-      loadRef.current()
-    }
-  }
-
   /** 批跑后随机抽检 1%：生成核对清单，人工复核驱动规则迭代 */
   const loadSample = async () => {
     setPipelineBusy(true)
@@ -372,28 +267,6 @@ export default function Problems() {
           '/api/knowledge/sample',
         ),
       )
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setPipelineBusy(false)
-    }
-  }
-
-  /** 无 Key 通道：粘贴 AI 返回的标注 JSON 导入 */
-  const importAiAnnotations = async () => {
-    setPipelineBusy(true)
-    try {
-      const r = await post<{ annotated: number; uncertain: number; droppedHallucinations: number }>(
-        '/api/knowledge/import',
-        { raw: aiImportRaw },
-      )
-      message.success(
-        `导入完成：落库 ${r.annotated} 题、存疑 ${r.uncertain} 题` +
-          (r.droppedHallucinations ? `，丢弃幻觉 code ${r.droppedHallucinations} 条（已记审计日志）` : ''),
-      )
-      setAiImportRaw('')
-      loadCoverage()
-      loadRef.current()
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -742,7 +615,7 @@ export default function Problems() {
         description="管理和导入你在各平台的刷题记录"
         extra={
           <Space>
-            <Tooltip title="自建知识点管线：L1 规则 + L2 AI 标注，替代题源 tag 统计口径">
+            <Tooltip title="自建知识点管线：L1 规则 + 题源标签映射，替代题源 tag 统计口径">
               <Button icon={<ApartmentOutlined />} onClick={() => { setPipelineOpen(true); loadCoverage() }}>
                 知识点管线{coverage && coverage.pending > 0 ? `（待标注 ${coverage.pending}）` : ''}
               </Button>
@@ -1080,7 +953,7 @@ export default function Problems() {
         />
       </Modal>
 
-      {/* 知识点管线面板：覆盖率 + 批跑 + 无 Key 导出/导入闭环 */}
+      {/* 知识点管线面板：覆盖率 + L1 批跑 + 抽检 */}
       <Modal title="知识点管线" open={pipelineOpen} onCancel={() => setPipelineOpen(false)} footer={null} width={660}>
         {coverage && (
           <div style={{ marginBottom: 12 }}>
@@ -1089,12 +962,7 @@ export default function Problems() {
                 覆盖 <strong>{coverage.annotated}</strong> / {coverage.total} 题（{coverage.coverage.toFixed(1)}%）
               </span>
               <span>
-                L2 待标注 <strong>{coverage.pending}</strong>
-                {coverage.retrying > 0 ? `（重试中 ${coverage.retrying}）` : ''}
-                {coverage.failed > 0 ? `（已放弃 ${coverage.failed}）` : ''}
-              </span>
-              <span>
-                规则 {coverage.bySource.rule ?? 0} · AI {coverage.bySource.ai ?? 0} · 人工 {coverage.bySource.manual ?? 0}
+                规则 {coverage.bySource.rule ?? 0} · 题源标签 {coverage.bySource.tag ?? 0} · 人工 {coverage.bySource.manual ?? 0}
               </span>
             </Space>
             <p style={{ margin: '8px 0 0', color: '#8993a2', fontSize: 12 }}>
@@ -1108,44 +976,11 @@ export default function Problems() {
           <Button type="primary" loading={pipelineBusy} onClick={() => void runPipeline({ mode: 'l1' })}>
             跑 L1 规则
           </Button>
-          <Tooltip title="L1 + L2 分批跑（每轮 125 题，实时进度，中断可续跑）">
-            <Button loading={pipelineBusy} onClick={() => void runFullPipeline()}>
-              跑全量管线（L1+L2）
-            </Button>
-          </Tooltip>
           <Tooltip title="只重扫规则/体系版本过期、或标题已修复的标注，人工校正不受影响">
             <Button loading={pipelineBusy} onClick={() => void runPipeline({ mode: 'l1', rerun: true })}>
               版本差量重跑
             </Button>
           </Tooltip>
-          {(coverage?.failed ?? 0) > 0 && (
-            <Tooltip title={`${coverage!.failed} 道题连续失败已达上限被移出队列；修好配置后可在这次操作里捞回`}>
-              <Button danger loading={pipelineBusy} onClick={() => void retryFailed()}>
-                重试已放弃的 {coverage!.failed} 题
-              </Button>
-            </Tooltip>
-          )}
-          <InputNumber
-            min={10}
-            max={1000}
-            step={50}
-            value={exportLimit}
-            onChange={(v) => setExportLimit(v ?? 200)}
-            addonAfter="题/包"
-            style={{ width: 130 }}
-          />
-          <Button
-            onClick={() =>
-              void saveUrlAsFile({
-                url: `/api/knowledge/export-queue?limit=${exportLimit}`,
-                filename: `knowledge-queue-${exportLimit}.md`,
-                successText: '数据包已导出（喂给任意 AI 后，把返回 JSON 粘贴到下方导入）',
-                message,
-              })
-            }
-          >
-            导出待标注数据包
-          </Button>
           <Tooltip title="随机抽 1% 已标注题生成核对清单，复核后在题目行内校正">
             <Button loading={pipelineBusy} onClick={() => void loadSample()}>
               生成抽检清单
@@ -1153,22 +988,9 @@ export default function Problems() {
           </Tooltip>
         </Space>
         <p style={{ color: '#8993a2', fontSize: 12 }}>
-          L2 需在「设置」配置 AI Key；每 25 题一批、一批约数十秒到数分钟，队列很大时建议改用离线脚本
-          <span className="mono"> npx tsx scripts/gen-knowledge.ts --l2 </span>
-          跑（不占页面，同样断点续跑）。没有 Key 时用「导出待标注数据包」手动喂任意 AI，把返回的 JSON 粘贴到下面导入；
-          导出总是取队列最前面的题，导入成功后下次导出自动取下一批（单次 AI 对话建议 100-200 题，大包可自行拆分喂多轮）。
+          AI 已退出清洗模块；未覆盖题目进入「词表缺口」报告，补齐 tags.ts 同义组是提升覆盖率的唯一手段。
+          离线批跑可用 <span className="mono">npx tsx scripts/gen-knowledge.ts</span>。
         </p>
-        <Input.TextArea
-          rows={6}
-          placeholder='粘贴 AI 返回的标注 JSON（[{"problemKey":"P1001","knowledgePoints":[{"code":"basic.binary-search","confidence":0.9}]}, ...]）'
-          value={aiImportRaw}
-          onChange={(e) => setAiImportRaw(e.target.value)}
-        />
-        <div style={{ marginTop: 8, textAlign: 'right' }}>
-          <Button type="primary" disabled={!aiImportRaw.trim()} loading={pipelineBusy} onClick={() => void importAiAnnotations()}>
-            导入 AI 标注
-          </Button>
-        </div>
         {sample && (
           <div style={{ marginTop: 12 }}>
             <div style={{ marginBottom: 4, fontWeight: 600 }}>抽检清单（{sample.sampleSize} 题）</div>

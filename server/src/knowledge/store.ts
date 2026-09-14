@@ -417,7 +417,7 @@ export function keypointsOfProblem(db: Db, platform: string, problemKey: string)
  *
  * 已摘除两个分支（清洗重构 spec §1.3）：
  * - `source='ai'`：AI 已退出清洗模块，不再参与任何统计
- * - `problem_topics`（v1 遗留层）：表仍在（写入路径未动），但不再被读取
+ * - `problem_topics`（v1 遗留层）：表与写入路径已彻底移除，不再参与读取
  *
  * confidence 不再作为可信度门槛（该字段已降级为来源内排序权重）；
  * 因此本函数不再读取知识库阈值设置。

@@ -17,7 +17,7 @@ import {
   setConfidenceThreshold,
   setManualKeypoints,
 } from '../src/knowledge/store.ts';
-import { annotateProblemsL1, pendingAiCount, runRulePass } from '../src/knowledge/pipeline.ts';
+import { annotateProblemsL1, runRulePass } from '../src/knowledge/pipeline.ts';
 
 function tempDataDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-test-'));
@@ -95,7 +95,11 @@ test('未命中题入 L2 队列；命中后自动出队；manual 永不覆盖', 
       { platform: 'codeforces', problemKey: '3B', title: '【模板】并查集' },
     ]);
     assert.equal(r.enqueued, 1);
-    assert.equal(pendingAiCount(db), 1);
+    // pendingAiCount 随 AI 批次逻辑一起移除；直接断言 knowledge_queue 行保留原意
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'pending'").get() as { c: number }).c,
+      1,
+    );
 
     // 人工校正 3A：之后管线重跑不得覆盖
     setManualKeypoints(db, 'codeforces', '3A', ['dp.general']);
@@ -178,13 +182,12 @@ test('覆盖率报告：bySource / 低置信 / 待标注统计正确', () => {
   }
 });
 
-test('读取路径只认 tag/rule/manual，忽略 ai 与 v1 problem_topics', () => {
+test('读取路径只认 tag/rule/manual，忽略 ai（v1 problem_topics 层已移除）', () => {
   const db = createDb(':memory:');
   try {
     db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
     db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (1,'codeforces','1A','T',1500,'[\"题源标签\"]')").run();
-    // v1 遗留层有数据，但不得再被读取
-    db.prepare("INSERT INTO problem_topics (problem_id,topic_id,confidence,method,pipeline_version) VALUES (1,'v1主题',1,'manual','x')").run();
+    // v1 遗留层（problem_topics）已随本任务移除；本测试改为断言读取路径只认 tag/rule/manual
     // ai 标注存在，也不得再被读取
     db.prepare(`INSERT INTO problem_keypoints
       (platform,problem_key,code,name,confidence,source,method,taxonomy_version,pipeline_version,annotated_at)
@@ -244,13 +247,12 @@ test('manual 标注必须被读取：人工校正不被原始题源标签顶掉'
   }
 });
 
-test('CTE/join 形态与标量形态同口径：标注侧聚合、v1 表不参与、无标注回退 p.tags', () => {
+test('CTE/join 形态与标量形态同口径：标注侧聚合、v1 表已移除、无标注回退 p.tags', () => {
   const db = createDb(':memory:');
   try {
     db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
-    // 12A：无标注，但有 v1 遗留行 —— 若 pt 分支未摘除，这里会读出「v1主题」
+    // 12A：无标注；v1 遗留层已移除，读取路径应直接回退到题源 tags
     db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (12,'codeforces','12A','T',1500,'[\"题源标签\"]')").run();
-    db.prepare("INSERT INTO problem_topics (problem_id,topic_id,confidence,method,pipeline_version) VALUES (12,'v1主题',1,'manual','x')").run();
     // 13B：tag + rule 两来源同在 —— 必须全部返回，且 ai 行不参与
     db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (13,'codeforces','13B','T',1500,'[]')").run();
     const ins = db.prepare(`INSERT INTO problem_keypoints
