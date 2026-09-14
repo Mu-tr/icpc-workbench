@@ -43,6 +43,62 @@ export function splitByTime<T extends { submittedAt: string }>(
   return { train: sorted.slice(0, cut), test: sorted.slice(cut) };
 }
 
+/** 固定种子 PRNG（mulberry32）：验证工具报出的区间必须可复现，不能用 Math.random。 */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export const BOOTSTRAP_ITERS = 2000;
+export const BOOTSTRAP_SEED = 20260913;
+
+/**
+ * AUC 差值的 bootstrap 标准误（固定种子，可复现）。
+ *
+ * 为什么必须报：AUC 是统计量，两个 AUC 的差值只有连同**抽样不确定性**一起看才有意义。
+ * 本脚本首轮实测就是反例——190 条测试样本上 +0.014 的差值，按点估计正负号会被读成
+ * 「概念层胜出」，而它完全落在抽样误差内。spec §3.4 明确要求「不给出确定性结论」。
+ *
+ * 两个 AUC 共用同一测试集（相互相关），故逐样本有放回重采样、每个重复内同时重算两个 AUC，
+ * 这样重采样天然保留了相关性；各自算标准误再相加会高估不确定性。
+ *
+ * 重采样后某一类缺失的重复会被跳过；有效重复不足 100 次时返回 NaN，调用方据此视为无法判定。
+ */
+export function bootstrapDiffStdError(
+  a: number[],
+  b: number[],
+  labels: boolean[],
+  iters: number = BOOTSTRAP_ITERS,
+  seed: number = BOOTSTRAP_SEED,
+): number {
+  const n = labels.length;
+  if (n === 0 || a.length !== n || b.length !== n) return Number.NaN;
+  const rand = mulberry32(seed);
+  const diffs: number[] = [];
+  for (let it = 0; it < iters; it += 1) {
+    const sa: number[] = [];
+    const sb: number[] = [];
+    const sl: boolean[] = [];
+    for (let i = 0; i < n; i += 1) {
+      const j = Math.floor(rand() * n);
+      sa.push(a[j]);
+      sb.push(b[j]);
+      sl.push(labels[j]);
+    }
+    if (!sl.some(Boolean) || !sl.some((v) => !v)) continue;
+    diffs.push(auc(sa, sl) - auc(sb, sl));
+  }
+  if (diffs.length < 100) return Number.NaN;
+  const mean = diffs.reduce((x, y) => x + y, 0) / diffs.length;
+  const variance = diffs.reduce((acc, d) => acc + (d - mean) * (d - mean), 0) / (diffs.length - 1);
+  return Math.sqrt(variance);
+}
+
 interface SubRow {
   problemId: number;
   verdict: string;
@@ -153,28 +209,40 @@ function main(): void {
     console.log(`\n⚠️  测试集仅 ${testSet.length} 条，AUC 置信区间极宽，以上数字不足以支撑结论。`);
   }
   const coverageRatio = testSet.length > 0 ? codesCovered / testSet.length : 0;
-  if (aConcept <= aBucket) {
-    console.log(`\n❌ 结论：概念层未跑赢「仅看难度」基线（测试集覆盖率 ${codesCovered}/${testSet.length}）。`);
-    if (testSet.length > 0 && coverageRatio < 0.5) {
-      console.log(`   ⚠️ 多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，本结论更接近「未证成」而非「证否」。`);
-    }
-    if (coverageRatio >= 0.5) {
-      console.log(`   按 spec §3.3 的约定，这表明题目级概念标签对预测失败无增量价值——`);
-      console.log(`   应停止扩展该方向，转而依靠 submission_intents 的用户声明。`);
-    } else {
-      console.log(`   覆盖率不足，尚不能据此下结论。建议先运行完整 POST /api/knowledge/build 提高标注覆盖率，`);
-      console.log(`   再重新运行本脚本评估概念标签的增量价值。`);
-    }
+  const coverageOk = coverageRatio >= 0.5;
+  const diff = aConcept - aBucket;
+  const seDiff = bootstrapDiffStdError(conceptScores, bucketScores, labels);
+  const haveCi = Number.isFinite(seDiff);
+  const ciLow = haveCi ? diff - 1.96 * seDiff : Number.NaN;
+  const ciHigh = haveCi ? diff + 1.96 * seDiff : Number.NaN;
+  // 只有区间不跨 0，才能说方向已经站得住。只看点估计的正负号会给出过早结论：
+  // 本脚本首轮实测的 +0.014 / -0.017 都落在噪声里，却会被读成「胜出」或「无价值」。
+  const conclusive = haveCi && (ciLow > 0 || ciHigh < 0);
+
+  if (haveCi) {
+    console.log(`\n  差值 95% 区间: [${ciLow.toFixed(3)}, ${ciHigh.toFixed(3)}]（bootstrap ${BOOTSTRAP_ITERS} 次重采样，固定种子）`);
   } else {
-    console.log(`\n✅ 结论：概念层优于难度基线，弱项判断具备增量价值（测试集覆盖率 ${codesCovered}/${testSet.length}）。`);
-    if (testSet.length > 0 && coverageRatio < 0.5) {
-      console.log(`   ⚠️ 多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，本结论更接近「未证成」而非「证成」。`);
-    }
-    if (coverageRatio >= 0.5) {
+    console.log(`\n  ⚠️ 差值区间无法估计（有效重采样不足或测试集退化），以下只能看点估计。`);
+  }
+
+  if (coverageOk && conclusive) {
+    if (diff > 0) {
+      console.log(`\n✅ 结论：概念层优于难度基线，弱项判断具备增量价值（测试集覆盖率 ${codesCovered}/${testSet.length}，95% 区间下限 ${ciLow.toFixed(3)} > 0）。`);
       console.log(`   按 spec §3.3 的约定，可认为在当前覆盖水平下概念标签具备预测增量价值。`);
     } else {
-      console.log(`   覆盖率不足，当前结论仅为初步迹象。建议先运行完整 POST /api/knowledge/build 提高标注覆盖率，`);
-      console.log(`   再重新运行本脚本验证概念标签的增量价值。`);
+      console.log(`\n❌ 结论：概念层未跑赢「仅看难度」基线（测试集覆盖率 ${codesCovered}/${testSet.length}，95% 区间上限 ${ciHigh.toFixed(3)} < 0）。`);
+      console.log(`   按 spec §3.3 的约定，这表明题目级概念标签对预测失败无增量价值——`);
+      console.log(`   应停止扩展该方向，转而依靠 submission_intents 的用户声明。`);
+    }
+  } else {
+    console.log(`\n⚠️ 尚不能下结论：增量 ${(diff >= 0 ? '+' : '')}${diff.toFixed(3)}（概念层${diff > 0 ? '高于' : '不高于'}基线，但证据不足）。`);
+    if (!coverageOk) {
+      console.log(`   覆盖率不足（${codesCovered}/${testSet.length}）：多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，`);
+      console.log(`   当前数字更接近「未证成」而非「证否」。建议先运行完整 POST /api/knowledge/build 提高标注覆盖率，再重新运行本脚本。`);
+    }
+    if (!conclusive) {
+      console.log(`   差距落在抽样误差内（95% 区间含 0）：样本量 ${testSet.length} 条不足以判定方向，`);
+      console.log(`   这只是初步迹象，需积累更多提交样本后再判定——不应据此启动或放弃该方向。`);
     }
   }
 

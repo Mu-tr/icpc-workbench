@@ -354,9 +354,13 @@ export function setManualKeypoints(
     if (nameOfCode(code) === null) throw new Error(`未知知识点 code: ${code}`);
     return { code, confidence: 1, method: 'manual' };
   });
-  // dataDir 语义与 purgeAiAnnotations 不同（此处是既有契约，勿改）：显式 null 与
-  // undefined 都回退到模块级默认目录（本用例的既有调用方依赖 `dataDir: null` = 不写 JSONL，
-  // 见 test/knowledge-store.test.ts 的 21B 用例）——因此这里保留 resolveDataDir。
+  // dataDir 语义与同文件的 purgeAiAnnotations **不同**，此处刻意保留（本次改动要求可观察行为不变）：
+  //   本函数：undefined 与显式 null 都回退到模块级默认目录（resolveDataDir 的 `??` 语义）；
+  //   purgeAiAnnotations：显式 null = 明确不写 JSONL。
+  // ⚠️ 这处分歧**没有任何测试锚定**：test/knowledge-store.test.ts 里唯一的 { dataDir: null }
+  // 调用之所以没写 JSONL，只是因为那个用例没调 initKnowledgeStore、模块默认目录恰好为 null，
+  // 两种语义在该用例下结果相同。生产唯一调用方（routes/knowledge.ts 的人工校正端点）不传 opts，
+  // 走模块默认目录。故这是一处未被锚定的分歧，值得日后统一，本次不动它。
   const dataDir = resolveDataDir(opts.dataDir);
   db.exec('BEGIN');
   try {

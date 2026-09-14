@@ -356,29 +356,34 @@ test('人工校正：JSONL 追加失败时整题回滚，库内不留半成品',
   const blocker = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-append-fail-'));
   const blockedDataDir = path.join(blocker, 'blocked');
   fs.writeFileSync(blockedDataDir, 'not a directory', 'utf8');
+  // 前置那次 runRulePass 用**显式临时目录**而不是 { dataDir: null }：后者在本函数里的语义是
+  // 「回退到模块级默认目录」，是否写盘取决于前一个用例有没有重置它 —— 那样用例就是顺序相关的。
+  const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-append-seed-'));
 
   const db1 = createDb(':memory:');
   try {
     db1
       .prepare("INSERT INTO problems (platform,problem_key,title,difficulty,tags) VALUES ('codeforces','10A','A. 线段树',1500,?)")
       .run(JSON.stringify(['贪心']));
-    runRulePass(db1, { dataDir: null });
-    const before = db1
-      .prepare("SELECT code, source FROM problem_keypoints WHERE platform='codeforces' AND problem_key='10A' ORDER BY code, source")
-      .all() as Array<{ code: string; source: string }>;
-    assert.deepEqual(before.map((r) => `${r.code}:${r.source}`), ['basic.greedy:tag', 'ds.segtree:rule']);
+    runRulePass(db1, { dataDir: seedDir });
+    const select10A = "SELECT * FROM problem_keypoints WHERE platform='codeforces' AND problem_key='10A' ORDER BY code, source";
+    const before = db1.prepare(select10A).all() as Array<Record<string, unknown>>;
+    assert.deepEqual(
+      before.map((r) => `${r.code}:${r.source}`),
+      ['basic.greedy:tag', 'ds.segtree:rule'],
+    );
 
     assert.throws(
       () => setManualKeypoints(db1, 'codeforces', '10A', ['dp.general'], { dataDir: blockedDataDir }),
-      'JSONL 追加失败必须向上抛出，不能静默吞掉',
+      (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOTDIR',
+      'JSONL 追加失败必须向上抛出（且是注入的 ENOTDIR），不能静默吞掉',
     );
 
     // 修前：DELETE + 写库发生在事务之外，append 抛错后库已被改成 manual，
     // 而源真相里什么都没有 → 重启重放会把这次校正抹掉。修后必须整题回滚。
-    const after = db1
-      .prepare("SELECT code, source FROM problem_keypoints WHERE platform='codeforces' AND problem_key='10A' ORDER BY code, source")
-      .all() as Array<{ code: string; source: string }>;
-    assert.deepEqual(after, before, '追加失败后库内标注必须与调用前完全一致（事务回滚）');
+    // 这里比整行（SELECT *）而不是只比 code/source：回滚要连 confidence/method/annotated_at 一起复原。
+    const after = db1.prepare(select10A).all() as Array<Record<string, unknown>>;
+    assert.deepEqual(after, before, '追加失败后库内标注必须与调用前逐行一致（事务回滚）');
 
     // 回滚后连接仍可用：紧接着的一次成功调用照常生效
     const okDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-append-ok-'));
@@ -388,6 +393,7 @@ test('人工校正：JSONL 追加失败时整题回滚，库内不留半成品',
   } finally {
     db1.close();
     fs.rmSync(blocker, { recursive: true, force: true });
+    fs.rmSync(seedDir, { recursive: true, force: true });
   }
 });
 
