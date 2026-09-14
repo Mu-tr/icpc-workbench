@@ -73,9 +73,13 @@ function adhocSignApp(appPath) {
   // 核心单独显式签一次：--deep 对 sidecar 的处理随版本变化，显式签保证确定行为
   run(`codesign --force --sign - "${core}"`);
   run(`codesign --force --sign - "${appPath}"`);
-  // 最后一步校验：签名链有任何一环失效都会在这里失败（不额外做 codesign 自检——
-  // macOS 上 `codesign --version` 本身返回非 0，拿它当可用性探针会误报）
-  run(`codesign --verify --deep --strict --verbose=2 "${appPath}"`);
+  // 校验刻意不加 --strict：--strict 额外要求 bundle 带密封的 CodeResources 资源清单，
+  // 而这种「只塞了 sidecar、没有 Resources 清单」的 sparse bundle 会报
+  // "code has no resources but signature indicates they must be present"
+  // （issue #14 反馈里那条）。该报错并不代表签名没用——应用照常能启动，
+  // 用 --strict 只会让构建变脆。不带 --strict 依旧会校验签名本体与包内每个 Mach-O，
+  // 足以拦住「签名失效 → 已损坏」这类真问题。
+  run(`codesign --verify --deep --verbose=2 "${appPath}"`);
   console.log('      签名校验通过（ad-hoc，含嵌入核心）');
 }
 

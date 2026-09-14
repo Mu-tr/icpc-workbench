@@ -109,6 +109,31 @@ jobs:
       - name: 构建 macOS 桌面版（核心 SEA + Tauri 壳 + .app/.dmg，Apple Silicon）
         run: node server/scripts/build-desktop-mac.mjs
 
+      # 回归门禁（issue #14：mac 版核心崩溃就出在这里）：
+      # SEA blob 必须落在 Mach-O 的 NODE_SEA 段；落到 postject 默认的 __POSTJECT 段，
+      # Node 按官方约定找不到 blob，启动即崩（EXC_BAD_ACCESS / SIGSEGV）。
+      # 同时确认注入后的核心与 .app 仍处于有效签名状态。
+      - name: 校验 SEA 注入段与签名
+        run: |
+          set -e
+          APP="desktop/app/src-tauri/target/release/bundle/macos/icpc-workbench.app"
+          CORE="$APP/Contents/MacOS/icpc-core"
+          echo "== $CORE 的 segment/section =="
+          otool -l "$CORE" | grep -E 'segname|sectname' | sort -u
+          if ! otool -l "$CORE" | grep -q 'segname NODE_SEA'; then
+            echo "::error::SEA blob 不在 NODE_SEA 段：postject 少了 --macho-segment-name NODE_SEA，mac 版核心会启动即崩"
+            exit 1
+          fi
+          if otool -l "$CORE" | grep -q 'segname __POSTJECT'; then
+            echo "::error::SEA blob 落进了默认的 __POSTJECT 段，Node 找不到它"
+            exit 1
+          fi
+          echo "== codesign =="
+          codesign -dv --verbose=2 "$CORE" 2>&1 | grep -E 'Signature|Identifier' || true
+          codesign --verify --verbose=2 "$CORE"
+          codesign --verify --deep --verbose=2 "$APP"
+          echo "SEA 段与签名校验通过"
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:

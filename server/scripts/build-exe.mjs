@@ -7,7 +7,11 @@
  * 3. 生成 SEA 配置 sea-config.json：主脚本 + 内嵌资源
  *    （schema.sql / plan-prompt.md / widget.html / client-dist/**）
  * 4. node --experimental-sea-config 生成 blob → postject 注入 node.exe 副本
+ *    （macOS 走同一脚本：必须带 --macho-segment-name NODE_SEA，见 src/sea-postject.ts）
  * 5. release/ 发布目录：exe + 使用说明.txt（整个文件夹直接拷给用户）
+ *
+ * 运行环境要求 Node 24+：脚本直接静态导入 TS 模块（src/sea-postject.ts），
+ * 依赖 Node 24 默认启用的类型擦除；CI 与桌面版打包均使用 Node 24。
  *
  * 产物面向“电脑小白”双击即用：自动打开默认浏览器（127.0.0.1，
  * 不触发防火墙弹窗）、端口被占自动顺延、重复双击复用已运行实例、
@@ -18,6 +22,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// TypeScript 源码直接静态导入：本脚本要求 Node 24（CI 与 package.json engines 一致），
+// 该版本默认启用类型擦除，可加载 buildPostjectArgs 供打包与测试共用。
+import { buildPostjectArgs } from '../src/sea-postject.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const serverRoot = path.resolve(__dirname, '..');
@@ -147,17 +154,17 @@ if (isMac) {
   // macOS（尤其 arm64）要求有效签名：先去掉 node 的原始签名，注入后再 ad-hoc 重签
   execSync(`codesign --remove-signature "${exePath}"`, { stdio: 'inherit' });
 }
+// macOS 必须显式指定 Mach-O 段名，否则 blob 落到 postject 默认的 __POSTJECT 段，
+// Node 按官方约定在 NODE_SEA 段里找不到它 → 启动即崩（issue #14）。
+// 参数由 src/sea-postject.ts 生成，回归测试覆盖。
+const postjectArgs = (overwrite) =>
+  buildPostjectArgs(exePath, seaConfig.output, isMac, overwrite).map((a) => `"${a}"`).join(' ');
 try {
-  execSync(`npx postject "${exePath}" NODE_SEA_BLOB "${seaConfig.output}" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`, {
-    stdio: 'inherit',
-  });
+  execSync(`npx postject ${postjectArgs(false)}`, { stdio: 'inherit' });
 } catch {
   // 已签名 exe 注入需先去签名；postject 失败时尝试 --overwrite 重试
   console.log('      postject 首次注入失败，尝试 --overwrite ...');
-  execSync(
-    `npx postject "${exePath}" NODE_SEA_BLOB "${seaConfig.output}" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 --overwrite`,
-    { stdio: 'inherit' },
-  );
+  execSync(`npx postject ${postjectArgs(true)}`, { stdio: 'inherit' });
 }
 if (isMac) {
   // ad-hoc 签名：本机可运行；分发给他人仍属未签名（与 Windows 未购证书同状况）
