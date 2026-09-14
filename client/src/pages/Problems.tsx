@@ -576,7 +576,9 @@ export default function Problems() {
     { title: '提交', dataIndex: 'attempts', width: 70, align: 'right' },
     {
       title: '操作',
-      width: 150,
+      // 4 个按钮最小内容宽约 182px + 单元格内边距，150 会把「卡在哪」裁出列外
+      width: 200,
+      fixed: 'right',
       render: (_v, r) => (
         <Space size={4}>
           {r.status !== 'ac' && (
@@ -810,6 +812,8 @@ export default function Problems() {
               loading={loading}
               columns={cols}
               dataSource={rows}
+              // 固定列宽合计 818px；容器更窄时出横向滚动条，操作列吸附右缘始终可见
+              scroll={{ x: 940 }}
               // 服务端分页：当前页 50 行由后端过滤 + LIMIT 得出，前端不再持有全量数据
               pagination={{
                 current: page,

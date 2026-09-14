@@ -41,6 +41,17 @@
   --text-on-brand: #10141e;
   --logo-badge-bg: #91adff;
   --pitfall: #e8b4a4;
+  /* 代码编辑器配色（CodeEditor.tsx 消费），亮暗两套均按各自底色校准对比度 */
+  --code-text: #d8e0ee;
+  --code-gutter: #5b6472;
+  --code-keyword: #7497f5;
+  --code-control: #c792ea;
+  --code-func: #86a8ff;
+  --code-const: #f2c46d;
+  --code-type: #5ad4e6;
+  --code-operator: #69d7a5;
+  --code-comment: #8993a2;
+  --code-invalid: #ff7b84;
   --overlay-1: var(--overlay-1);
   --overlay-2: var(--overlay-2);
   --overlay-3: var(--overlay-3);
@@ -84,6 +95,17 @@
   --text-on-brand: #ffffff;
   --logo-badge-bg: #7497f5;
   --pitfall: #c87560;
+  /* 亮色代码配色：相对 --surface-inset(#eaedf3) 校准对比度（正文/主要记号 ≥ 4.5:1） */
+  --code-text: #23272f;
+  --code-gutter: #98a1b0;
+  --code-keyword: #3d5cc8;
+  --code-control: #8a4fc0;
+  --code-func: #2b6cb8;
+  --code-const: #8a6009;
+  --code-type: #0a7488;
+  --code-operator: #1b7154;
+  --code-comment: #6b7484;
+  --code-invalid: #b8353f;
   --overlay-1: rgba(0, 0, 0, 0.02);
   --overlay-2: rgba(0, 0, 0, 0.04);
   --overlay-3: rgba(0, 0, 0, 0.06);
