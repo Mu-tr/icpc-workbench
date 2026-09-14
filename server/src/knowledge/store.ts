@@ -364,6 +364,33 @@ export function setManualKeypoints(
   return { lines: result.lines };
 }
 
+/** AI 退出知识点清洗模块：删除全部 source='ai' 的标注，并向 JSONL 源真相追加 tombstone 防止复活。
+ * 必须在事务内完成：DELETE 与 JSONL 追加同时成功或同时回滚。 */
+export function purgeAiAnnotations(
+  db: Db,
+  opts: { dataDir?: string | null } = {},
+): { deleted: number; tombstones: number } {
+  const rows = db
+    .prepare("SELECT DISTINCT platform, problem_key FROM problem_keypoints WHERE source = 'ai'")
+    .all() as unknown as Array<{ platform: string; problem_key: string }>;
+  if (rows.length === 0) return { deleted: 0, tombstones: 0 };
+
+  // 显式 null = 不写 JSONL；undefined = 回退模块级默认目录
+  const dataDir = opts.dataDir === null ? null : effectiveDataDir(opts.dataDir);
+  db.exec('BEGIN');
+  try {
+    const info = db.prepare("DELETE FROM problem_keypoints WHERE source = 'ai'").run();
+    if (dataDir) {
+      appendAnnotations(dataDir, rows.map((r) => tombstoneLine(r.platform, r.problem_key, 'ai')));
+    }
+    db.exec('COMMIT');
+    return { deleted: Number(info.changes ?? 0), tombstones: dataDir ? rows.length : 0 };
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
 // ---------- 查询接口 ----------
 
 export function keypointsOfProblem(db: Db, platform: string, problemKey: string): KnowledgePointEntry[] {

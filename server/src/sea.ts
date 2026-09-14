@@ -48,7 +48,7 @@ import { aiRoutes, setAssistantPromptTemplate } from './routes/ai.ts';
 import { PLATFORMS } from '../../shared/src/index.ts';
 import { setTaxonomyJson } from './knowledge/taxonomy.ts';
 import { setRulesJson } from './knowledge/ruleEngine.ts';
-import { initKnowledgeStore, loadAnnotationsIntoDb } from './knowledge/store.ts';
+import { initKnowledgeStore, loadAnnotationsIntoDb, purgeAiAnnotations } from './knowledge/store.ts';
 
 const CLIENT_DIST_PREFIX = 'client-dist/';
 const WIDGET_FILES = ['widget.html'];
@@ -69,6 +69,14 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   initAdapters(config.dataDir);
   // 知识点管线：JSONL 源真相 → SQLite 索引幂等重建（无 JSONL 时零开销）
   initKnowledgeStore(config.dataDir);
+  try {
+    const purged = purgeAiAnnotations(db, { dataDir: config.dataDir });
+    if (purged.deleted > 0 || purged.tombstones > 0) {
+      console.log(`[knowledge] 已清理 AI 标注: 删除 ${purged.deleted} 条，写入 ${purged.tombstones} 个 tombstone`);
+    }
+  } catch (e) {
+    console.error(`[knowledge] AI 标注清理失败（不影响启动）: ${(e as Error).message}`);
+  }
   try {
     const loaded = loadAnnotationsIntoDb(db, config.dataDir);
     if (loaded.lines > 0) {
