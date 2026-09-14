@@ -152,11 +152,17 @@ function main(): void {
     console.log(`\n⚠️  测试集仅 ${testSet.length} 条，AUC 置信区间极宽，以上数字不足以支撑结论。`);
   }
   if (aConcept <= aBucket) {
-    console.log(`\n❌ 结论：概念层未跑赢「仅看难度」基线。`);
+    console.log(`\n❌ 结论：概念层未跑赢「仅看难度」基线（测试集覆盖率 ${codesCovered}/${testSet.length}）。`);
+    if (testSet.length > 0 && codesCovered / testSet.length < 0.5) {
+      console.log(`   ⚠️ 多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，本结论更接近「未证成」而非「证否」。`);
+    }
     console.log(`   按 spec §3.3 的约定，这表明题目级概念标签对预测失败无增量价值——`);
     console.log(`   应停止扩展该方向，转而依靠 submission_intents 的用户声明。`);
   } else {
-    console.log(`\n✅ 结论：概念层优于难度基线，弱项判断具备增量价值。`);
+    console.log(`\n✅ 结论：概念层优于难度基线，弱项判断具备增量价值（测试集覆盖率 ${codesCovered}/${testSet.length}）。`);
+    if (testSet.length > 0 && codesCovered / testSet.length < 0.5) {
+      console.log(`   ⚠️ 多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，本结论更接近「未证成」而非「证成」。`);
+    }
   }
 
   // 每概念样本数（功效提示）
