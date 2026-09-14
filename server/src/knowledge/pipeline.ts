@@ -1,7 +1,7 @@
 /**
- * 知识点管线编排：L1 规则批跑 + 增量入队 + 断点续跑 + 版本差量重跑。
- * 红线：L2 的 AI 特征只有 platform / problemKey / title / difficulty（绝不给题源 tags）；
- * 与 AI 并列的 tag 来源标注不走模型，直接读 problems.tags 做确定性映射（见 tagAnnotate.ts）。
+ * 知识点管线编排：L1 规则批跑 + 题源标签映射 + 版本差量重跑。
+ * 当前清洗模块仅保留 L1（标题规则 + 题源标签映射）；AI 标注已退出，未命中题进入
+ * 词表缺口报告（GET /gaps），不再等待模型标注。
  * 事务与文件顺序：DB 写入与 JSONL 追加在同一事务窗口内（先 append 后 COMMIT），
  * 崩溃时 JSONL 多出的行由下次启动重放自愈，不会丢标注。
  */
@@ -49,7 +49,7 @@ export interface L1RunResult {
   annotated: number;
   /** tag 来源映射落库的题数（与 rule 并列的独立来源） */
   tagAnnotated: number;
-  /** 未命中进入 L2 队列的题数 */
+  /** 规则未命中、进入词表缺口队列的题数 */
   enqueued: number;
   /** 有人工校正标注而跳过的题数 */
   skippedManual: number;
@@ -67,7 +67,7 @@ interface ProblemRow {
  * 对给定题目集合跑 L1（导入/拉题库钩子与全量批跑共用）。
  * - 已有 manual 标注的题跳过（人工校正置顶）
  * - 已有任意标注的题跳过（增量语义），force 时重跑（覆盖 rule 来源旧标注）
- * - 命中落库 source=rule；未命中入 L2 队列（幂等）
+ * - 命中落库 source=rule；未命中进入词表缺口队列（幂等）
  * - 同时并联 tag 来源（题源标签 → 知识点 code，落库 source=tag，见 tagAnnotate.ts），
  *   两者同处一个事务窗口，JSONL 在本函数内统一追加
  */
@@ -104,7 +104,7 @@ export function annotateProblemsL1(
       scanned += 1;
       const hits = classifyTitle(row.title);
       if (opts.force && hits.length === 0) {
-        // 差量重跑且不再命中：清除该题过期的 rule 标注（ai/manual 不受影响），重新入 L2 队列；
+        // 差量重跑且不再命中：清除该题过期的 rule 标注（manual 不受影响），重新进入词表缺口队列；
         // JSONL 补清除快照，防止重放复活
         db.prepare(
           "DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND source = 'rule'",
@@ -120,7 +120,7 @@ export function annotateProblemsL1(
           // 标题指纹：记录标注当时的标题，标题被修复后据此判定标注陈旧并触发重跑
           title: row.title,
         });
-        // 规则命中后若此前在 L2 队列里，标记出队
+        // 规则命中后若此前在词表缺口队列里，标记出队
         db.prepare(
           "UPDATE knowledge_queue SET status = 'done', updated_at = datetime('now') WHERE platform = ? AND problem_key = ? AND status = 'pending'",
         ).run(row.platform, row.problemKey);
@@ -160,10 +160,10 @@ export function annotateProblemsL1(
 }
 
 /**
- * 标题变更导致的 AI 标注失效 → 重新入队 L2。
+ * 标题变更导致的 rule 标注陈旧 → 重新标记为待差量重跑。
  * 只在问题有**标题指纹**且与当前标题不符时触发：旧版 AI 标注（annotated_title 为 NULL）
- * 无法判定是否陈旧，故不在这里动它们——避免升级后一次性重跑全量 AI（真实花费）。
- * 需要全量重标时走「知识点管线 → 清空 AI 标注后重跑」的显式入口。
+ * 无法判定是否陈旧，故不在这里动它们。
+ * 需要全量重标时走「知识点管线 → 差量重跑」的显式入口。
  */
 export function requeueStaleAiByTitle(db: Db): number {
   const info = db
@@ -194,8 +194,8 @@ export function runRulePass(
   if (opts.rerun) {
     const requeued = requeueStaleAiByTitle(db);
     if (requeued > 0) {
-      // 标题被修复后 AI 标注同样陈旧：仅重新入队（不直接调用 AI，无 Key 时也能安全跑完 L1）
-      console.info(`[knowledge] 标题变更导致 ${requeued} 题的 AI 标注失效，已重新排入 L2 队列`);
+      // 标题被修复后旧 rule 标注同样陈旧：仅重新排入词表缺口队列（不调用 AI，无 Key 时也能安全跑完 L1）
+      console.info(`[knowledge] 标题变更导致 ${requeued} 题的 rule 标注失效，已重新排入词表缺口队列`);
     }
   }
   const taxonomyVersion = loadTaxonomy().version;

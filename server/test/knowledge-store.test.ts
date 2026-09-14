@@ -83,7 +83,7 @@ test('幂等重跑：二次 L1 不产生重复标注，结果一致', () => {
   }
 });
 
-test('未命中题入 L2 队列；命中后自动出队；manual 永不覆盖', () => {
+test('未命中题入词表缺口队列；命中后自动出队；manual 永不覆盖', () => {
   const dataDir = tempDataDir();
   initKnowledgeStore(dataDir);
   const db = createDb(':memory:');
@@ -242,6 +242,27 @@ test('manual 标注必须被读取：人工校正不被原始题源标签顶掉'
     // 摘掉 manual 的口径下这两题都会读成题源标签 ['题源标签']：人工校正被静默丢弃
     assert.deepEqual(tagsOf('20A'), ['排序']);
     assert.deepEqual(tagsOf('21B'), ['排序'], '被人工校正覆盖的 tag/rule 标注不得复活');
+  } finally {
+    db.close();
+  }
+});
+
+test('CTE/join 形态读取路径包含 manual 来源（与标量形态同口径）', () => {
+  const db = createDb(':memory:');
+  try {
+    db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
+    db.prepare("INSERT INTO problems (id,platform,problem_key,title,difficulty,tags) VALUES (14,'codeforces','14A','T',1500,'[\"题源标签\"]')").run();
+    db.prepare(`INSERT INTO problem_keypoints
+      (platform,problem_key,code,name,confidence,source,method,taxonomy_version,pipeline_version,annotated_at)
+      VALUES ('codeforces','14A','misc.sorting','排序',1,'manual','manual',1,1,'2026-01-01')`).run();
+    const rows = db
+      .prepare(
+        `WITH ${problemKeypointsCte(db)} SELECT p.id, ${knowledgeTagsCoalesceSql()} FROM problems p ` +
+          `${knowledgeTagsJoinSql()} ORDER BY p.id`,
+      )
+      .all() as Array<{ id: number; tags: string }>;
+    assert.equal(rows.length, 1);
+    assert.deepEqual(JSON.parse(rows[0].tags), ['排序']);
   } finally {
     db.close();
   }

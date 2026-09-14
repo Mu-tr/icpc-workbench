@@ -9,6 +9,7 @@ import { loadConfig } from '../src/config.ts';
 import { createDb } from '../src/db/index.ts';
 import { getCoverage, initKnowledgeStore, loadAnnotationsIntoDb } from '../src/knowledge/store.ts';
 import { runRulePass } from '../src/knowledge/pipeline.ts';
+import { recomputeConceptStats } from '../src/knowledge/conceptStats.ts';
 
 const args = process.argv.slice(2);
 const limitIdx = args.indexOf('--limit');
@@ -26,7 +27,10 @@ const l1 = runRulePass(db, {
   rerun: args.includes('--rerun'),
   ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
 });
-console.log(`[knowledge] L1: 扫描 ${l1.scanned} 题，命中落库 ${l1.annotated}，入词表缺口 ${l1.enqueued}，manual 跳过 ${l1.skippedManual}`);
+console.log(`[knowledge] L1: 扫描 ${l1.scanned} 题，命中落库 ${l1.annotated}，规则未命中入队 ${l1.enqueued}，manual 跳过 ${l1.skippedManual}`);
+
+const concepts = recomputeConceptStats(db);
+console.log(`[knowledge] 概念统计：已重算 ${concepts} 条 (code × bucket) 信息量`);
 
 const cov = getCoverage(db);
 console.log(

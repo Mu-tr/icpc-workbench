@@ -53,7 +53,7 @@ test('purgeAiAnnotations: 写 JSONL tombstone 后重放不再复活 ai 标注', 
   const r = purgeAiAnnotations(db, { dataDir: dir });
   assert.equal(r.tombstones, 1);
 
-  // 模拟重启：新建库（schema 自带迁移会再次 purge，故先确认 JSONL 重放结果）
+  // 模拟重启：migrations 不再 purge AI 标注，因此手动删除后由 JSONL 重放保证 ai 不复活
   const db2 = createDb(':memory:');
   seedAi(db2, '3C');
   db2.prepare("DELETE FROM problem_keypoints WHERE source='ai'").run();

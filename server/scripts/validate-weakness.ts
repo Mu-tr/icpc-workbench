@@ -91,7 +91,8 @@ function main(): void {
   }
 
   const { train, test: testSet } = splitByTime(subs, 0.8);
-  const isFail = (v: string): boolean => v !== 'AC';
+  // spec 将「知识型失败」限定为 WA/TLE；编译错误 / 跳过 / 运行时异常不属于知识弱点。
+  const isFail = (v: string): boolean => v === 'WA' || v === 'TLE';
 
   // 概念层：按 (code, bucket) 统计训练集失败率
   const stat = new Map<string, { n: number; fail: number }>();
@@ -151,27 +152,47 @@ function main(): void {
   if (testSet.length < 100) {
     console.log(`\n⚠️  测试集仅 ${testSet.length} 条，AUC 置信区间极宽，以上数字不足以支撑结论。`);
   }
+  const coverageRatio = testSet.length > 0 ? codesCovered / testSet.length : 0;
   if (aConcept <= aBucket) {
     console.log(`\n❌ 结论：概念层未跑赢「仅看难度」基线（测试集覆盖率 ${codesCovered}/${testSet.length}）。`);
-    if (testSet.length > 0 && codesCovered / testSet.length < 0.5) {
+    if (testSet.length > 0 && coverageRatio < 0.5) {
       console.log(`   ⚠️ 多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，本结论更接近「未证成」而非「证否」。`);
     }
-    console.log(`   按 spec §3.3 的约定，这表明题目级概念标签对预测失败无增量价值——`);
-    console.log(`   应停止扩展该方向，转而依靠 submission_intents 的用户声明。`);
+    if (coverageRatio >= 0.5) {
+      console.log(`   按 spec §3.3 的约定，这表明题目级概念标签对预测失败无增量价值——`);
+      console.log(`   应停止扩展该方向，转而依靠 submission_intents 的用户声明。`);
+    } else {
+      console.log(`   覆盖率不足，尚不能据此下结论。建议先运行完整 POST /api/knowledge/build 提高标注覆盖率，`);
+      console.log(`   再重新运行本脚本评估概念标签的增量价值。`);
+    }
   } else {
     console.log(`\n✅ 结论：概念层优于难度基线，弱项判断具备增量价值（测试集覆盖率 ${codesCovered}/${testSet.length}）。`);
-    if (testSet.length > 0 && codesCovered / testSet.length < 0.5) {
+    if (testSet.length > 0 && coverageRatio < 0.5) {
       console.log(`   ⚠️ 多数测试题无知识点 code，概念 AUC 主要由全局失败率兜底决定，本结论更接近「未证成」而非「证成」。`);
+    }
+    if (coverageRatio >= 0.5) {
+      console.log(`   按 spec §3.3 的约定，可认为在当前覆盖水平下概念标签具备预测增量价值。`);
+    } else {
+      console.log(`   覆盖率不足，当前结论仅为初步迹象。建议先运行完整 POST /api/knowledge/build 提高标注覆盖率，`);
+      console.log(`   再重新运行本脚本验证概念标签的增量价值。`);
     }
   }
 
   // 每概念样本数（功效提示）
   console.log(`\n=== 各 (code × bucket) 训练样本数（<20 视为功效不足） ===`);
-  const sorted = [...stat.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 20);
-  for (const [k, e] of sorted) {
+  const sorted = [...stat.entries()].sort((a, b) => b[1].n - a[1].n);
+  const lowPower = sorted.filter(([, e]) => e.n < 20);
+  const top20 = sorted.filter(([, e]) => e.n >= 20).slice(0, 20);
+  for (const [k, e] of top20) {
     const [code, b] = k.split('\u0000');
-    const flag = e.n < 20 ? '  ⚠️ 功效不足' : '';
-    console.log(`  ${code.padEnd(26)} ${b.padEnd(11)} n=${String(e.n).padStart(4)}  失败率=${((e.fail / e.n) * 100).toFixed(0)}%${flag}`);
+    console.log(`  ${code.padEnd(26)} ${b.padEnd(11)} n=${String(e.n).padStart(4)}  失败率=${((e.fail / e.n) * 100).toFixed(0)}%`);
+  }
+  if (lowPower.length > 0) {
+    console.log(`\n  ⚠️ 以下 (code × bucket) 训练样本 <20，统计功效不足，仅作参考：`);
+    for (const [k, e] of lowPower) {
+      const [code, b] = k.split('\u0000');
+      console.log(`  ${code.padEnd(26)} ${b.padEnd(11)} n=${String(e.n).padStart(4)}  失败率=${((e.fail / e.n) * 100).toFixed(0)}%`);
+    }
   }
   db.close();
 }

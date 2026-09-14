@@ -250,7 +250,7 @@ export default function Dashboard() {
     }))
 
   const weakData = weak
-    ? weak.items.slice(0, 10).map((i) => ({ tag: i.tag, gap: i.gap, acRate: i.acRate }))
+    ? weak.items.slice(0, 10).map((i) => ({ tag: i.tag, gap: i.gap, acRate: i.acRate, attempts: i.attempts }))
     : []
 
   const trendData = (trend ?? []).map((t) => ({
@@ -364,8 +364,31 @@ export default function Dashboard() {
                 <BarChart data={weakData} layout="vertical" margin={{ top: 8, right: 24, left: 40, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={GRID_STROKE} />
                   <XAxis type="number" tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                  <YAxis type="category" dataKey="tag" width={90} tick={{ fontSize: 12, fill: '#6f6f85' }} axisLine={false} tickLine={false} />
-                  <Tooltip {...TOOLTIP_STYLE} formatter={(v, name) => (name === 'gap' ? [`${Number(v) > 0 ? '+' : ''}${Number(v)}`, 'AC 率偏差'] : [String(v), String(name)])} cursor={{ fill: 'rgba(134, 168, 255, 0.05)' }} />
+                  <YAxis
+                    type="category"
+                    dataKey="tag"
+                    width={110}
+                    tick={{ fontSize: 12, fill: '#6f6f85' }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(tag: string, index: number) => {
+                      const d = weakData[index];
+                      return d && d.attempts < 20 ? `${tag} ⚠️` : tag;
+                    }}
+                  />
+                  <Tooltip
+                    {...TOOLTIP_STYLE}
+                    formatter={(v, name) =>
+                      name === 'gap'
+                        ? [`${Number(v) > 0 ? '+' : ''}${Number(v)}`, 'AC 率偏差']
+                        : [String(v), String(name)]
+                    }
+                    labelFormatter={(label: React.ReactNode) => {
+                      const d = weakData.find((x) => x.tag === label)
+                      return d ? `${String(label)}（样本 ${d.attempts}）` : label
+                    }}
+                    cursor={{ fill: 'rgba(134, 168, 255, 0.05)' }}
+                  />
                   <Bar dataKey="gap" radius={[0, 5, 5, 0]} maxBarSize={16}>
                     {weakData.map((d) => (
                       <Cell key={d.tag} fill={gapColorHex(d.gap)} />

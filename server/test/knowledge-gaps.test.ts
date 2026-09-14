@@ -29,6 +29,17 @@ test('gapReport: 已收录标签即使占比很低也不进缺口清单', () => 
   assert.deepEqual(r.gaps, [], '全是已收录标签时不应有缺口');
 });
 
+test('gapReport: manual 标注题不被算作 uncovered', () => {
+  db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
+  db.prepare('INSERT INTO problems (platform,problem_key,title,difficulty,tags) VALUES (?,?,?,1500,?)')
+    .run('codeforces', 'A', 'T', JSON.stringify(['未收录甲']));
+  db.prepare(`INSERT INTO problem_keypoints
+    (platform,problem_key,code,name,confidence,source,method,taxonomy_version,pipeline_version,annotated_at)
+    VALUES ('codeforces','A','misc.sorting','排序',1,'manual','manual',1,1,'2026-01-01')`).run();
+  const r = gapReport(db);
+  assert.equal(r.uncovered, 0, '仅有 manual 标注的题应视为已覆盖');
+});
+
 test('gapReport: uncovered 统计完全无 code 的题数', () => {
   db.prepare("INSERT OR IGNORE INTO platforms (id,name,has_official_api) VALUES ('codeforces','CF',1)").run();
   db.prepare('INSERT INTO problems (platform,problem_key,title,difficulty,tags) VALUES (?,?,?,1500,?)')

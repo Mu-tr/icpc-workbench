@@ -17,6 +17,13 @@ import { loadTaxonomy, nameOfCode } from './taxonomy.ts';
 import { rulesVersion } from './ruleEngine.ts';
 
 /**
+ * 可读的标注来源集合（单一权威）。
+ * AI 已退出清洗模块，因此 `source='ai'` 不参与任何消费端读取；
+ * 所有读取 problem_keypoints 的路径都应使用本集合，避免与 startup purge 形成口径差。
+ */
+export const READABLE_SOURCES_SQL = "source IN ('tag','rule','manual')";
+
+/**
  * 统计端默认置信度阈值。
  * 取 0.6 而非 0.5：规则表最低置信度为 0.6、AI 标注下限已降到 0.35，
  * 阈值 0.5 会让「置信度闸门」在默认配置下拦不住任何一条标注（闸门形同虚设）。
@@ -396,7 +403,9 @@ export function purgeAiAnnotations(
 export function keypointsOfProblem(db: Db, platform: string, problemKey: string): KnowledgePointEntry[] {
   const rows = db
     .prepare(
-      'SELECT code, name, confidence, source, method FROM problem_keypoints WHERE platform = ? AND problem_key = ? ORDER BY confidence DESC',
+      `SELECT code, name, confidence, source, method FROM problem_keypoints
+       WHERE platform = ? AND problem_key = ? AND ${READABLE_SOURCES_SQL}
+       ORDER BY confidence DESC`,
     )
     .all(platform, problemKey) as unknown as KnowledgePointEntry[];
   return rows;
@@ -425,11 +434,11 @@ export function keypointsOfProblem(db: Db, platform: string, problemKey: string)
  */
 export function knowledgeTagsSql(_db: Db): string {
   return (
-    'CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform ' +
-    "AND pk.problem_key = p.problem_key AND pk.source IN ('tag','rule','manual')) " +
-    'THEN (SELECT json_group_array(pk2.name) FROM problem_keypoints pk2 WHERE pk2.platform = p.platform ' +
-    "AND pk2.problem_key = p.problem_key AND pk2.source IN ('tag','rule','manual')) " +
-    'ELSE p.tags END AS tags'
+    `CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform ` +
+    `AND pk.problem_key = p.problem_key AND pk.${READABLE_SOURCES_SQL}) ` +
+    `THEN (SELECT json_group_array(pk2.name) FROM problem_keypoints pk2 WHERE pk2.platform = p.platform ` +
+    `AND pk2.problem_key = p.problem_key AND pk2.${READABLE_SOURCES_SQL}) ` +
+    `ELSE p.tags END AS tags`
   );
 }
 
@@ -441,8 +450,8 @@ export function knowledgeTagsSql(_db: Db): string {
  */
 export function problemKeypointsCte(_db: Db): string {
   return (
-    "pk AS (SELECT platform, problem_key, json_group_array(name) AS tags FROM problem_keypoints " +
-    "WHERE source IN ('tag','rule','manual') GROUP BY platform, problem_key)"
+    `pk AS (SELECT platform, problem_key, json_group_array(name) AS tags FROM problem_keypoints ` +
+    `WHERE ${READABLE_SOURCES_SQL} GROUP BY platform, problem_key)`
   );
 }
 
@@ -470,16 +479,16 @@ export function getCoverage(db: Db): KnowledgeCoverage {
   const total = (db.prepare('SELECT COUNT(*) AS c FROM problems').get() as { c: number }).c;
   const annotated = (
     db
-      .prepare("SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE source IN ('tag','rule','manual') AND confidence >= ? GROUP BY platform, problem_key)")
+      .prepare(`SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE ${READABLE_SOURCES_SQL} AND confidence >= ? GROUP BY platform, problem_key)`)
       .get(t) as { c: number }
   ).c;
   const withAny = (
     db
-      .prepare("SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE source IN ('tag','rule','manual') GROUP BY platform, problem_key)")
+      .prepare(`SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE ${READABLE_SOURCES_SQL} GROUP BY platform, problem_key)`)
       .get() as { c: number }
   ).c;
   const bySourceRows = db
-    .prepare("SELECT source, COUNT(DISTINCT platform || char(31) || problem_key) AS c FROM problem_keypoints WHERE source IN ('tag','rule','manual') GROUP BY source")
+    .prepare(`SELECT source, COUNT(DISTINCT platform || char(31) || problem_key) AS c FROM problem_keypoints WHERE ${READABLE_SOURCES_SQL} GROUP BY source`)
     .all() as Array<{ source: KnowledgeSource; c: number }>;
   const bySource: Record<KnowledgeSource, number> = { tag: 0, rule: 0, ai: 0, manual: 0 };
   for (const row of bySourceRows) bySource[row.source] = row.c;

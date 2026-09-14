@@ -244,11 +244,13 @@ POST /api/knowledge/build         # 触发 L1 规则批跑 + 题源标签映射�
 GET  /api/knowledge/coverage      # 覆盖率报告（total / annotated / uncovered / bySource / 阈值）
 GET  /api/knowledge/gaps          # 词表缺口报告（无法映射的题源标签 → 影响题数）
 POST /api/knowledge/recompute-stats # 重算概念统计（覆盖率与信息量）
-POST /api/knowledge/threshold     # 设置统计端置信度阈值（body: { value: 0..1 }；影响掌握度地图 / 题单统计）
+POST /api/knowledge/threshold     # 设置统计端置信度阈值（body: { value: 0..1 }；影响掌握度地图 / 题单统计 / 覆盖率已标注数 / 双口径对比未覆盖桶）
 GET  /api/knowledge/taxonomy      # 知识点体系全量
 GET  /api/knowledge/problem/:platform/:key # 单题当前标注
 PUT  /api/knowledge/:platform/:key # L3 人工校正（body: { codes: string[] }）
 GET  /api/knowledge/compare        # tag 口径 vs 知识点口径弱项对比
+GET  /api/knowledge/sample         # 批跑后随机抽检清单（?rate=0.01）
+GET  /api/knowledge/meta           # 管线版本与规则/知识点数量
 POST /api/problems/:platform/:key/intent  # 记录用户声明的卡点（body: { outcome, code? }）
 GET  /api/problems/:platform/:key/intents # 该题卡点记录
 GET  /api/checkins?month=YYYY-MM  # 月打卡视图

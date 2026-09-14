@@ -92,8 +92,8 @@ CREATE TABLE IF NOT EXISTS problem_keypoints (
 );
 CREATE INDEX IF NOT EXISTS idx_problem_keypoints_code ON problem_keypoints(code, confidence);
 
--- L2 AI 待标注队列：L1 未命中的题入队持久化，批跑中断后续跑。
--- status: pending / done / uncertain（AI 也判不出，不硬贴）/ failed（可重试）
+-- 词表缺口队列：L1 未命中的题入队持久化，用于生成 gap 报告。
+-- status: pending / done / uncertain（暂无法映射，需补同义组）/ failed（可重试）
 CREATE TABLE IF NOT EXISTS knowledge_queue (
   platform    TEXT NOT NULL,
   problem_key TEXT NOT NULL,

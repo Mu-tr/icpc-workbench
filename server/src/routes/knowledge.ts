@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import type { Db } from '../db/index.ts';
-import type { AiConfig } from '../config.ts';
 import type { KnowledgeCompareReport } from '../../../shared/src/index.ts';
 import { PLATFORMS } from '../../../shared/src/index.ts';
 import { asyncHandler } from '../asyncHandler.ts';
@@ -10,6 +9,7 @@ import {
   getConfidenceThreshold,
   getCoverage,
   keypointsOfProblem,
+  READABLE_SOURCES_SQL,
   setConfidenceThreshold,
   setManualKeypoints,
 } from '../knowledge/store.ts';
@@ -19,7 +19,7 @@ import { recomputeConceptStats } from '../knowledge/conceptStats.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
 import { rate } from '../analysis/stats.ts';
 
-export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
+export function knowledgeRoutes(db: Db): Router {
   const r = Router();
 
   // POST /api/knowledge/build  body: { rerun?: boolean }
@@ -31,7 +31,7 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
     res.json({ ...result, coverage: getCoverage(db) });
   }));
 
-  // GET /api/knowledge/coverage → 覆盖率报告（题库页「待标注 N 题」与覆盖率展示）
+  // GET /api/knowledge/coverage → 覆盖率报告（总题数 / 已标注 / 未覆盖 / 来源分布 / 阈值）
   r.get('/coverage', (_req, res) => {
     res.json(getCoverage(db));
   });
@@ -42,8 +42,8 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
     res.json(gapReport(db, Number.isInteger(limit) ? { limit: Math.min(500, Math.max(1, limit)) } : {}));
   });
 
-  // POST /api/knowledge/recompute-stats → 重算概念统计（覆盖率与信息量）
-  // 题库 upsert 后由写入路径异步触发；此处供手动修复与 UI 刷新
+  // POST /api/knowledge/recompute-stats → 重算概念统计（覆盖率与信息量）。
+  // 当前没有 upsert 触发钩子的概念统计自动重算；此接口供手动修复与 UI 刷新触发。
   r.post('/recompute-stats', (_req, res) => {
     const written = recomputeConceptStats(db);
     res.json({ ok: true, concepts: written, computedAt: new Date().toISOString() });
@@ -98,6 +98,7 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
          WHERE s.user_id = ? AND NOT EXISTS (
            SELECT 1 FROM problem_keypoints pk
            WHERE pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ?
+             AND ${READABLE_SOURCES_SQL}
          )`,
       )
       .get(DEFAULT_USER_ID, t) as { attempts: number; ac: number };
@@ -118,16 +119,17 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
   r.get('/sample', (req, res) => {
     const rate01 = Math.min(1, Math.max(0.001, Number(req.query.rate) || 0.01));
     const annotatedCount = (
-      db.prepare('SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints GROUP BY platform, problem_key)').get() as { c: number }
+      db.prepare(`SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE ${READABLE_SOURCES_SQL} GROUP BY platform, problem_key)`).get() as { c: number }
     ).c;
     const n = Math.max(1, Math.round(annotatedCount * rate01));
     const rows = db
       .prepare(
         `SELECT platform, problem_key AS problemKey, code, name, confidence, source, method
          FROM problem_keypoints
-         WHERE (platform, problem_key) IN (
-           SELECT platform, problem_key FROM problem_keypoints GROUP BY platform, problem_key ORDER BY RANDOM() LIMIT ?
-         )
+         WHERE ${READABLE_SOURCES_SQL}
+           AND (platform, problem_key) IN (
+             SELECT platform, problem_key FROM problem_keypoints WHERE ${READABLE_SOURCES_SQL} GROUP BY platform, problem_key ORDER BY RANDOM() LIMIT ?
+           )
          ORDER BY platform, problem_key, confidence DESC`,
       )
       .all(n) as unknown as Array<Record<string, unknown>>;

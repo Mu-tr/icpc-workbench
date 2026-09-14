@@ -70,7 +70,7 @@ app.use('/api/stats', statsRoutes(db));
 app.use('/api/plans', plansRoutes(db, () => aiConfigFromDb(db, config)));
 app.use('/api/ai', aiRoutes(db, () => aiConfigFromDb(db, config)));
 app.use('/api/lists', listsRoutes(db, () => aiConfigFromDb(db, config)));
-app.use('/api/knowledge', knowledgeRoutes(db, () => aiConfigFromDb(db, config)));
+app.use('/api/knowledge', knowledgeRoutes(db));
 app.use('/api/export', exportRoutes(db));
 app.use('/api/problems', problemsRoutes(db));
 app.use('/api/reviews', reviewsRoutes(db));

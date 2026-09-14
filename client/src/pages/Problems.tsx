@@ -43,7 +43,7 @@ interface TaxonomyDoc {
 /** POST /api/knowledge/build 响应（L1 摘要 + 最新覆盖率） */
 interface BuildResp {
   ok: boolean
-  l1?: { scanned: number; annotated: number; enqueued: number; skippedManual: number }
+  l1?: { scanned: number; annotated: number; tagAnnotated: number; enqueued: number; skippedManual: number }
   conceptStats?: number
   coverage: KnowledgeCoverage
 }
@@ -245,7 +245,8 @@ export default function Problems() {
       const r = await post<BuildResp>('/api/knowledge/build', body)
       if (r.l1) {
         message.success(
-          `L1 扫描 ${r.l1.scanned} 题：命中落库 ${r.l1.annotated}，入 L2 队列 ${r.l1.enqueued}` +
+          `L1 扫描 ${r.l1.scanned} 题：规则命中落库 ${r.l1.annotated}，题源标签映射 ${r.l1.tagAnnotated}，` +
+            `规则未命中入队 ${r.l1.enqueued}` +
             (r.l1.skippedManual ? `，跳过人工标注 ${r.l1.skippedManual}` : ''),
         )
       }

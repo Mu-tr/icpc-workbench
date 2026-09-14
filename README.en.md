@@ -238,11 +238,13 @@ POST /api/knowledge/build         # Run L1 rules + source-tag mapping (body: { r
 GET  /api/knowledge/coverage      # Coverage report (total / annotated / uncovered / bySource / threshold)
 GET  /api/knowledge/gaps          # Vocabulary gap report (unmapped source tags → affected problem count)
 POST /api/knowledge/recompute-stats # Recompute concept stats (coverage & information content)
-POST /api/knowledge/threshold     # Set statistical confidence threshold (body: { value: 0..1 }; affects mastery map & list stats)
+POST /api/knowledge/threshold     # Set statistical confidence threshold (body: { value: 0..1 }; affects mastery map, list stats, coverage annotated count, and compare uncovered bucket)
 GET  /api/knowledge/taxonomy      # Full knowledge taxonomy
 GET  /api/knowledge/problem/:platform/:key # Current annotations for a problem
 PUT  /api/knowledge/:platform/:key # L3 manual correction (body: { codes: string[] })
 GET  /api/knowledge/compare        # Tag-caliber vs knowledge-caliber weakness comparison
+GET  /api/knowledge/sample         # Post-build random sample list (?rate=0.01)
+GET  /api/knowledge/meta           # Pipeline/rules/knowledge-point metadata
 POST /api/problems/:platform/:key/intent  # Record user-reported stuck point (body: { outcome, code? })
 GET  /api/problems/:platform/:key/intents # Stuck-point records for a problem
 GET  /api/checkins?month=YYYY-MM  # Monthly check-in view

@@ -17,7 +17,7 @@ import type { Db } from '../db/index.ts';
 import { fetchRows, rate, round2, safeTags } from './stats.ts';
 import { filterNoiseTags } from './tags.ts';
 import { allPoints } from '../knowledge/taxonomy.ts';
-import { getConfidenceThreshold } from '../knowledge/store.ts';
+import { getConfidenceThreshold, READABLE_SOURCES_SQL } from '../knowledge/store.ts';
 
 const RECENT_WINDOW_DAYS = 56;
 
@@ -124,7 +124,7 @@ export function computeMastery(db: Db, userId: number, opts: MasteryOptions = {}
       `SELECT s.platform, s.verdict, s.submitted_at, p.problem_key, pk.code
        FROM submissions s
        JOIN problems p ON s.problem_id = p.id
-       JOIN problem_keypoints pk ON pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ?
+       JOIN problem_keypoints pk ON pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ? AND pk.${READABLE_SOURCES_SQL}
        WHERE s.user_id = ?`,
     )
     .all(threshold, userId) as unknown as Array<{
@@ -141,7 +141,7 @@ export function computeMastery(db: Db, userId: number, opts: MasteryOptions = {}
   // 2) 未覆盖回退：无达标标注的提交按净化 tag 聚合；与 taxonomy 同名的并入对应 code
   const nameToCode = new Map(allPoints().map((p) => [p.name, p.code]));
   const fallbackSql =
-    `CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ${threshold}) ` +
+    `CASE WHEN EXISTS (SELECT 1 FROM problem_keypoints pk WHERE pk.platform = p.platform AND pk.problem_key = p.problem_key AND pk.confidence >= ${threshold} AND pk.${READABLE_SOURCES_SQL}) ` +
     `THEN '[]' ELSE p.tags END AS tags`;
   const fallbackRows = fetchRows(db, userId, {}, fallbackSql);
   const byTag = new Map<string, Acc>();

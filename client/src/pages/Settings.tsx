@@ -831,7 +831,7 @@ function KnowledgePipelineCard() {
     try {
       const r = await post<{ threshold: number }>('/api/knowledge/threshold', { value: v })
       setThreshold(r.threshold)
-      message.success(`阈值已保存：${r.threshold}（掌握度地图与题单统计口径即时生效；弱项画像不受此阈值影响）`)
+      message.success(`阈值已保存：${r.threshold}（掌握度地图、题单统计、覆盖率已标注数、双口径对比未覆盖桶即时生效；弱项画像不受此阈值影响）`)
     } catch (e) {
       message.error((e as Error).message)
     } finally {

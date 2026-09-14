@@ -9,7 +9,7 @@ import { getAdapter } from '../adapters/registry.ts';
 import { parseProblemListText } from '../problems/parseProblemList.ts';
 import { classifyTitle } from '../knowledge/ruleEngine.ts';
 import { nameOfCode } from '../knowledge/taxonomy.ts';
-import { getConfidenceThreshold } from '../knowledge/store.ts';
+import { getConfidenceThreshold, READABLE_SOURCES_SQL } from '../knowledge/store.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
 import { buildPracticeSummary, renderSummaryForPrompt } from '../analysis/summary.ts';
 import { effectiveAbility } from '../today/ability.ts';
@@ -135,6 +135,7 @@ function classifyItemsBatch(
                    ROW_NUMBER() OVER (PARTITION BY platform, problem_key ORDER BY confidence DESC) AS rn
               FROM problem_keypoints
              WHERE confidence >= ?
+               AND ${READABLE_SOURCES_SQL}
                AND platform IN (${placeholders(allPlatforms.length)})
                AND problem_key IN (${placeholders(allKeys.length)})
           ) WHERE rn = 1`,
