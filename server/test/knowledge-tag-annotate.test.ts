@@ -301,6 +301,37 @@ test('人工校正后重启重建：该题不得复活任何 tag 行（清除快
     setManualKeypoints(db1, 'codeforces', '8A', ['dp.general']);
     assert.deepEqual(codeSourcesOf('8A', db1), ['dp.general:manual']);
 
+    // 写序：JSONL 是源真相，manual 快照行必须**先于**其它来源的墓碑行落盘。
+    // 反序时崩溃落在两次 append 之间 → 文件里只有墓碑、没有 manual 行，下次重放
+    // 会把用户显式做出的校正永久抹掉（不可逆）。这里直接钉住文件行序。
+    const jsonl = (problemKey: string): Array<{ writeSource: string; knowledgePoints: unknown[] }> =>
+      fs
+        .readFileSync(annotationsPath(dataDir), 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { problemKey: string; writeSource: string; knowledgePoints: unknown[] })
+        .filter((l) => l.problemKey === problemKey);
+    // 该题此前已被上一段 runRulePass 写过 rule/tag 快照；只看**本次校正**追加的那一段
+    // （manual 快照 + rule/tag/ai 三个墓碑），否则会被更早的行误判。
+    const correction = jsonl('8A').slice(-4);
+    assert.deepEqual(
+      correction.map((l) => l.writeSource),
+      ['manual', 'rule', 'tag', 'ai'],
+      `人工校正的追加顺序必须是 manual 快照在前、其余来源墓碑在后，实得 ${correction.map((l) => l.writeSource).join(',')}`,
+    );
+    assert.ok(
+      correction[0].knowledgePoints.length > 0,
+      'manual 首行必须是带点位的快照，不是空墓碑',
+    );
+    for (const tombstone of correction.slice(1)) {
+      assert.equal(
+        tombstone.knowledgePoints.length,
+        0,
+        `${tombstone.writeSource} 行应为空墓碑（清除快照）`,
+      );
+    }
+
     // 源真相重放：tag 层不会重访 manual 题，若清除快照漏了 tag，这里会复活基本贪心
     const db2 = createDb(':memory:');
     try {
@@ -316,6 +347,47 @@ test('人工校正后重启重建：该题不得复活任何 tag 行（清除快
   } finally {
     db1.close();
     initKnowledgeStore(null);
+  }
+});
+
+test('人工校正：JSONL 追加失败时整题回滚，库内不留半成品', () => {
+  // 让 appendAnnotations 必然抛错：把 dataDir 的父级占成普通文件 → mkdirSync(dirname) ENOTDIR
+  // （不需要 chmod 技巧，跨平台稳定；appendAnnotations 写的是 <dataDir>/knowledge/annotations.jsonl）
+  const blocker = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-append-fail-'));
+  const blockedDataDir = path.join(blocker, 'blocked');
+  fs.writeFileSync(blockedDataDir, 'not a directory', 'utf8');
+
+  const db1 = createDb(':memory:');
+  try {
+    db1
+      .prepare("INSERT INTO problems (platform,problem_key,title,difficulty,tags) VALUES ('codeforces','10A','A. 线段树',1500,?)")
+      .run(JSON.stringify(['贪心']));
+    runRulePass(db1, { dataDir: null });
+    const before = db1
+      .prepare("SELECT code, source FROM problem_keypoints WHERE platform='codeforces' AND problem_key='10A' ORDER BY code, source")
+      .all() as Array<{ code: string; source: string }>;
+    assert.deepEqual(before.map((r) => `${r.code}:${r.source}`), ['basic.greedy:tag', 'ds.segtree:rule']);
+
+    assert.throws(
+      () => setManualKeypoints(db1, 'codeforces', '10A', ['dp.general'], { dataDir: blockedDataDir }),
+      'JSONL 追加失败必须向上抛出，不能静默吞掉',
+    );
+
+    // 修前：DELETE + 写库发生在事务之外，append 抛错后库已被改成 manual，
+    // 而源真相里什么都没有 → 重启重放会把这次校正抹掉。修后必须整题回滚。
+    const after = db1
+      .prepare("SELECT code, source FROM problem_keypoints WHERE platform='codeforces' AND problem_key='10A' ORDER BY code, source")
+      .all() as Array<{ code: string; source: string }>;
+    assert.deepEqual(after, before, '追加失败后库内标注必须与调用前完全一致（事务回滚）');
+
+    // 回滚后连接仍可用：紧接着的一次成功调用照常生效
+    const okDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-append-ok-'));
+    setManualKeypoints(db1, 'codeforces', '10A', ['dp.general'], { dataDir: okDir });
+    assert.deepEqual(codeSourcesOf('10A', db1), ['dp.general:manual']);
+    fs.rmSync(okDir, { recursive: true, force: true });
+  } finally {
+    db1.close();
+    fs.rmSync(blocker, { recursive: true, force: true });
   }
 });
 

@@ -160,29 +160,6 @@ export function annotateProblemsL1(
 }
 
 /**
- * 标题变更导致的 rule 标注陈旧 → 重新标记为待差量重跑。
- * 只在问题有**标题指纹**且与当前标题不符时触发：旧版 AI 标注（annotated_title 为 NULL）
- * 无法判定是否陈旧，故不在这里动它们。
- * 需要全量重标时走「知识点管线 → 差量重跑」的显式入口。
- */
-export function requeueStaleAiByTitle(db: Db): number {
-  const info = db
-    .prepare(
-      `UPDATE knowledge_queue
-       SET status = 'pending', attempts = 0, last_error = NULL, updated_at = datetime('now')
-       WHERE status != 'pending' AND EXISTS (
-         SELECT 1 FROM problem_keypoints k
-         JOIN problems p ON p.platform = k.platform AND p.problem_key = k.problem_key
-         WHERE k.platform = knowledge_queue.platform AND k.problem_key = knowledge_queue.problem_key
-           AND k.source = 'ai'
-           AND k.annotated_title IS NOT NULL AND k.annotated_title != p.title
-       )`,
-    )
-    .run();
-  return Number(info.changes ?? 0);
-}
-
-/**
  * 全量 / 差量 L1 批跑。
  * - 默认：只扫无任何标注的题（增量）
  * - rerun：重跑 rule 来源中「管线/规则/taxonomy 版本落后」或「标题已变更」的题（差量重跑）
@@ -191,13 +168,6 @@ export function runRulePass(
   db: Db,
   opts: { dataDir?: string | null; limit?: number; rerun?: boolean } = {},
 ): L1RunResult {
-  if (opts.rerun) {
-    const requeued = requeueStaleAiByTitle(db);
-    if (requeued > 0) {
-      // 标题被修复后旧 rule 标注同样陈旧：仅重新排入词表缺口队列（不调用 AI，无 Key 时也能安全跑完 L1）
-      console.info(`[knowledge] 标题变更导致 ${requeued} 题的 rule 标注失效，已重新排入词表缺口队列`);
-    }
-  }
   const taxonomyVersion = loadTaxonomy().version;
   const limit = opts.limit ?? 20000;
   const rows = opts.rerun

@@ -354,21 +354,36 @@ export function setManualKeypoints(
     if (nameOfCode(code) === null) throw new Error(`未知知识点 code: ${code}`);
     return { code, confidence: 1, method: 'manual' };
   });
-  // 人工校正清除该题全部旧来源标注后写 manual（校正即定论）；
-  // rule/tag/ai 各补一行清除快照，防止 JSONL 重放时复活旧来源标注
-  // （tag 层不会重访 manual 题，漏掉 tag 墓碑 = 被清除的 tag 行下次启动原样复活）
-  db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(platform, problemKey);
-  const result = writeAnnotationsToDb(db, [{ platform, problemKey, source: 'manual', points }]);
+  // dataDir 语义与 purgeAiAnnotations 不同（此处是既有契约，勿改）：显式 null 与
+  // undefined 都回退到模块级默认目录（本用例的既有调用方依赖 `dataDir: null` = 不写 JSONL，
+  // 见 test/knowledge-store.test.ts 的 21B 用例）——因此这里保留 resolveDataDir。
   const dataDir = resolveDataDir(opts.dataDir);
-  if (dataDir) {
-    appendAnnotations(dataDir, [
-      tombstoneLine(platform, problemKey, 'rule'),
-      tombstoneLine(platform, problemKey, 'tag'),
-      tombstoneLine(platform, problemKey, 'ai'),
-      ...result.lines,
-    ]);
+  db.exec('BEGIN');
+  try {
+    // 人工校正清除该题全部旧来源标注后写 manual（校正即定论）；
+    // rule/tag/ai 各补一行清除快照，防止 JSONL 重放时复活旧来源标注
+    // （tag 层不会重访 manual 题，漏掉 tag 墓碑 = 被清除的 tag 行下次启动原样复活）
+    db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(platform, problemKey);
+    const result = writeAnnotationsToDb(db, [{ platform, problemKey, source: 'manual', points }]);
+    if (dataDir) {
+      // ⚠️ 写序：manual 快照行必须**先于**其它来源的墓碑行。JSONL 是源真相，崩溃可能落在
+      // 两次 append 之间；先写 manual 才能让「用户显式校正」在任何截断点上都已落盘，
+      // 重放最多让被清除的 rule/tag 旧行回来（可再校正），绝不会丢掉人工校正本身。
+      // 反过来（墓碑在前）则截断后 JSONL 只剩墓碑、没有 manual 行 → 启动重放把用户
+      // 的显式校正永久抹掉（不可逆的数据损失）。
+      appendAnnotations(dataDir, [
+        ...result.lines,
+        tombstoneLine(platform, problemKey, 'rule'),
+        tombstoneLine(platform, problemKey, 'tag'),
+        tombstoneLine(platform, problemKey, 'ai'),
+      ]);
+    }
+    db.exec('COMMIT');
+    return { lines: result.lines };
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
   }
-  return { lines: result.lines };
 }
 
 /** AI 退出知识点清洗模块：删除全部 source='ai' 的标注，并向 JSONL 源真相追加 tombstone 防止复活。
