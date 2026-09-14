@@ -17,6 +17,7 @@ import {
 import { PIPELINE_CODE_VERSION, pendingAiCount, pipelineVersion, retryFailedQueue, runRulePass } from '../knowledge/pipeline.ts';
 import { loadRules, rulesVersion } from '../knowledge/ruleEngine.ts';
 import { exportQueuePackage, importAiResults, runAiPass } from '../knowledge/aiClassify.ts';
+import { recomputeConceptStats } from '../knowledge/conceptStats.ts';
 import { computeWeakness } from '../analysis/weakness.ts';
 import { rate } from '../analysis/stats.ts';
 
@@ -32,6 +33,7 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
     const result: Record<string, unknown> = { ok: true, mode };
     if (mode !== 'l2') {
       result.l1 = runRulePass(db, { rerun });
+      result.conceptStats = recomputeConceptStats(db);
     }
     if (mode !== 'l1') {
       const provider = new AiProvider(getAiConfig());
@@ -48,6 +50,13 @@ export function knowledgeRoutes(db: Db, getAiConfig: () => AiConfig): Router {
   // GET /api/knowledge/coverage → 覆盖率报告（题库页「待标注 N 题」与覆盖率展示）
   r.get('/coverage', (_req, res) => {
     res.json(getCoverage(db));
+  });
+
+  // POST /api/knowledge/recompute-stats → 重算概念统计（覆盖率与信息量）
+  // 题库 upsert 后由写入路径异步触发；此处供手动修复与 UI 刷新
+  r.post('/recompute-stats', (_req, res) => {
+    const written = recomputeConceptStats(db);
+    res.json({ ok: true, concepts: written, computedAt: new Date().toISOString() });
   });
 
   // GET /api/knowledge/taxonomy → 知识点体系全量（人工校正 UI 的候选树）

@@ -120,6 +120,24 @@ CREATE TABLE IF NOT EXISTS knowledge_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_queue_status ON knowledge_queue(status, enqueued_at);
 
+-- 知识点概念的统计特征（物化缓存）：按难度桶记录每个 code 的覆盖率与信息量。
+-- 用途：题源标签存在「低难度题 40% 标贪心」式的膨胀（见清洗重构 spec §2.2），
+-- 直接用于弱项判断会稀释信号；本表把「覆盖」与「信息量」分开：
+-- 粗概念提供覆盖，informativeness 决定它在下游的权重。
+-- bucket 取值与 routes/problems.ts 的 DIFFICULTY_BUCKETS 同口径（含 '未知'）。
+-- informativeness 列存原始 1 - H_b(share)，下限 FLOOR 由消费端在取用时施加，
+-- 这样表内可保留低于 FLOOR 的实测值，也便于复现 spec §2.2 的表格。
+CREATE TABLE IF NOT EXISTS knowledge_concept_stats (
+  code            TEXT NOT NULL,
+  bucket          TEXT NOT NULL,
+  problem_count   INTEGER NOT NULL,
+  share           REAL NOT NULL,      -- 该桶内含此 code 的题数 / 该桶总题数
+  informativeness REAL NOT NULL,      -- 原始 1 - H_b(share)，由消费端夹到 FLOOR
+  computed_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (code, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_concept_stats_bucket ON knowledge_concept_stats(bucket);
+
 CREATE TABLE IF NOT EXISTS submissions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id      INTEGER NOT NULL REFERENCES users(id),
