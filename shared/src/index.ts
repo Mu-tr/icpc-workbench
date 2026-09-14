@@ -161,6 +161,12 @@ export interface WeaknessItem {
   avgAcRate: number;
   /** avg - self，正值表示弱于总体平均 */
   gap: number;
+  /**
+   * 排序得分 = gap × 概念信息量权重（见 knowledge/conceptStats.ts）。
+   * 低信息量的膨胀标签（如低难度题的「数学」覆盖 24.8%）被降权后排到后面；
+   * gap 本身保持不变，仍是原始可观测的 AC 率差值。
+   */
+  rank: number;
   solved: number;
 }
 

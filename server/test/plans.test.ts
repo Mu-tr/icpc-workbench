@@ -146,7 +146,7 @@ test('parsePlanJson drops tasks outside the plan window', () => {
 });
 
 test('templatePlan covers each day with periodic review/contest', () => {
-  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 14);
+  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, rank: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 14);
   assert.equal(p.days, 14);
   assert.equal(p.tasks.length >= 14, true);
   assert.ok(p.tasks.some((t) => t.kind === 'review'));
@@ -156,7 +156,7 @@ test('templatePlan covers each day with periodic review/contest', () => {
 
 test('templatePlan picks concrete problems with clickable links', () => {
   seed();
-  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 7);
+  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, rank: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 7);
   const practice = p.tasks.filter((t) => t.kind === 'practice');
   assert.ok(practice.length > 0);
   // 每日练习任务优先关联具体题目与可点击链接（仅未 AC 的题可入选：D）；
@@ -173,8 +173,8 @@ test('templatePlan does not repeat the same problem across weak tags', () => {
   ]);
   const profile = {
     items: [
-      { tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, solved: 1 },
-      { tag: '图论', attempts: 4, ac: 1, acRate: 25, avgAcRate: 60, gap: 35, solved: 1 },
+      { tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, rank: 40, solved: 1 },
+      { tag: '图论', attempts: 4, ac: 1, acRate: 25, avgAcRate: 60, gap: 35, rank: 35, solved: 1 },
     ],
     byDifficulty: [],
     generatedAt: '',
@@ -201,7 +201,7 @@ test('savePlan falls back to problem url when task lacks url', () => {
 
 test('templatePlan attaches clickable urls to every task kind (practice/contest/review)', () => {
   seed();
-  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 14);
+  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, rank: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 14);
   // contest（第 7/14 天）与 review（第 4/8/12 天）任务都应有链接；practice 落到具体题
   const contest = p.tasks.filter((t) => t.kind === 'contest');
   const review = p.tasks.filter((t) => t.kind === 'review');
@@ -221,7 +221,7 @@ test('templatePlan keeps picking concrete problems after per-tag pool drains', (
   insertNormalized(db, 1, [
     sub('codeforces', 'F', 'WA', ['math'], 1550, '2026-07-28T16:00:00.000Z', 'https://codeforces.com/contest/F'),
   ]);
-  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 7);
+  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, rank: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 7);
   const practice = p.tasks.filter((t) => t.kind === 'practice');
   const withProblem = practice.filter((t) => t.problemKey && t.url);
   // D（dp 队列）+ F（dp 用尽后的全库兜底）都被选中且带链接
@@ -323,7 +323,7 @@ test('templatePlan honors dailyTasks density (concrete problems, no duplicate sa
       return sub('codeforces', key, 'WA', ['dp'], 1500, `2026-07-28T1${i % 10}:00:00.000Z`, `https://codeforces.com/contest/${key}`);
     }),
   );
-  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 7, 3);
+  const p = templatePlan(db, { items: [{ tag: '动态规划', attempts: 5, ac: 1, acRate: 20, avgAcRate: 60, gap: 40, rank: 40, solved: 1 }], byDifficulty: [], generatedAt: '' }, '2026-08-10', 7, 3);
   // 每天任务数指练习题密度：回顾/模拟赛按既有节奏额外穿插
   const practiceByDate = new Map<string, string[]>();
   for (const t of p.tasks) {
@@ -434,6 +434,7 @@ const PROFILE = (tags: string[]) => ({
     acRate: 33.3,
     avgAcRate: 60,
     gap: 26.7 - i, // 依次递减，tag[0] 最弱
+    rank: 26.7 - i,
     solved: 2,
   })),
   byDifficulty: [],

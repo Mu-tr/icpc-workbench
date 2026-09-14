@@ -3,7 +3,7 @@ import type {
   WeaknessItem,
   WeaknessProfile,
 } from '../../../shared/src/index.ts';
-import { canonicalTag } from '../../../shared/src/index.ts';
+import { canonicalTag, codeOfTag } from '../../../shared/src/index.ts';
 import type { Db } from '../db/index.ts';
 import {
   bump,
@@ -15,6 +15,7 @@ import {
   type MutableStat,
 } from './stats.ts';
 import { filterNoiseTags } from './tags.ts';
+import { informativenessFor } from '../knowledge/conceptStats.ts';
 
 export type { DifficultyWeakness, WeaknessItem, WeaknessProfile };
 
@@ -59,18 +60,24 @@ export function computeWeakness(
   const items: WeaknessItem[] = [...tagMap.entries()]
     .map(([tag, s]) => {
       const acRate = rate(s.attempts, s.ac);
+      const gap = round2(avgAcRate - acRate);
+      // 该 tag 对应的概念 code（粗类标签如「数学（综合）」也能取到）；
+      // 取不到 code 时权重按 1 处理（不惩罚未纳入 taxonomy 的标签）
+      const code = codeOfTag(tag);
+      const weight = code === undefined ? 1 : averageWeightForCode(db, userId, code);
       return {
         tag,
         attempts: s.attempts,
         ac: s.ac,
         acRate,
         avgAcRate,
-        gap: round2(avgAcRate - acRate),
+        gap,
+        rank: round2(gap * weight),
         solved: solvedByTag.get(tag)?.size ?? 0,
       };
     })
     .filter((i) => i.attempts >= minAttempts)
-    .sort((a, b) => b.gap - a.gap)
+    .sort((a, b) => b.rank - a.rank)
     .slice(0, topN);
 
   const diffMap = new Map<string, MutableStat>();
@@ -86,4 +93,27 @@ export function computeWeakness(
     .sort((a, b) => b.gap - a.gap);
 
   return { items, byDifficulty, generatedAt: new Date().toISOString() };
+}
+
+/**
+ * 同一概念横跨多个难度桶时，按用户在**各桶的尝试数**加权平均其信息量权重。
+ * 只用到该用户实际做过的题所在桶，避免把用户从未接触的难度区间的膨胀也计入。
+ */
+function averageWeightForCode(db: Db, userId: number, code: string): number {
+  const rows = db
+    .prepare(
+      `SELECT p.difficulty AS difficulty, COUNT(*) AS attempts
+         FROM submissions s JOIN problems p ON p.id = s.problem_id
+        WHERE s.user_id = ?
+        GROUP BY p.difficulty`,
+    )
+    .all(userId) as unknown as Array<{ difficulty: number | null; attempts: number }>;
+  let total = 0;
+  let weighted = 0;
+  for (const r of rows) {
+    const w = informativenessFor(db, bucketForDifficulty(r.difficulty), code);
+    total += r.attempts;
+    weighted += r.attempts * w;
+  }
+  return total === 0 ? 1 : weighted / total;
 }
