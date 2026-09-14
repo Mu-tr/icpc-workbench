@@ -22,10 +22,12 @@ import type { ColumnsType } from 'antd/es/table'
 import { useSearchParams } from 'react-router-dom'
 import type { KnowledgeCoverage, KnowledgePointEntry, PlatformId } from '../../../shared/src/index.ts'
 import { PLATFORMS } from '../../../shared/src/index.ts'
+import IntentPopover from '../components/IntentPopover'
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
 import { difficultyColor, PLATFORM_COLOR, tagColor } from '../ui'
 import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
+import { codeOptionsFromTags } from '../intentOptions'
 import { get, post, put } from '../api'
 import { saveUrlAsFile } from '../download'
 
@@ -713,6 +715,17 @@ export default function Problems() {
           </Tooltip>
           <Tooltip title="人工校正知识点（L3，重跑管线不覆盖）">
             <Button size="small" type="text" icon={<EditOutlined />} onClick={() => void openKpEditor(r)} />
+          </Tooltip>
+          <Tooltip title="记录你卡在哪，用于弱项判断">
+            <span>
+              <IntentPopover
+                platform={r.platform}
+                problemKey={r.problem_key}
+                codeOptions={codeOptionsFromTags(r.tags)}
+                onSuccess={(m) => message.success(m)}
+                onError={(m) => message.error(m)}
+              />
+            </span>
           </Tooltip>
         </Space>
       ),
