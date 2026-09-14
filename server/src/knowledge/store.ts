@@ -422,8 +422,6 @@ export function keypointsOfProblem(db: Db, platform: string, problemKey: string)
  * confidence 不再作为可信度门槛（该字段已降级为来源内排序权重）；
  * 因此本函数不再读取知识库阈值设置。
  *
- * `intent`（spec §1.2 的「用户声明的卡点」，计划 Task 7 落库）尚无写入方，
- * 待其上线时需同步加入本过滤。
  */
 export function knowledgeTagsSql(_db: Db): string {
   return (
@@ -454,7 +452,7 @@ export function knowledgeTagsJoinSql(): string {
 }
 
 /**
- * 二来源回退的 tags 列（配合 knowledgeTagsJoinSql 使用），别名必须为 p。
+ * 三来源回退的 tags 列（配合 knowledgeTagsJoinSql 使用），别名必须为 p。
  * ⚠️ 仅返回题源 tags 回退值 —— pk 侧的名称数组在调用方需另行透传，
  * 本函数保留 `AS tags` 形态以兼容既有 problems.ts 用法。
  */
@@ -472,27 +470,16 @@ export function getCoverage(db: Db): KnowledgeCoverage {
   const total = (db.prepare('SELECT COUNT(*) AS c FROM problems').get() as { c: number }).c;
   const annotated = (
     db
-      .prepare('SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE confidence >= ? GROUP BY platform, problem_key)')
+      .prepare("SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE source IN ('tag','rule','manual') AND confidence >= ? GROUP BY platform, problem_key)")
       .get(t) as { c: number }
   ).c;
   const withAny = (
     db
-      .prepare('SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints GROUP BY platform, problem_key)')
+      .prepare("SELECT COUNT(*) AS c FROM (SELECT 1 FROM problem_keypoints WHERE source IN ('tag','rule','manual') GROUP BY platform, problem_key)")
       .get() as { c: number }
   ).c;
-  const pending = (
-    db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'pending'").get() as { c: number }
-  ).c;
-  // 重试中（pending 且已失败过至少一次）与已放弃（attempts 超限转 failed）：两者此前都不可见，
-  // 用户只看到 pending 数字不降却不知道是「排着队」还是「反复失败」
-  const retrying = (
-    db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'pending' AND attempts > 0").get() as { c: number }
-  ).c;
-  const failed = (
-    db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'failed'").get() as { c: number }
-  ).c;
   const bySourceRows = db
-    .prepare('SELECT source, COUNT(DISTINCT platform || char(31) || problem_key) AS c FROM problem_keypoints GROUP BY source')
+    .prepare("SELECT source, COUNT(DISTINCT platform || char(31) || problem_key) AS c FROM problem_keypoints WHERE source IN ('tag','rule','manual') GROUP BY source")
     .all() as Array<{ source: KnowledgeSource; c: number }>;
   const bySource: Record<KnowledgeSource, number> = { tag: 0, rule: 0, ai: 0, manual: 0 };
   for (const row of bySourceRows) bySource[row.source] = row.c;
@@ -500,9 +487,6 @@ export function getCoverage(db: Db): KnowledgeCoverage {
     total,
     annotated,
     coverage: total === 0 ? 0 : Math.round((annotated / total) * 1000) / 10,
-    pending,
-    retrying,
-    failed,
     lowConfidenceOnly: withAny - annotated,
     bySource,
     uncovered: total - annotated,

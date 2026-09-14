@@ -11,7 +11,7 @@
 - **数据保护**：每日首次启动、应用升级前、大批量导入前、换账号重置前自动创建 SQLite 恢复点（`VACUUM INTO` 一致快照，按类型分级保留）；「设置 → 备份与恢复点」可手动备份与一键恢复（重启应用生效）；手动导入 JSON/CSV 前先展示变更预览（新增 / 跳过 / 非法行明细），确认后才写入
 - **本地安全边界**：服务端固定监听 127.0.0.1，不暴露局域网；设置接口只回传「是否已配置」状态，绝不返回 API Key / 搜索 Key / Cookie 原文；AI 网页抓取内置 SSRF 防护——拦截本机/内网/链路本地地址（含 DNS 解析校验与逐跳重定向校验），重定向不泄露平台 Cookie
 - **内置题库**：软件自带约 1.3 万题离线题库（Codeforces 全量 + 洛谷普及/提高- 及以上，含难度与算法标签），首次启动自动入库、开箱即可供训练计划/题单选题；需要更多时在「题目管理 → 拉取题库」按平台扩充（CF 单次调用秒级，洛谷/牛客/计蒜客按页拉取）
-- **自建知识点管线**：入库时按标题规则对题目生成结构化知识点标注（按“知识点、置信度、方法、证据、管线版本”存储，可审计、可重建，题库页支持一键重建），统计与推荐优先使用知识点标注、未标注题目回退题源标签；后续可接入人工复核或模型标注。
+- **自建知识点管线**：入库时按 L1 规则（标题规则 + 题源标签映射）生成结构化知识点标注（按“知识点、置信度、方法、证据、管线版本”存储，可审计、可重建，题库页支持一键重建），统计与推荐优先使用知识点标注、未标注题目回退题源标签；人工校正置顶。
 - **弱项分析**：按标签 / 难度区间 / 平台统计 AC 率，输出相对自身平均的弱项画像；近 12 周趋势
 - **掌握度地图**：按知识点五档评估掌握度（未开始→接触→入门→掌握→熟练），串联刷题数据、弱项画像与模板课程；每个知识点可直达对应练习题目（含题库未做题，按难度从低到高）与课程；CF 等平台的英文标签与课程中文知识点自动归并（binary search ↔ 二分），同一知识点不分裂；掌握/熟练带 ⭐/🏆 徽章、升档进度条与新达成 🎉 标记
 - **练习数据汇总**：一键生成完整个人画像（总量/平台/难度/知识点/弱项/掌握度/趋势/近期 AC/卡壳题/复习库/课程进度/打卡），可下载 `.md` 存档复盘
@@ -53,7 +53,7 @@ icpc-workbench/
 │   ├── contests/    # 五平台赛事聚合（CF/AtCoder/洛谷/牛客/计蒜客，单源失败降级）
 │   ├── plans/       # 计划生成（AI 优先，失败/未配置降级模板）+ 入库
 │   ├── import/      # 手动导入（JSON/CSV/表单）+ 事务入库
-│   ├── knowledge/   # 自建知识点管线（L1 标题规则 + L2 AI 标注 + JSONL 源真相 / SQLite 索引）
+│   ├── knowledge/   # 自建知识点管线（L1 标题规则 + 题源标签映射 + JSONL 源真相 / SQLite 索引）
 │   ├── updater.ts   # 一键自更新（下载/SHA256 校验/原位替换）
 │   └── routes/      # REST API（stats/problems/plans/ai/lists/reviews/today/templates/contests/checkins/settings/export/sync/import/update/knowledge/backups）
 ├── client/          # React + Vite + Ant Design（数据概览/今日训练/AI助手/模板库/题单整理/训练计划/复习库/题目管理/掌握度地图/日历打卡/赛事中心/设置）
@@ -240,6 +240,17 @@ GET  /api/lists/:id              # 题单详情（条目含难度/已 AC 状态�
 POST /api/lists/:id/classify     # 按题库 tags 规则分类 | POST /:id/ai-classify AI 分类
 POST /api/lists/:id/ai-suggest   # AI 读取题单内容给练习建议（返回 markdown）
 PATCH /api/lists/items/:itemId   # 手动改分类（body: { category }）| DELETE 同路径移除条目
+POST /api/knowledge/build         # 触发 L1 规则批跑 + 题源标签映射（body: { rerun?: boolean }）
+GET  /api/knowledge/coverage      # 覆盖率报告（total / annotated / uncovered / bySource / 阈值）
+GET  /api/knowledge/gaps          # 词表缺口报告（无法映射的题源标签 → 影响题数）
+POST /api/knowledge/recompute-stats # 重算概念统计（覆盖率与信息量）
+POST /api/knowledge/threshold     # 设置统计端置信度阈值（body: { value: 0..1 }；影响掌握度地图 / 题单统计）
+GET  /api/knowledge/taxonomy      # 知识点体系全量
+GET  /api/knowledge/problem/:platform/:key # 单题当前标注
+PUT  /api/knowledge/:platform/:key # L3 人工校正（body: { codes: string[] }）
+GET  /api/knowledge/compare        # tag 口径 vs 知识点口径弱项对比
+POST /api/problems/:platform/:key/intent  # 记录用户声明的卡点（body: { outcome, code? }）
+GET  /api/problems/:platform/:key/intents # 该题卡点记录
 GET  /api/checkins?month=YYYY-MM  # 月打卡视图
 GET  /api/checkins/date/:date     # 当天任务（Web 挂件复用）
 GET  /api/checkins/streak         # 连续打卡统计（current/longest/totalDays）

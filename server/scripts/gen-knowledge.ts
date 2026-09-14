@@ -26,13 +26,13 @@ const l1 = runRulePass(db, {
   rerun: args.includes('--rerun'),
   ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
 });
-console.log(`[knowledge] L1: 扫描 ${l1.scanned} 题，命中落库 ${l1.annotated}，入 L2 队列 ${l1.enqueued}，manual 跳过 ${l1.skippedManual}`);
+console.log(`[knowledge] L1: 扫描 ${l1.scanned} 题，命中落库 ${l1.annotated}，入词表缺口 ${l1.enqueued}，manual 跳过 ${l1.skippedManual}`);
 
 const cov = getCoverage(db);
 console.log(
   `[knowledge] 覆盖率: ${cov.annotated}/${cov.total} = ${cov.coverage}%` +
     `（rule ${cov.bySource.rule} / tag ${cov.bySource.tag} / manual ${cov.bySource.manual}，` +
-    `低置信 ${cov.lowConfidenceOnly}，待标注 ${cov.pending}，阈值 ${cov.threshold}，` +
+    `低置信 ${cov.lowConfidenceOnly}，未覆盖 ${cov.uncovered}，阈值 ${cov.threshold}，` +
     `taxonomy v${cov.taxonomyVersion} / pipeline v${cov.pipelineVersion}）`,
 );
 db.close();

@@ -65,9 +65,9 @@ interface ProblemFilters {
  * 关键性能取舍：difficulty / tag 曾在前端对「全量 1.9 万行」用 JS filter 过滤，
  * 现在全部变成 SQL 条件 —— 难度按分桶区间下推，标签用 json_each 展开成 EXISTS
  * （JSON 数组支持 GIN 式逐元素匹配，无需把行取回内存再嗅探）。
- * 唯一的例外是**标签的来源**：三级回退链最终可能落到 problem_keypoints.name，
- * 那是派生值，只能对 COALESCE 后的 tags 做 json_each —— 所以本函数要求调用方
- * 已 WITH problemKeypointsCte 并 LEFT JOIN，否则 COALESCE 里的 pk/pt 无法绑定。
+ * 唯一的例外是**标签的来源**：三来源回退链最终落到 problem_keypoints.name，
+ * 它是派生值，只能对 COALESCE 后的 tags 做 json_each —— 所以本函数要求调用方
+ * 已 WITH problemKeypointsCte 并 LEFT JOIN，否则 COALESCE 里的 pk 无法绑定。
  */
 function buildProblemFilterSql(f: ProblemFilters): { where: string; params: Array<string | number> } {
   let where = '';
@@ -175,7 +175,7 @@ function parseFilters(query: Record<string, unknown>): ProblemFilters {
 export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
   const r = Router();
 
-  /** 共享的 SELECT/GROUP BY 骨架：标注侧先聚合成 pk/pt 派生表，再 LEFT JOIN（消逐行子查询） */
+  /** 共享的 SELECT/GROUP BY 骨架：标注侧先聚合成 pk 派生表，再 LEFT JOIN（消逐行子查询） */
   const coreFrom = `
       FROM problems p
       LEFT JOIN submissions s ON s.problem_id = p.id AND s.user_id = ?

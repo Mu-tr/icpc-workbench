@@ -617,7 +617,7 @@ export default function Problems() {
           <Space>
             <Tooltip title="自建知识点管线：L1 规则 + 题源标签映射，替代题源 tag 统计口径">
               <Button icon={<ApartmentOutlined />} onClick={() => { setPipelineOpen(true); loadCoverage() }}>
-                知识点管线{coverage && coverage.pending > 0 ? `（待标注 ${coverage.pending}）` : ''}
+                知识点管线
               </Button>
             </Tooltip>
             <Tooltip title="归并英文别名为中文规范名，清除噪声标签（写入数据库）">

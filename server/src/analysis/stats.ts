@@ -59,7 +59,7 @@ export interface SubmissionRow {
 }
 
 /** 拉取用户提交（join problems），供统计/弱项/趋势共用。
- *  tags 列默认走知识点管线读取路径（problem_keypoints → 旧 problem_topics → 题源 tags）；
+ *  tags 列默认走知识点管线读取路径（problem_keypoints → 题源 tags 回退）；
  *  tagsSql 可覆盖（双口径对比时传 'p.tags AS tags' 取 tag 口径）。 */
 export function fetchRows(
   db: Db,

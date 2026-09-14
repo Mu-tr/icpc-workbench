@@ -8,6 +8,7 @@ A **local web app** that analyzes your competitive programming weaknesses from s
 
 - **Multi-Platform Submission Import**: Codeforces / AtCoder auto-sync (official/community public API, incremental dedup); Luogu / Daimayuan / LeetCode / Jisuanke auto-sync after configuring cookies; all platforms support manual import (JSON / CSV / form)
 - **Built-in Problem Bank**: Ships with ~13,000 offline problems (full Codeforces + Luogu popularizer/advanced- and above, with difficulty and algorithm tags); auto-loaded on first launch for immediate use in training plans and problem lists; expandable per-platform via "Problem Management → Fetch Problem Bank" (CF in seconds, Luogu/Nowcoder/Jisuanke paginated)
+- **Self-built Knowledge Pipeline**: At import time, L1 rules (title patterns + source-tag mapping) produce structured knowledge annotations (knowledge point, confidence, method, evidence, pipeline version); stats and recommendations prefer annotations, falling back to source tags for uncovered problems; manual corrections always take precedence
 - **Weakness Analysis**: AC rate statistics by tag / difficulty range / platform, outputting a weakness profile relative to your own average; 12-week trend
 - **Mastery Map**: Five-level mastery assessment per knowledge point (Not Started → Touched → Intro → Grasped → Proficient), linking submission data, weakness profile, and template curriculum; each knowledge point links directly to relevant practice problems (including unsolved ones from the bank, sorted by difficulty) and courses; English tags from CF etc. auto-merge with Chinese knowledge points (binary search ↔ 二分), keeping the same topic unified; Grasped/Proficient levels show ⭐/🏆 badges, promotion progress bars, and new-achievement 🎉 markers
 - **Practice Data Summary**: One-click generation of a complete personal profile (totals/platform/difficulty/knowledge/weakness/mastery/trends/recent ACs/stuck problems/review bank/course progress/check-ins), downloadable as `.md` for archival and review
@@ -49,7 +50,7 @@ icpc-workbench/
 │   ├── contests/    # Five-platform contest aggregation (CF/AtCoder/Luogu/Nowcoder/Jisuanke, auto-degrade on source failure)
 │   ├── plans/       # Plan generation (AI-first, fallback to template on failure/no config) + persistence
 │   ├── import/      # Manual import (JSON/CSV/form) + transactional persistence
-│   ├── knowledge/   # Self-built knowledge pipeline (L1 title rules + L2 AI labeling + JSONL source of truth / SQLite index)
+│   ├── knowledge/   # Self-built knowledge pipeline (L1 title rules + source-tag mapping + JSONL source of truth / SQLite index)
 │   ├── updater.ts   # One-click self-update (download/SHA256 verify/in-place replace)
 │   └── routes/      # REST API (stats/problems/plans/ai/lists/reviews/today/templates/contests/checkins/settings/export/sync/import/update/knowledge/backups)
 ├── client/          # React + Vite + Ant Design (dashboard/today/AI assistant/templates/problem lists/plans/reviews/problem management/mastery map/calendar/contests/settings)
@@ -233,6 +234,17 @@ GET  /api/lists/:id              # List details (items include difficulty/AC sta
 POST /api/lists/:id/classify     # Classify by problem bank tag rules | POST /:id/ai-classify AI classification
 POST /api/lists/:id/ai-suggest   # AI reads list content for practice suggestions (returns markdown)
 PATCH /api/lists/items/:itemId   # Manually change category (body: { category }) | DELETE same path removes item
+POST /api/knowledge/build         # Run L1 rules + source-tag mapping (body: { rerun?: boolean })
+GET  /api/knowledge/coverage      # Coverage report (total / annotated / uncovered / bySource / threshold)
+GET  /api/knowledge/gaps          # Vocabulary gap report (unmapped source tags → affected problem count)
+POST /api/knowledge/recompute-stats # Recompute concept stats (coverage & information content)
+POST /api/knowledge/threshold     # Set statistical confidence threshold (body: { value: 0..1 }; affects mastery map & list stats)
+GET  /api/knowledge/taxonomy      # Full knowledge taxonomy
+GET  /api/knowledge/problem/:platform/:key # Current annotations for a problem
+PUT  /api/knowledge/:platform/:key # L3 manual correction (body: { codes: string[] })
+GET  /api/knowledge/compare        # Tag-caliber vs knowledge-caliber weakness comparison
+POST /api/problems/:platform/:key/intent  # Record user-reported stuck point (body: { outcome, code? })
+GET  /api/problems/:platform/:key/intents # Stuck-point records for a problem
 GET  /api/checkins?month=YYYY-MM  # Monthly check-in view
 GET  /api/checkins/date/:date     # Tasks for a given date (reused by Web widget)
 GET  /api/checkins/streak         # Consecutive check-in stats (current/longest/totalDays)

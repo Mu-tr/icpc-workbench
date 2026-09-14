@@ -416,14 +416,9 @@ export interface KnowledgeCoverage {
   annotated: number;
   /** 覆盖率百分数（0-100，保留 1 位小数；6.5 即 6.5%） */
   coverage: number;
-  /** L2 待标注队列长度 */
-  pending: number;
-  /** 队列中已失败过至少一次、仍在重试的题数（可观测性：pending 不降时区分「排队」与「反复失败」） */
-  retrying: number;
-  /** 队列中已放弃（尝试次数超限）的题数；重跑前会一直停在此状态 */
-  failed: number;
   /** 有标注但全部低于统计阈值的题数 */
   lowConfidenceOnly: number;
+  /** 各来源覆盖题数；AI 已退出清洗模块，ai 恒为 0 */
   bySource: Record<KnowledgeSource, number>;
   /** 未标注题数（统计端回退净化 tag，计入「未覆盖」桶） */
   uncovered: number;

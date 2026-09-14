@@ -351,7 +351,12 @@ export function computeUserLevel(db: Db, userId: number, minSample = 10): UserLe
   };
 }
 
-/** 推荐题目：未 AC 优先，命中弱项标签加权；难度限制在用户水平附近（可挑战，不推水题/远超水平的题）。 */
+/**
+ * 口径说明（有意保留的差异）：本函数读 p.tags（题源原始标签）而非知识点标注。
+ * 原因是它做的是「候选池筛选」（需要尽量宽地捞出可练的题），
+ * 而弱项判断读知识点标注——与 analysis/weakness.ts 的口径不同是刻意的，
+ * 见 docs/superpowers/specs/2026-09-13-knowledge-cleaning-redesign.md §2.5。
+ */
 export function recommendProblems(
   db: Db,
   profile: WeaknessProfile,
@@ -408,6 +413,11 @@ export function recommendProblems(
 }
 
 /**
+ * 口径说明（有意保留的差异）：本函数读 p.tags（题源原始标签）而非知识点标注。
+ * 原因是它做的是「候选池筛选」（需要尽量宽地捞出可练的题），
+ * 而弱项判断读知识点标注——与 analysis/weakness.ts 的口径不同是刻意的，
+ * 见 docs/superpowers/specs/2026-09-13-knowledge-cleaning-redesign.md §2.5。
+ *
  * 按弱项 tag 分组选题（导出提示词 / AI 生成用）：
  * - 每个弱项 tag 一组，组内未 AC 优先（role=weak）、难度锚定用户水平区间
  * - 已 AC 的题默认不选，仅每组保留少量作复习参考（role=review，取 AC 时间最久的）
@@ -969,7 +979,13 @@ export function templatePlan(
   return { title: `模板训练计划（${days} 天）`, goal, startDate, days, tasks };
 }
 
-/** 训练候选池：未 AC 且带链接的题目，按弱项标签命中数排序（同分按难度升序）。
+/**
+ * 口径说明（有意保留的差异）：本函数读 p.tags（题源原始标签）而非知识点标注。
+ * 原因是它做的是「候选池筛选」（需要尽量宽地捞出可练的题），
+ * 而弱项判断读知识点标注——与 analysis/weakness.ts 的口径不同是刻意的，
+ * 见 docs/superpowers/specs/2026-09-13-knowledge-cleaning-redesign.md §2.5。
+ *
+ * 训练候选池：未 AC 且带链接的题目，按弱项标签命中数排序（同分按难度升序）。
  * 用户水平样本充足时仅保留建议区间内的题（题库拉取入库后候选量大，
  * 不过滤会全是远低于水平的入门题）。 */
 export function practicePool(db: Db, weakTags: string[]): RecommendProblem[] {

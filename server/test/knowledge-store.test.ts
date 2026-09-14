@@ -135,7 +135,7 @@ test('统计读取路径：标注优先且不再受阈值过滤，无标注回�
     );
     ins.run('4A', 'basic.binary-search', '二分查找', 0.9);
     // 低于历史默认阈值 0.6 的标注：confidence 已降级为「来源内排序权重」，
-    // 不再充当读取路径的可信度门槛（见 knowledge/store.ts 二来源注释）
+    // 不再充当读取路径的可信度门槛（见 knowledge/store.ts 三来源注释）
     ins.run('4B', 'basic.greedy', '贪心', 0.3);
     const tagsOf = (key: string): string[] => {
       const row = db.prepare(`SELECT ${knowledgeTagsSql(db)} FROM problems p WHERE p.problem_key = ?`).get(key) as {
