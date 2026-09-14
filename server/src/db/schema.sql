@@ -138,6 +138,21 @@ CREATE TABLE IF NOT EXISTS knowledge_concept_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_concept_stats_bucket ON knowledge_concept_stats(bucket);
 
+-- 用户声明的卡点（意图信号）。本表是「用户弱项」判断的主证据来源：
+-- 题目属性（problem_keypoints）只能说明「这题涉及什么」，且一题多标签是常态
+-- （实测 75.7% 的题有 ≥2 个标签），无法归因用户到底哪个知识点不熟。
+-- 本表记录用户自己的声明，因此无歧义。
+-- code 允许为 NULL：表示非知识点摩擦（读题/实现/看错题），这是有效信号，不应被迫选一个知识点。
+CREATE TABLE IF NOT EXISTS submission_intents (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id),
+  problem_id INTEGER NOT NULL REFERENCES problems(id),
+  code       TEXT,                                  -- taxonomy code；NULL = 非知识点摩擦
+  outcome    TEXT NOT NULL,                          -- cant_start / wrong_approach / implementation / slight_bug
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_intents_user_problem ON submission_intents(user_id, problem_id);
+
 CREATE TABLE IF NOT EXISTS submissions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id      INTEGER NOT NULL REFERENCES users(id),

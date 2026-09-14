@@ -11,6 +11,7 @@ import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBa
 import { upsertBankProblems } from '../import/bankService.ts';
 import { rebuildTopicAnnotations } from '../topics/pipeline.ts';
 import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr } from '../knowledge/store.ts';
+import { isValidCode } from '../knowledge/taxonomy.ts';
 
 interface ProblemRow {
   id: number;
@@ -428,6 +429,54 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
       res.status(502).json({ error: (e as Error).message });
     }
   }));
+
+  /** 合法的卡点性质（与 client 的选项一一对应） */
+  const INTENT_OUTCOMES = new Set(['cant_start', 'wrong_approach', 'implementation', 'slight_bug']);
+
+  // POST /api/problems/:platform/:key/intent
+  // body: { outcome: 'cant_start'|'wrong_approach'|'implementation'|'slight_bug', code?: string }
+  // 记录用户自述的卡点。code 可省略（= 非知识点摩擦）。
+  r.post('/:platform/:key/intent', (req, res) => {
+    const { platform, key } = req.params;
+    if (!PLATFORMS.some((p) => p.id === platform)) {
+      return res.status(400).json({ error: `platform 非法: ${platform}` });
+    }
+    const outcome = req.body?.outcome;
+    if (typeof outcome !== 'string' || !INTENT_OUTCOMES.has(outcome)) {
+      return res.status(400).json({ error: 'outcome 需为 cant_start / wrong_approach / implementation / slight_bug' });
+    }
+    const rawCode = req.body?.code;
+    if (rawCode !== undefined && rawCode !== null && rawCode !== '') {
+      if (typeof rawCode !== 'string' || !isValidCode(rawCode)) {
+        return res.status(400).json({ error: `code 非法: ${String(rawCode)}` });
+      }
+    }
+    const code = typeof rawCode === 'string' && rawCode !== '' ? rawCode : null;
+
+    const problem = db
+      .prepare('SELECT id FROM problems WHERE platform = ? AND problem_key = ?')
+      .get(platform, key) as { id: number } | undefined;
+    if (!problem) return res.status(404).json({ error: '题目不存在：请先同步或导入该题' });
+
+    const info = db
+      .prepare('INSERT INTO submission_intents (user_id, problem_id, code, outcome) VALUES (?, ?, ?, ?)')
+      .run(DEFAULT_USER_ID, problem.id, code, outcome);
+    res.json({ ok: true, id: Number(info.lastInsertRowid) });
+  });
+
+  // GET /api/problems/:platform/:key/intents → 该题的卡点记录（时间倒序）
+  r.get('/:platform/:key/intents', (req, res) => {
+    const { platform, key } = req.params;
+    const rows = db
+      .prepare(
+        `SELECT i.code, i.outcome, i.created_at AS createdAt
+           FROM submission_intents i JOIN problems p ON p.id = i.problem_id
+          WHERE i.user_id = ? AND p.platform = ? AND p.problem_key = ?
+          ORDER BY i.created_at DESC, i.id DESC`,
+      )
+      .all(DEFAULT_USER_ID, platform, key);
+    res.json({ items: rows });
+  });
 
   return r;
 }
