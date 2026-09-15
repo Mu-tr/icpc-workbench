@@ -304,12 +304,12 @@ import { jisuankeDifficultyToRating } from '../src/adapters/jisuanke.ts';
 import { fetchJisuankeBank } from '../src/adapters/problemBank.ts';
 import { classifyJisuankeContest, fetchJisuankeContests, toJisuankeContest } from '../src/contests/jisuankeContests.ts';
 
-test('jisuanke: jisuankeDifficultyToRating maps level strings/numbers, caps at 2800', () => {
+test('jisuanke: jisuankeDifficultyToRating maps level strings/numbers via 统一难度表', () => {
   assert.equal(jisuankeDifficultyToRating('level1'), 800);
-  assert.equal(jisuankeDifficultyToRating('level4'), 1600);
-  assert.equal(jisuankeDifficultyToRating('level8'), 2800);
-  assert.equal(jisuankeDifficultyToRating('level12'), 2800); // level8+ 封顶
-  assert.equal(jisuankeDifficultyToRating(5), 1900);
+  assert.equal(jisuankeDifficultyToRating('level4'), 1800); // 实测表：4 → 1800（原本地表 1600）
+  assert.equal(jisuankeDifficultyToRating('level8'), 3400); // 实测表：8 → 3400（原本地表 2800）
+  assert.equal(jisuankeDifficultyToRating('level12'), null); // 越界档位：未知就是未知（原本地表封顶当 level8）
+  assert.equal(jisuankeDifficultyToRating(5), 2200); // 整数档位一并接受（原本地表 1900）
   assert.equal(jisuankeDifficultyToRating('level0'), null);
   assert.equal(jisuankeDifficultyToRating(undefined), null);
   assert.equal(jisuankeDifficultyToRating('weird'), null);
@@ -341,7 +341,7 @@ test('jisuanke: fetchJisuankeBank pages, maps difficulty/tags/urls, dedupes tota
   assert.equal(r.problems[0].difficulty, 800);
   assert.deepEqual(r.problems[0].tags, ['模拟']);
   assert.equal(r.problems[0].url, 'https://www.jisuanke.com/problem/T1001');
-  assert.equal(r.problems[1].difficulty, 1900);
+  assert.equal(r.problems[1].difficulty, 2200); // level5 → CF 2200（统一实测表）
   assert.deepEqual(r.problems[1].tags, ['动态规划']);
   assert.ok(seenPages[0].includes('page=1'));
   assert.ok(seenPages[1].includes('page=2'), '首页未满 max 应继续翻页');
@@ -360,7 +360,7 @@ test('jisuanke: fetchJisuankeBank stops at max and unwraps bare arrays', async (
     );
   const r = await fetchJisuankeBank(fetchFn, { max: 2 });
   assert.equal(r.problems.length, 2);
-  assert.equal(r.problems[1].difficulty, 1300);
+  assert.equal(r.problems[1].difficulty, 1500); // level3 → CF 1500（统一实测表）
 });
 
 test('jisuanke: bank endpoint error surfaces message', async () => {

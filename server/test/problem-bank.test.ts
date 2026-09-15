@@ -81,7 +81,7 @@ test('luogu bank: parses Lentille list, maps difficulty & tags, paginates and st
   const p0 = r.problems[0];
   assert.equal(p0.problemKey, 'P1000');
   assert.equal(p0.title, '题目 P1000');
-  assert.equal(p0.difficulty, 1300); // 洛谷难度 2 → CF 1300
+  assert.equal(p0.difficulty, 1000); // 洛谷难度 2 → CF 1000（统一实测表：2 → 1000）
   assert.equal(p0.url, 'https://www.luogu.com.cn/problem/P1000');
   assert.deepEqual(p0.tags, ['字符串', '模拟']);
   assert.equal(pages.length, 2); // 空页后停止
@@ -306,11 +306,11 @@ test('daimayuan bank: parses rows, maps difficulty 1-10 to CF rating, extracts t
   const p0 = r.problems[0];
   assert.equal(p0.problemKey, '1');
   assert.equal(p0.title, '[R1A]最大奇数');
-  assert.equal(p0.difficulty, 1400); // 难度 4 → CF 1400
+  assert.equal(p0.difficulty, 1200); // 难度 4 → CF 1200（统一 Hydro 表：4 → 1200）
   assert.equal(p0.url, 'https://bs.daimayuan.top/p/1');
   assert.deepEqual(p0.tags, ['模拟']);
   const p1 = r.problems[1];
-  assert.equal(p1.difficulty, 1000); // 难度 2 → CF 1000
+  assert.equal(p1.difficulty, 900); // 难度 2 → CF 900（统一 Hydro 表：2 → 900）
   assert.deepEqual(p1.tags, ['其他', '数学']);
 });
 
@@ -333,7 +333,7 @@ test('daimayuan bank: max option truncates result', async () => {
   });
   const r = await fetchDaimayuanBank(fetchFn, { max: 2 });
   assert.equal(r.problems.length, 2);
-  assert.equal(r.problems[1].difficulty, 1600); // 难度 5 → CF 1600
+  assert.equal(r.problems[1].difficulty, 1400); // 难度 5 → CF 1400（统一 Hydro 表：5 → 1400）
 });
 
 test('daimayuan bank: HTTP failure throws', async () => {

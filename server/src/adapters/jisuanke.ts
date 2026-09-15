@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields, toCfRating } from '../../../shared/src/difficulty.ts';
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { asHttpClient, sleep, type HttpInit } from './http.ts';
@@ -100,29 +101,11 @@ export function mapJisuankeVerdict(status: unknown): Verdict | null {
 }
 
 /**
- * 题库 difficultyType（level1…levelN）→ CF rating 近似值，供统一难度标尺。
- * 档位总数按公开题库分布校准为 8 档（level8+ → 2800 封顶）；
- * 数值为 ICPC 训练场景的粗校准，待全量题库通过率分布回归后再修正。
+ * 题库 difficultyType（level1…levelN，接口亦可能给整数档）→ CF rating 近似值，供统一难度标尺。
+ * 表与档位名位于 shared/src/difficulty.ts（档位总数按公开题库分布校准为 8 档）。
+ * 兼容别名：既有调用点（problemBank 题库拉取）与测试依赖此名。
  */
-const JISUANKE_LEVEL_TO_RATING: Record<number, number> = {
-  1: 800,
-  2: 1000,
-  3: 1300,
-  4: 1600,
-  5: 1900,
-  6: 2200,
-  7: 2500,
-  8: 2800,
-};
-
-export function jisuankeDifficultyToRating(difficultyType: unknown): number | null {
-  const n =
-    typeof difficultyType === 'number'
-      ? difficultyType
-      : Number(String(difficultyType ?? '').replace(/^level/i, ''));
-  if (!Number.isInteger(n) || n < 1) return null;
-  return JISUANKE_LEVEL_TO_RATING[Math.min(n, 8)] ?? null;
-}
+export const jisuankeDifficultyToRating = (d: unknown): number | null => toCfRating('jisuanke', d);
 
 /** /api/contest/submissions 的单行（前端 ContestSubmissions 表格绑定的字段） */
 export interface JisuankeSubmissionRow {
@@ -349,6 +332,7 @@ export function createJisuankeAdapter(fetchFn: HttpInit = fetch): PlatformAdapte
               platform: 'jisuanke' as PlatformId,
               problemKey: `${contest.contestId}-${pid}`,
               title: row.title || row.identifier || String(pid),
+              ...difficultyFields('jisuanke', null), // 比赛提交行不含难度档位：由题库/回填路径补齐
               url: jisuankeProblemUrl(`${contest.contestId}-${pid}`),
               tags: [],
             },

@@ -69,21 +69,26 @@ test('normalizes AtCoder submissions with title/difficulty/link', async () => {
   assert.equal(r.verdict, 'AC');
   assert.equal(r.problem.problemKey, 'abc321_a');
   assert.equal(r.problem.title, '321-like Checker');
-  assert.equal(r.problem.difficulty, 800); // 125 低于 CF 下限 → 钳到 800（与题库路径一致）
+  // 难度改由 shared/src/difficulty.ts 的实测锚点分段映射：θ=125 落在 [-386,451] 段 → 约 922
+  assert.equal(r.problem.difficulty, 922);
+  assert.equal(r.problem.nativeDifficulty, '125'); // 原生 θ 原文（钳位不再改写原生值）
+  assert.equal(r.problem.difficultyScale, 'atcoder-kenkoooo-irt');
   assert.equal(r.problem.url, 'https://atcoder.jp/contests/abc321/tasks/abc321_a');
   assert.equal(new Date(r.submittedAt).toISOString(), new Date(1700000000 * 1000).toISOString());
   assert.equal(rows[1].verdict, 'WA');
   assert.equal('difficulty' in rows[1].problem, false); // null 难度省略
 });
 
-test('负难度钳到 CF 下限 800，非整数难度四舍五入（与题库路径一致）', async () => {
+test('AtCoder 难度按实测锚点分段映射（极低 θ 钳到 CF 下限并保留原生 θ）', async () => {
   const adapter = makeAdapter(() => [
     submission({ id: 1003, problem_id: 'abc321_c' }),
     submission({ id: 1004, problem_id: 'abc321_d' }),
   ]);
   const rows = await adapter.fetchUserSubmissions('u');
-  assert.equal(rows[0].problem.difficulty, 800); // -1152 → 800
-  assert.equal(rows[1].problem.difficulty, 926); // 926.4 → 926
+  assert.equal(rows[0].problem.difficulty, 800); // -1152：低于首锚点 -386 → 钳到 CF 下限
+  assert.equal(rows[0].problem.nativeDifficulty, '-1152'); // 原生 θ 原文（不被钳位改写）
+  assert.equal(rows[1].problem.difficulty, 1455); // 926.4：仍在中低段（451..973 锚点之间）
+  assert.equal(rows[1].problem.nativeDifficulty, '926.4'); // 原生值保留小数原文
 });
 
 test('pages through 500-per-page until short page, dedupes by id', async () => {

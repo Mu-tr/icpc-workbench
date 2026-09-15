@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields } from '../../../shared/src/difficulty.ts';
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
@@ -35,7 +36,8 @@ import { asHttpClient, type HttpInit } from './http.ts';
  *   因此非满分的数字得分统一保守归为 WA。
  * - 增量：列表按时间倒序，靠同步层注入的 knownExternalIds 整页已知即早停；
  *   分批上限与补全游标由 pagedFetch 统一处理（页间限速 1s 防触发风控）。
- * - 题目难度：QOJ 无难度字段，difficulty 不下发（与牛客一致）。
+ * - 题目难度：QOJ 无难度字段（UOJ 系数据模型），difficulty 不下发；标度记为 none，
+ *   统一难度模块据此在 UI 显示「平台不提供难度」。
  *
  * 参考实现（GitHub 实测规格，非直接依赖）：
  * - Inkyo-007/xcpc-helper `docs/design/activity/qoj.md`（verdict / 子任务评分映射）
@@ -275,6 +277,7 @@ export function normalizeQojRow(row: QojRow): NormalizedSubmission | null {
       platform: 'qoj' as PlatformId,
       problemKey: row.problemKey,
       title: row.title || row.problemKey,
+      ...difficultyFields('qoj', null), // 平台无难度字段：标度 none，由 UI 显示「平台不提供难度」
       url: row.problemUrl,
       tags: [], // QOJ 提交列表不含标签
     },

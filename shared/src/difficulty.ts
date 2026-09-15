@@ -132,9 +132,10 @@ export function parseNativeDifficulty(platform: PlatformId, raw: unknown): Diffi
       return { rating, label: LUOGU_LEVEL_NAMES[n] ?? null, scale: 'luogu-2026-06', native: nativeText };
     }
     case 'jisuanke': {
-      const s = String(raw ?? '').trim();
-      const m = /^level(\d+)$/i.exec(s);
-      const level = m ? Number(m[1]) : NaN;
+      // 题库接口返回 `levelN` 字符串；整数档位一并接受（渠道差异与旧调用点兼容，属健壮性兜底）
+      const s = typeof raw === 'number' ? '' : String(raw ?? '').trim();
+      const level =
+        typeof raw === 'number' && Number.isInteger(raw) ? raw : Number(/^level(\d+)$/i.exec(s)?.[1] ?? NaN);
       const rating = Number.isInteger(level) ? JISUANKE_LEVEL_TO_RATING[level] ?? null : null;
       return {
         rating,

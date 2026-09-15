@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields } from '../../../shared/src/difficulty.ts';
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
@@ -20,7 +21,8 @@ import { asHttpClient, type HttpInit } from './http.ts';
  * - rdoc.status 是 Hydro STATUS 数字枚举（见 @hydrooj/common/status.ts），
  *   直接按数字映射到统一 Verdict；Waiting/Running/Judging 等评测中状态与 Hack/Cancelled 落到 null 跳过。
  * - rdoc._id 是 MongoDB ObjectId，前 4 字节（前 8 位十六进制）即提交时间戳（epoch 秒）。
- * - 题目链接 /p/{pid} 公开可访问；难度/标签 Hydro 无统一标尺，暂不下发。
+ * - 题目链接 /p/{pid} 公开可访问；难度由题库/回填路径按 Hydro 算法的站内相对难度补齐
+ *   （提交载荷本身不含难度，标度记为 hydro-1-10）。
  */
 
 const BASE = 'https://bs.daimayuan.top';
@@ -171,6 +173,7 @@ export function createDaimayuanAdapter(fetchFn: HttpInit = fetch): PlatformAdapt
               platform: 'daimayuan' as PlatformId,
               problemKey: pid,
               title: row.title || pid,
+              ...difficultyFields('daimayuan', null), // 提交载荷不含难度：由题库/回填路径按 Hydro 算法补齐
               url: `${BASE}/p/${pid}`,
               tags: [],
             },

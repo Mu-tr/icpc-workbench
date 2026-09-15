@@ -1,4 +1,5 @@
 import type { PlatformId } from '../../../shared/src/index.ts';
+import { toCfRating } from '../../../shared/src/difficulty.ts';
 import { fetchWithChallenge, luoguDifficultyToRating } from './luogu.ts';
 import { leetcodeDifficultyToRating } from './leetcode.ts';
 import { jisuankeDifficultyToRating } from './jisuanke.ts';
@@ -443,19 +444,9 @@ export async function fetchAtcoderBank(
 
 // ---------- 代码源（bs.daimayuan.top，Hydro OJ） ----------
 
-/** 代码源难度 1-10 → CF rating 统一标尺 */
-const DAIMAYUAN_DIFFICULTY_TO_RATING: Record<number, number> = {
-  1: 800,
-  2: 1000,
-  3: 1200,
-  4: 1400,
-  5: 1600,
-  6: 1800,
-  7: 2000,
-  8: 2200,
-  9: 2500,
-  10: 2800,
-};
+/** 代码源（Hydro）1-10 难度 → CF rating：映射表位于 shared/src/difficulty.ts。
+ *  兼容别名：内部题库解析与既有测试依赖此名 */
+export const daimayuanDifficultyToRating = (d: number): number | null => toCfRating('daimayuan', d);
 
 interface DmyBankRow {
   pid: string;
@@ -554,13 +545,10 @@ function parseDmyRows(html: string): DmyBankRow[] {
       if (tag) tags.push(tag);
     }
 
-    // 难度：<td class="col--difficulty">N</td>
+    // 难度：<td class="col--difficulty">N</td>（1-10 → CF rating，映射表在 shared/src/difficulty.ts）
     const diffMatch = cell.match(/class="col--difficulty"[^>]*>\s*(\d+)\s*<\/td>/);
     const diffNum = diffMatch ? Number(diffMatch[1]) : null;
-    const difficulty =
-      diffNum !== null && DAIMAYUAN_DIFFICULTY_TO_RATING[diffNum] !== undefined
-        ? DAIMAYUAN_DIFFICULTY_TO_RATING[diffNum]
-        : null;
+    const difficulty = diffNum !== null ? daimayuanDifficultyToRating(diffNum) : null;
 
     rows.push({ pid, title, difficulty, tags });
   }

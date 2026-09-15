@@ -180,7 +180,7 @@ test('backfill: fills luogu difficulty via single-problem API', async () => {
   assert.equal(lg.scanned, 1);
   assert.equal(lg.filled, 1);
   const row = db.prepare("SELECT difficulty FROM problems WHERE problem_key='P1001'").get() as any;
-  assert.equal(row.difficulty, 1000); // 洛谷难度 1（入门）→ CF 1000
+  assert.equal(row.difficulty, 800); // 洛谷难度 1（入门）→ CF 800（统一实测表：1 → 800）
 });
 
 test('backfill: luogu tag dict failure degrades (difficulty still filled)', async () => {

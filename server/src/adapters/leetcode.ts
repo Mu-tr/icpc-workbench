@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields, toCfRating } from '../../../shared/src/difficulty.ts';
 import { ManualImportRequiredError } from './types.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
@@ -51,18 +52,9 @@ const STATUS_MAP: Record<string, Verdict> = {
   编译错误: 'CE',
 };
 
-/** 力扣三级难度 → CF rating 统一标尺（取各档社区公认的近似中位分） */
-export const LEETCODE_DIFFICULTY_TO_RATING: Record<string, number> = {
-  easy: 1200,
-  medium: 1600,
-  hard: 2100,
-};
-
-/** 力扣难度（EASY/MEDIUM/HARD，大小写不敏感）→ CF rating 近似值 */
-export function leetcodeDifficultyToRating(d?: string | null): number | null {
-  if (!d) return null;
-  return LEETCODE_DIFFICULTY_TO_RATING[d.trim().toLowerCase()] ?? null;
-}
+/** 力扣难度（EASY/MEDIUM/HARD，大小写不敏感）→ CF rating 近似值。
+ *  映射表位于 shared/src/difficulty.ts；兼容别名：既有调用点与测试依赖此名与签名 */
+export const leetcodeDifficultyToRating = (d?: string | null): number | null => toCfRating('leetcode', d);
 
 /** 从提交 url 提取题目 slug（cn 提交节点唯一可用的题目标识来源） */
 export function extractSlugFromUrl(url?: string | null): string | null {
@@ -200,6 +192,7 @@ export function createLeetcodeAdapter(fetchFn: HttpInit = fetch): PlatformAdapte
               platform: 'leetcode' as PlatformId,
               problemKey: slug,
               title: row.title || slug,
+              ...difficultyFields('leetcode', null), // 提交接口不含难度，由题库/回填补齐
               url,
               tags: [], // 提交接口不含标签：由「拉取题库」补全（入库保留已有标签）
             },
