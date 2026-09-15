@@ -28,12 +28,12 @@ import { ApiOutlined, ImportOutlined, RobotOutlined, UploadOutlined, UserOutline
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
 import type { PlatformId } from '../../../shared/src/index.ts'
-import { PLATFORMS } from '../../../shared/src/index.ts'
+import { PLATFORMS, cookieFieldsOf } from '../../../shared/src/index.ts'
 import PageHeader from '../components/PageHeader'
 import { saveUrlAsFile } from '../download'
 import PlatformTag from '../components/PlatformTag'
 import { get, post } from '../api'
-import { assembleCookie as assembleCookieHeader, buildCookieItem, extractCookieValue, type CookieFieldDef } from '../cookies'
+import { assembleCookie as assembleCookieHeader, buildCookieItem, extractCookieValue } from '../cookies'
 import { pct } from '../ui'
 import { openExternal } from '../externalLinks'
 import { useTheme, type ThemePreference } from '../themeContext'
@@ -59,37 +59,15 @@ const SYNC_NOTE_COLOR: Record<string, string> = {
 
 /** 按平台定义拼装 Cookie 头（纯逻辑见 ../cookies.ts，附带回归测试） */
 function assembleCookie(platform: PlatformId, values: Record<string, string> | undefined): string {
-  return assembleCookieHeader(COOKIE_FORM[platform] ?? [], values)
+  return assembleCookieHeader(cookieFieldsOf(platform), values)
 }
 
-/** 需配置 Cookie 的平台输入项定义：每个 Cookie 一个输入框，label 只留短说明，
- *  详细操作统一放在面板底部的说明行。raw 框支持只填值（自动补 name=）或整段/整对粘贴。 */
-const COOKIE_FORM: Partial<Record<PlatformId, CookieFieldDef[]>> = {
-  luogu: [
-    { key: 'uid', cookieName: '_uid', label: '用户 uid', placeholder: '粘贴 _uid 的值' },
-    { key: 'clientId', cookieName: '__client_id', label: '登录令牌', placeholder: '粘贴 __client_id 的值', password: true },
-  ],
-  daimayuan: [
-    { key: 'sid', cookieName: 'sid', label: '登录会话（仅需此项）', placeholder: '粘贴 sid 的值', password: true },
-  ],
-  leetcode: [
-    { key: 'session', cookieName: 'LEETCODE_SESSION', label: '登录会话', placeholder: '粘贴 LEETCODE_SESSION 的值', password: true },
-    { key: 'csrftoken', cookieName: 'csrftoken', label: 'CSRF 令牌', placeholder: '粘贴 csrftoken 的值' },
-  ],
-  // 计蒜客：登录态分散在 s 与 JSKUSS 两项会话 Cookie（实测站点共 4 项：acw_tc 为 CDN 项、
-  // XSRF-TOKEN 供 POST 使用，均不需要）；两项都建议填写，校验不过通常是缺 JSKUSS
-  jisuanke: [
-    { key: 's', cookieName: 's', label: '会话（必需）', placeholder: '粘贴 s 的值', password: true, raw: true },
-    { key: 'jskuss', cookieName: 'JSKUSS', label: '登录会话（必需）', placeholder: '粘贴 JSKUSS 的值', password: true, raw: true },
-  ],
-  // QOJ：登录会话 UOJSESSID 为必需；站点前置 Cloudflare 托管挑战，
-  // 非浏览器请求通常还需浏览器签发的 cf_clearance（值较长且含特殊字符，按整段粘贴处理）
-  qoj: [
-    { key: 'session', cookieName: 'UOJSESSID', label: '登录会话（必需）', placeholder: '粘贴 UOJSESSID 的值', password: true },
-    { key: 'clearance', cookieName: 'cf_clearance', label: 'Cloudflare 通行凭据（被拦截时必需）', placeholder: '粘贴 cf_clearance 的值（可整段粘贴）', password: true, raw: true },
-    { key: 'ua', cookieName: '__ua', label: '浏览器 User-Agent（配 cf_clearance 时必需）', placeholder: '粘贴浏览器 UA 全文（与 cf_clearance 同一浏览器）', configOnly: true },
-  ],
-}
+// 凭据字段表**只有一份**：shared/src/credentials.ts 的 COOKIE_FIELDS。
+// 这里（以及任何客户端文件）不得再定义本地字段表——历史缺陷：字段表上移 shared 后
+// 设置页残留一份旧表（QOJ 仍是 session/clearance/ua 三字段），保存时发出已废弃的
+// `session`，被服务端按共享表校验拒绝（400 未知 Cookie 字段: session），保存按钮失效，
+// 且表单渲染出与说明文字口径矛盾的输入框。守卫见 client/test/credentialsTable.test.ts。
+
 
 export default function Settings() {
   const { message, modal } = AntdApp.useApp()
@@ -277,7 +255,7 @@ export default function Settings() {
     // 字段级合并：只提交本次被改动过的字段（dirtyFields），其余字段由服务端保留已保存值。
     // 这样「A 已保存、只想补填 B」时不需要把 A 重新粘贴一遍，也不会把 A 清空
     // （历史缺陷：整条 Cookie 头覆盖保存，空输入框 = 删除该项）。
-    const defs = COOKIE_FORM[platform] ?? []
+    const defs = cookieFieldsOf(platform)
     const dirty = dirtyFields[platform] ?? new Set<string>()
     const values = cookieInputs[platform] ?? {}
     const cookieFields: Record<string, string> = {}
@@ -538,7 +516,7 @@ export default function Settings() {
                 p.sync === 'auto' ? '自动同步' : p.sync === 'cookie' ? '配置 Cookie 后自动同步' : '仅手动导入'
               const c = cookieInputs[p.id] ?? {}
               const check = cookieCheck[p.id]
-              const fields = COOKIE_FORM[p.id] ?? []
+              const fields = cookieFieldsOf(p.id)
               // 连接状态点：自动同步平台看「已绑定 + 适配器开启」；cookie 平台看检测登录态
               // （未检测但有已保存 Cookie 时显示检测中，由上方 effect 自动触发检测）
               const dot =
