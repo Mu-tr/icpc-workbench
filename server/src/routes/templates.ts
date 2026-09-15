@@ -526,6 +526,8 @@ export function templatesRoutes(db: Db): Router {
         problemKey: key.trim(),
         title: typeof title === 'string' && title ? title : key.trim(),
         difficulty: null, // 例题难度由回填/同步补全，模板侧不臆测
+        nativeDifficulty: null,
+        difficultyScale: null,
         url: typeof url === 'string' && url ? url : null,
         tags: Array.isArray(tags) ? tags.map(String).filter(Boolean) : [],
       },

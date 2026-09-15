@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { createDb, type Db } from '../src/db/index.ts';
-import { fetchLuoguBank, fetchNowcoderBank, fetchAtcoderBank, fetchDaimayuanBank } from '../src/adapters/problemBank.ts';
+import {
+  fetchLuoguBank,
+  fetchNowcoderBank,
+  fetchAtcoderBank,
+  fetchDaimayuanBank,
+  hydroDifficulty,
+  parseNcBankRows,
+  parseJisuankeProblemTags,
+} from '../src/adapters/problemBank.ts';
 import { upsertBankProblems } from '../src/import/bankService.ts';
 import { problemsRoutes } from '../src/routes/problems.ts';
 import { practicePool } from '../src/plans/planService.ts';
@@ -82,6 +90,8 @@ test('luogu bank: parses Lentille list, maps difficulty & tags, paginates and st
   assert.equal(p0.problemKey, 'P1000');
   assert.equal(p0.title, '题目 P1000');
   assert.equal(p0.difficulty, 1000); // 洛谷难度 2 → CF 1000（统一实测表：2 → 1000）
+  assert.equal(p0.nativeDifficulty, '2'); // 原生档位原文
+  assert.equal(p0.difficultyScale, 'luogu-2026-06');
   assert.equal(p0.url, 'https://www.luogu.com.cn/problem/P1000');
   assert.deepEqual(p0.tags, ['字符串', '模拟']);
   assert.equal(pages.length, 2); // 空页后停止
@@ -167,7 +177,9 @@ test('nowcoder bank: parses rows, difficulty as CF-style score, dedupes', async 
     platform: 'nowcoder',
     problemKey: '321126',
     title: '小红的权值',
-    difficulty: 700,
+    difficulty: 800, // 站点分 700 低于 CF 下限 → 钳到 800（统一标尺）
+    nativeDifficulty: '700', // 原生分原文（钳位前）
+    difficultyScale: 'nowcoder-score',
     url: 'https://ac.nowcoder.com/acm/problem/321126',
     tags: [],
   });
@@ -209,7 +221,7 @@ function kenkoooModels(): unknown {
   };
 }
 
-test('atcoder bank: parses problems + models, maps difficulty, clamps negatives', async () => {
+test('atcoder bank: parses problems + models, maps θ through shared anchors', async () => {
   const fetchFn = router({
     'resources/problems.json': () => kenkoooProblems(),
     'resources/problem-models.json': () => kenkoooModels(),
@@ -221,12 +233,16 @@ test('atcoder bank: parses problems + models, maps difficulty, clamps negatives'
   const p0 = r.problems[0];
   assert.equal(p0.problemKey, 'abc138_a');
   assert.equal(p0.title, 'A - Red or Not');
-  assert.equal(p0.difficulty, 800); // 负值 -848 钳到 800
+  // θ 低于首锚点 -386 → 800（与同步路径同源，不再自行钳位）
+  assert.equal(p0.difficulty, 800);
+  assert.equal(p0.nativeDifficulty, '-848'); // 原生 θ 原文
+  assert.equal(p0.difficultyScale, 'atcoder-kenkoooo-irt');
   assert.equal(p0.url, 'https://atcoder.jp/contests/abc138/tasks/abc138_a');
   assert.deepEqual(p0.tags, []);
-  // 正常值（>= 800）四舍五入后原样保留
-  assert.equal(r.problems[1].difficulty, 800); // -364 也钳到 800
-  assert.equal(r.problems[2].difficulty, 1200); // 1200 原样
+  // θ=-364 刚过首锚点 -386：在 [-386,451] 段内线性插值 → 800 + 22/837×200 ≈ 805
+  assert.equal(r.problems[1].difficulty, 805);
+  // θ=1200 落在 [973,1545] 段（1500→1800）→ 1500 + 227/572×300 ≈ 1619
+  assert.equal(r.problems[2].difficulty, 1619);
 });
 
 test('atcoder bank: missing difficulty model → null', async () => {
@@ -261,62 +277,78 @@ test('atcoder bank: HTTP failure throws', async () => {
 
 // ---------- 代码源题库拉取 ----------
 
-function dmyBankPage(rows: Array<[pid: string, title: string, diff: string, tags: string[]]>, total?: number): string {
-  const trs = rows
-    .map(([pid, title, diff, tags]) => {
-      const tagLis = tags
-        .map((t) => `<li class="problem__tag"><a class="problem__tag-link" href="/p?q=category%3A${encodeURIComponent(t)}">${t}</a></li>`)
-        .join('');
-      return `<tr data-pid="${pid}">` +
-        `<td class="col--checkbox"><input type="checkbox"></td>` +
-        `<td class="col--pid">${pid}</td>` +
-        `<td class="col--name col--problem-name" data-star-action="/p/${pid}">` +
-        `<a href="/p/${pid}"><b>${pid}</b>&nbsp;&nbsp;${title}</a>` +
-        `<ul class="problem__tags">${tagLis}</ul>` +
-        `</td>` +
-        `<td class="col--ac-tried">100 / 200</td>` +
-        `<td class="col--difficulty">${diff}</td>` +
-        `</tr>`;
-    })
-    .join('');
-  const totalP = total === undefined ? '' : `<p>${total} problems</p>`;
-  return `<html><body><table><tbody>${trs}</tbody></table>${totalP}</body></html>`;
+/**
+ * 代码源（Hydro）题库 JSON 单页。实测 `GET /p?page=N` + `Accept: application/json` 返回
+ * `{ page, pcount, ppcount, pdocs: [{ docId, title, tag, nSubmit, nAccept, difficulty }] }`
+ * （difficulty=0 表示站点未设定档位，需按 Hydro difficultyAlgorithm 本地复算）。
+ */
+function dmyJsonPage(
+  rows: Array<{ docId: number; title: string; tags?: string[]; difficulty?: number; nSubmit?: number; nAccept?: number }>,
+  counts: { pcount?: number; ppcount?: number } = {},
+): unknown {
+  return {
+    page: 1,
+    ...counts,
+    pdocs: rows.map((r) => ({
+      docId: r.docId,
+      title: r.title,
+      tag: r.tags ?? [],
+      difficulty: r.difficulty ?? 0,
+      nSubmit: r.nSubmit ?? 0,
+      nAccept: r.nAccept ?? 0,
+    })),
+  };
 }
 
-test('daimayuan bank: parses rows, maps difficulty 1-10 to CF rating, extracts tags', async () => {
+test('daimayuan bank: 读 JSON pdocs，难度按站点档位/Hydro 算法复算，标签取 tag', async () => {
   const fetchFn = router({
     '/p?page': (url) => {
       const page = new URL(url).searchParams.get('page');
       if (page === '1') {
-        return dmyBankPage(
+        return dmyJsonPage(
           [
-            ['1', '[R1A]最大奇数', '4', ['模拟']],
-            ['2', '[R1B]砖块覆盖', '2', ['其他', '数学']],
+            // 站点未设定档位（difficulty=0）→ 本地复算：2136 提交 / 947 通过 → 4 档 → CF 1200
+            { docId: 1, title: '[R1A]最大奇数', tags: ['模拟'], nSubmit: 2136, nAccept: 947 },
+            // 站点手工档位优先于算法
+            { docId: 2, title: '[R1B]砖块覆盖', tags: ['其他', '数学'], difficulty: 2 },
           ],
-          459,
+          { pcount: 466, ppcount: 5 },
         );
       }
-      return dmyBankPage([]); // 第 2 页空 → 终止
+      return dmyJsonPage([], { pcount: 466, ppcount: 5 }); // 第 2 页空 → 终止
     },
   });
   const r = await fetchDaimayuanBank(fetchFn, { max: 100 });
   assert.equal(r.platform, 'daimayuan');
-  assert.equal(r.total, 459);
+  assert.equal(r.total, 466);
   assert.equal(r.problems.length, 2);
   const p0 = r.problems[0];
   assert.equal(p0.problemKey, '1');
-  assert.equal(p0.title, '[R1A]最大奇数');
-  assert.equal(p0.difficulty, 1200); // 难度 4 → CF 1200（统一 Hydro 表：4 → 1200）
+  assert.equal(p0.title, '[R1A]最大奇数'); // JSON title 已是纯标题（HTML 路径需自行剥题号）
+  assert.equal(p0.difficulty, 1200); // 4 档 → CF 1200（统一 Hydro 表：4 → 1200）
+  assert.equal(p0.nativeDifficulty, '4');
+  assert.equal(p0.difficultyScale, 'hydro-1-10');
   assert.equal(p0.url, 'https://bs.daimayuan.top/p/1');
   assert.deepEqual(p0.tags, ['模拟']);
   const p1 = r.problems[1];
-  assert.equal(p1.difficulty, 900); // 难度 2 → CF 900（统一 Hydro 表：2 → 900）
+  assert.equal(p1.difficulty, 900); // 2 档 → CF 900（统一 Hydro 表：2 → 900）
   assert.deepEqual(p1.tags, ['其他', '数学']);
+});
+
+test('daimayuan bank: 无提交统计且站点未设定档位 → 难度未知（null）', async () => {
+  const fetchFn = router({
+    '/p?page': () => dmyJsonPage([{ docId: 7, title: '新题', tags: ['模拟'] }], { pcount: 1, ppcount: 1 }),
+  });
+  const r = await fetchDaimayuanBank(fetchFn, { max: 10 });
+  assert.equal(r.problems.length, 1);
+  assert.equal(r.problems[0].difficulty, null);
+  assert.equal(r.problems[0].nativeDifficulty, null);
+  assert.equal(r.problems[0].difficultyScale, 'hydro-1-10');
 });
 
 test('daimayuan bank: empty first page returns empty without error', async () => {
   const fetchFn = router({
-    '/p?page': () => dmyBankPage([]),
+    '/p?page': () => ({ pdocs: [] }),
   });
   const r = await fetchDaimayuanBank(fetchFn, {});
   assert.equal(r.problems.length, 0);
@@ -325,11 +357,11 @@ test('daimayuan bank: empty first page returns empty without error', async () =>
 
 test('daimayuan bank: max option truncates result', async () => {
   const fetchFn = router({
-    '/p?page': () => dmyBankPage([
-      ['1', '题 A', '3', []],
-      ['2', '题 B', '5', ['dp']],
-      ['3', '题 C', '7', []],
-    ], 459),
+    '/p?page': () => dmyJsonPage([
+      { docId: 1, title: '题 A', tags: [], difficulty: 3 },
+      { docId: 2, title: '题 B', tags: ['动态规划'], difficulty: 5 },
+      { docId: 3, title: '题 C', tags: [], difficulty: 7 },
+    ], { pcount: 466, ppcount: 5 }),
   });
   const r = await fetchDaimayuanBank(fetchFn, { max: 2 });
   assert.equal(r.problems.length, 2);
@@ -343,6 +375,141 @@ test('daimayuan bank: HTTP failure throws', async () => {
   await assert.rejects(() => fetchDaimayuanBank(fetchFn, {}), /HTTP 503/);
 });
 
+// ---------- Task 4：按平台修正（牛客标签 / 代码源算法 / 计蒜客标签 / AtCoder 标签桥） ----------
+
+test('代码源：Hydro 难度本地复算（站点 7 条实测样本表驱动）', () => {
+  // 站点显示值 = pdoc.difficulty 优先（>0），否则 round(10 − 13·s·acRate)（s 为 nSubmit 的数值积分）
+  const samples: Array<[nSubmit: number, nAccept: number, stored: number, displayed: number]> = [
+    [2136, 947, 0, 4], // 算法分支（实测 R1A 最大奇数：JSON 原值 0，页面显示 4）
+    [1280, 382, 4, 4],
+    [618, 349, 5, 5],
+    [766, 165, 6, 6],
+    [341, 10, 9, 9],
+    [1992, 602, 1, 1],
+    [1030, 586, 2, 2],
+  ];
+  for (const [nSubmit, nAccept, stored, displayed] of samples) {
+    assert.equal(
+      hydroDifficulty(nSubmit, nAccept, stored),
+      displayed,
+      `样本 nSubmit=${nSubmit} nAccept=${nAccept} stored=${stored}`,
+    );
+  }
+  assert.equal(hydroDifficulty(2136, 947, 4), 4); // 站点手工设定值优先于算法
+  assert.equal(hydroDifficulty(0, 0, null), null); // 无提交统计 → 未知（不猜）
+});
+
+test('计蒜客：problemTags 双类型解析（difficulty / knowledge）', () => {
+  const parsed = parseJisuankeProblemTags([
+    { tagName: '入门', type: 'difficulty' },
+    { tagName: '输入和输出', type: 'knowledge' },
+    { tagName: '数学', type: 'knowledge' },
+  ]);
+  assert.equal(parsed.difficulty, '入门');
+  assert.deepEqual(parsed.knowledge, ['输入和输出', '数学']);
+  assert.deepEqual(parseJisuankeProblemTags(undefined), { difficulty: null, knowledge: [] });
+});
+
+test('牛客：题库行解析出算法标签，且标题不混入标签文本', () => {
+  const html = `<tr data-problemId="19842">
+    <td><a href="/acm/problem/19842">NC19842</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/19842">约数</a>
+      <a class="tag-label js-tag" data-id="145480">gcd与exgcd</a>
+      <a class="tag-label js-tag" data-id="145607">数论</a></td>
+    <td> 1500 </td><td>926</td><td></td></tr>`;
+  const rows = parseNcBankRows(html);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].problemId, '19842');
+  assert.equal(rows[0].difficulty, 1500); // 难度列为 100 的倍数（colspan 行不得按列下标硬取）
+  assert.equal(rows[0].nativeScore, 1500); // 原生分原文（映射前的站点值）
+  assert.deepEqual(rows[0].tags, ['gcd与exgcd', '数论']);
+  assert.equal(rows[0].title, '约数');
+});
+
+test('牛客：无标签行不产生标签，脏难度（非 100 倍数）视作未知', () => {
+  const html = `<tr data-problemId="1"><td><a href="/acm/problem/1">NC1</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/1">Hello</a></td>
+    <td> 926 </td><td>100</td><td></td></tr>`;
+  const rows = parseNcBankRows(html);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].difficulty, null);
+  assert.equal(rows[0].nativeScore, null);
+  assert.deepEqual(rows[0].tags, []);
+});
+
+test('luogu bank: luoguTypes 多类型依次拉取（默认仅 P）', async () => {
+  const seen: string[] = [];
+  const fetchFn = router({
+    '_lfe/tags': () => ({ tags: [] }),
+    'problem/list': (url) => {
+      const u = new URL(url);
+      const type = u.searchParams.get('type') ?? '';
+      const page = u.searchParams.get('page') ?? '';
+      seen.push(`${type}:${page}`);
+      // 首页满页（50）→ 继续翻页；第 2 页空 → 该类型结束，进入下一类型
+      return page === '1'
+        ? luoguPage(Array.from({ length: 50 }, (_, i) => `${type}${1000 + i}`), 100)
+        : luoguPage([], 100);
+    },
+  });
+  await fetchLuoguBank(fetchFn, { max: 200, luoguTypes: ['P', 'CF'] });
+  assert.deepEqual(seen, ['P:1', 'P:2', 'CF:1', 'CF:2']); // 每类型翻到空页为止
+});
+
+test('atcoder bank: 洛谷 AT 镜像标签桥（默认关闭，计数如实上报）', async () => {
+  const luoguList = {
+    data: {
+      problems: {
+        count: 3,
+        perPage: 50,
+        result: [
+          { pid: 'AT_abc300_a', tags: [2] },
+          { pid: 'AT_abc300_b', tags: [] },
+          { pid: 'AT1202Contest_a', tags: [2] }, // 洛谷自定义比赛号：无法映射为 AtCoder 题号
+        ],
+      },
+    },
+  };
+  const kenkoooo = [
+    { id: 'abc300_a', contest_id: 'abc300', name: 'A', title: 'A - A' },
+    { id: 'abc300_b', contest_id: 'abc300', name: 'B', title: 'B - B' },
+  ];
+  const fetchFn = router({
+    '_lfe/tags': () => ({ tags: [{ id: 2, name: '模拟' }] }),
+    'problem/list': (url) => {
+      const page = new URL(url).searchParams.get('page');
+      // 第 2 页空 → 标签桥终止（否则 mock 会对每一页都回同一份数据）
+      return page === '1' ? luoguList : { data: { problems: { count: 3, perPage: 50, result: [] } } };
+    },
+    'resources/problems.json': () => kenkoooo,
+    'resources/problem-models.json': () => ({ abc300_a: { difficulty: 800 }, abc300_b: { difficulty: 800 } }),
+  });
+  const r = await fetchAtcoderBank(fetchFn, { max: 10, atcoderTagsFromLuogu: true });
+  assert.equal(r.tagScanned, 3);
+  assert.equal(r.tagMatched, 2); // 洛谷 AT 镜像中 id 命中 kenkoooo 的行数
+  assert.equal(r.tagWithTags, 1); // 其中真正带洛谷标签的行数
+  assert.equal(r.tagSkipped, 1); // 不可映射 / 未命中
+  assert.deepEqual(r.problems[0].tags, ['模拟']);
+  assert.deepEqual(r.problems[1].tags, []);
+});
+
+test('atcoder bank: 无桥时不做洛谷请求，也不上报标签计数', async () => {
+  let luoguCalls = 0;
+  const fetchFn = router({
+    'problem/list': () => {
+      luoguCalls += 1;
+      return { data: { problems: { result: [] } } };
+    },
+    'resources/problems.json': () => [{ id: 'abc300_a', contest_id: 'abc300', title: 'A - A' }],
+    'resources/problem-models.json': () => ({ abc300_a: { difficulty: 800 } }),
+  });
+  const r = await fetchAtcoderBank(fetchFn, { max: 10 });
+  assert.equal(luoguCalls, 0);
+  assert.equal(r.tagMatched, undefined);
+  assert.equal(r.tagScanned, undefined);
+  assert.deepEqual(r.problems[0].tags, []);
+});
+
 // ---------- 入库服务 ----------
 
 test('upsertBankProblems: inserts new, updates existing, keeps manual difficulty', () => {
@@ -351,8 +518,8 @@ test('upsertBankProblems: inserts new, updates existing, keeps manual difficulty
     "INSERT INTO problems (platform, problem_key, title, difficulty, difficulty_source, url, tags) VALUES ('luogu', 'P1001', '旧标题', 1800, 'manual', 'https://x', '[]')",
   ).run();
   const r = upsertBankProblems(db, [
-    { platform: 'luogu', problemKey: 'P1001', title: '新标题', difficulty: 1300, url: 'https://www.luogu.com.cn/problem/P1001', tags: ['dp'] },
-    { platform: 'luogu', problemKey: 'P2002', title: '题 B', difficulty: 1700, url: 'https://www.luogu.com.cn/problem/P2002', tags: ['图论'] },
+    { platform: 'luogu', problemKey: 'P1001', title: '新标题', difficulty: 1300, nativeDifficulty: null, difficultyScale: null, url: 'https://www.luogu.com.cn/problem/P1001', tags: ['dp'] },
+    { platform: 'luogu', problemKey: 'P2002', title: '题 B', difficulty: 1700, nativeDifficulty: null, difficultyScale: null, url: 'https://www.luogu.com.cn/problem/P2002', tags: ['图论'] },
   ]);
   assert.equal(r.length, 1);
   assert.equal(r[0].inserted, 1);
@@ -376,7 +543,7 @@ test('upsertBankProblems: 题库难度不覆盖同步来的难度（bank(1) < sy
     "INSERT INTO problems (platform, problem_key, title, difficulty, difficulty_source, url, tags) VALUES ('luogu', 'P3003', '旧标题', 2000, 'sync', 'https://x', '[]')",
   ).run();
   upsertBankProblems(db, [
-    { platform: 'luogu', problemKey: 'P3003', title: '新标题', difficulty: 1200, url: null, tags: [] },
+    { platform: 'luogu', problemKey: 'P3003', title: '新标题', difficulty: 1200, nativeDifficulty: null, difficultyScale: null, url: null, tags: [] },
   ]);
   const row = db.prepare("SELECT difficulty, difficulty_source FROM problems WHERE problem_key = 'P3003'").get() as {
     difficulty: number;
@@ -391,7 +558,7 @@ test('upsertBankProblems: empty tags do not overwrite existing tags', () => {
     "INSERT INTO problems (platform, problem_key, title, difficulty, url, tags) VALUES ('nowcoder', '10001', 'T', 1000, 'https://x', '[\"dp\"]')",
   ).run();
   upsertBankProblems(db, [
-    { platform: 'nowcoder', problemKey: '10001', title: 'T', difficulty: 1000, url: null, tags: [] },
+    { platform: 'nowcoder', problemKey: '10001', title: 'T', difficulty: 1000, nativeDifficulty: null, difficultyScale: null, url: null, tags: [] },
   ]);
   const row = db
     .prepare('SELECT tags FROM problems WHERE problem_key = 10001')
@@ -401,7 +568,7 @@ test('upsertBankProblems: empty tags do not overwrite existing tags', () => {
 
 test('upsertBankProblems: bank problems do not create submissions (stats unaffected)', () => {
   upsertBankProblems(db, [
-    { platform: 'luogu', problemKey: 'P9001', title: '题库题', difficulty: 1500, url: 'https://x', tags: [] },
+    { platform: 'luogu', problemKey: 'P9001', title: '题库题', difficulty: 1500, nativeDifficulty: null, difficultyScale: null, url: 'https://x', tags: [] },
   ]);
   assert.equal(
     (db.prepare('SELECT COUNT(*) AS c FROM submissions').get() as { c: number }).c,
@@ -437,8 +604,8 @@ test('practicePool: includes bank problems in level range, excludes far-below-le
   insertNormalized(db, 1, subs);
   // 题库题：区间内 1500 / 远低于区间 800
   upsertBankProblems(db, [
-    { platform: 'luogu', problemKey: 'P_IN', title: '区间内题', difficulty: 1500, url: 'https://www.luogu.com.cn/problem/P_IN', tags: ['dp'] },
-    { platform: 'luogu', problemKey: 'P_EASY', title: '水题', difficulty: 800, url: 'https://www.luogu.com.cn/problem/P_EASY', tags: [] },
+    { platform: 'luogu', problemKey: 'P_IN', title: '区间内题', difficulty: 1500, nativeDifficulty: null, difficultyScale: null, url: 'https://www.luogu.com.cn/problem/P_IN', tags: ['dp'] },
+    { platform: 'luogu', problemKey: 'P_EASY', title: '水题', difficulty: 800, nativeDifficulty: null, difficultyScale: null, url: 'https://www.luogu.com.cn/problem/P_EASY', tags: [] },
   ]);
   const pool = practicePool(db, ['dp']);
   const keys = pool.map((p) => p.problemKey);
@@ -670,6 +837,8 @@ test('GET /api/problems/page: total 与状态过滤口径一致（ac/tried/none�
         problemKey: `NONE${i}`,
         title: `未做题 ${i}`,
         difficulty: 1200,
+        nativeDifficulty: null,
+        difficultyScale: null,
         url: `https://www.luogu.com.cn/problem/NONE${i}`,
         tags: [],
       })));
@@ -703,7 +872,7 @@ test('GET /api/problems/page: 难度分桶与区间过滤下推到 SQL（含「�
     (d) => {
       seedMany(d, 23);
       upsertBankProblems(d, [
-        { platform: 'luogu', problemKey: 'NODIFF', title: '无难度题', difficulty: null, url: 'https://www.luogu.com.cn/problem/NODIFF', tags: [] },
+        { platform: 'luogu', problemKey: 'NODIFF', title: '无难度题', difficulty: null, nativeDifficulty: null, difficultyScale: null, url: 'https://www.luogu.com.cn/problem/NODIFF', tags: [] },
       ]);
     },
   );

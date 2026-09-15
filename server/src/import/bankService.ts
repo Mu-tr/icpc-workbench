@@ -1,4 +1,5 @@
 import type { PlatformId } from '../../../shared/src/index.ts';
+import type { DifficultyScale } from '../../../shared/src/difficulty.ts';
 import type { Db } from '../db/index.ts';
 import { annotateProblemsL1 } from '../knowledge/pipeline.ts';
 import { problemUpsertSql, purifyTags } from './problemWritePolicy.ts';
@@ -28,10 +29,10 @@ export function upsertBankProblems(
     problemKey: string;
     title: string;
     difficulty: number | null;
-    /** 平台原生难度原文（未知为 null/省略；不覆盖已落定的非空值） */
-    nativeDifficulty?: string | null;
-    /** 原生难度所属标度（见 shared/src/difficulty.ts 的 DifficultyScale） */
-    difficultyScale?: string | null;
+    /** 平台原生难度原文（未知为 null；不覆盖已落定的非空值） */
+    nativeDifficulty: string | null;
+    /** 原生难度所属标度（见 shared/src/difficulty.ts 的 DifficultyScale）；无难度语义为 null */
+    difficultyScale: DifficultyScale | null;
     url: string | null;
     tags: string[];
   }>,
@@ -70,8 +71,8 @@ export function upsertBankProblems(
         r.url,
         JSON.stringify(purifyTags(r.tags ?? [])),
         'bank',
-        r.nativeDifficulty ?? null,
-        r.difficultyScale ?? null,
+        r.nativeDifficulty,
+        r.difficultyScale,
       );
       // tags 取**库内落定值**（写入即净化；非空才覆盖，故可能与本次入参不同）——
       // tag 来源标注必须按实际落库的标签做映射

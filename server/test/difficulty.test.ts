@@ -57,6 +57,7 @@ test('difficulty: 力扣三档、代码源 1-10、CF 原值、QOJ 恒空', () =>
   assert.equal(nativeDifficultyLabel('leetcode', 'MEDIUM'), '中等');
   assert.equal(toCfRating('daimayuan', 10), 2400);
   assert.equal(toCfRating('daimayuan', 0), null); // Hydro 未设定且无提交统计
+  assert.equal(toCfRating('daimayuan', 11), null); // 越界档（>10）：未知就是未知，不钳到第 10 档
   assert.equal(toCfRating('codeforces', 1900), 1900);
   assert.equal(toCfRating('codeforces', undefined), null);
   assert.equal(toCfRating('qoj', 1234), null);

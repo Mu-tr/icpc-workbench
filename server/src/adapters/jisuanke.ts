@@ -107,6 +107,26 @@ export function mapJisuankeVerdict(status: unknown): Verdict | null {
  */
 export const jisuankeDifficultyToRating = (d: unknown): number | null => toCfRating('jisuanke', d);
 
+/**
+ * 计蒜客题目标签（`problemTags`）双类型解析：
+ * - `type === 'difficulty'` 的标签是难度档位名（如「入门」），
+ * - 其余（`knowledge` 等）是算法/知识点标签。
+ * 两类的展示位不同（难度走 difficultyType 字段），故分开返回；非数组/空值 → 空结果。
+ * 题库拉取（problemBank）与练习同步（适配器）共用这一处解析。
+ */
+export function parseJisuankeProblemTags(v: unknown): { difficulty: string | null; knowledge: string[] } {
+  if (!Array.isArray(v)) return { difficulty: null, knowledge: [] };
+  const knowledge: string[] = [];
+  let difficulty: string | null = null;
+  for (const t of v) {
+    const name = String((t as { tagName?: string })?.tagName ?? '').trim();
+    if (name === '') continue;
+    if ((t as { type?: string })?.type === 'difficulty') difficulty = name;
+    else knowledge.push(name);
+  }
+  return { difficulty, knowledge };
+}
+
 /** /api/contest/submissions 的单行（前端 ContestSubmissions 表格绑定的字段） */
 export interface JisuankeSubmissionRow {
   hashId?: string;

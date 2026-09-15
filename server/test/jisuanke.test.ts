@@ -324,8 +324,22 @@ test('jisuanke: fetchJisuankeBank pages, maps difficulty/tags/urls, dedupes tota
     if (u.includes('page=1')) {
       return new Response(
         page([
-          { problemIdentifier: 'T1001', title: '入门题', difficultyType: 'level1', countOfTags: ['模拟'] },
-          { problemIdentifier: 'T1002', title: '进阶题', difficultyType: 'level5', countOfTags: [{ name: '动态规划' }] },
+          {
+            problemIdentifier: 'T1001',
+            title: '入门题',
+            difficultyType: 'level1',
+            // 实测 /api/problems 行内 problemTags 为 [{ tagName, type }]：difficulty 类为难度档位、其余为知识点
+            problemTags: [
+              { tagName: '入门', type: 'difficulty' },
+              { tagName: '模拟', type: 'knowledge' },
+            ],
+          },
+          {
+            problemIdentifier: 'T1002',
+            title: '进阶题',
+            difficultyType: 'level5',
+            problemTags: [{ tagName: '动态规划', type: 'knowledge' }],
+          },
           { problemIdentifier: '', title: '无题号应跳过' },
         ]),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -339,7 +353,9 @@ test('jisuanke: fetchJisuankeBank pages, maps difficulty/tags/urls, dedupes tota
   assert.equal(r.problems.length, 2);
   assert.equal(r.problems[0].problemKey, 'T1001');
   assert.equal(r.problems[0].difficulty, 800);
-  assert.deepEqual(r.problems[0].tags, ['模拟']);
+  assert.equal(r.problems[0].nativeDifficulty, 'level1'); // 原生档位原文
+  assert.equal(r.problems[0].difficultyScale, 'jisuanke-level-8');
+  assert.deepEqual(r.problems[0].tags, ['模拟']); // 只取 knowledge 类（难度类由 difficultyType 表达）
   assert.equal(r.problems[0].url, 'https://www.jisuanke.com/problem/T1001');
   assert.equal(r.problems[1].difficulty, 2200); // level5 → CF 2200（统一实测表）
   assert.deepEqual(r.problems[1].tags, ['动态规划']);

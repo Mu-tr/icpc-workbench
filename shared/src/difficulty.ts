@@ -166,10 +166,13 @@ export function parseNativeDifficulty(platform: PlatformId, raw: unknown): Diffi
     }
     case 'daimayuan': {
       const n = toNumber(raw);
-      if (n === null || n <= 0) return { rating: null, label: null, scale: 'hydro-1-10', native: nativeText };
+      // Hydro 难度域就是 1-10（站点 slider 上限 10）：越界值（>10，含 10.5 这类小数）
+      // 不钳到第 10 档，按项目规则「未知一律 null，不猜」处理。
+      if (n === null || n <= 0 || n > 10) return { rating: null, label: null, scale: 'hydro-1-10', native: nativeText };
+      const level = Math.round(n);
       return {
-        rating: HYDRO_LEVEL_TO_RATING[Math.min(10, Math.round(n))] ?? null,
-        label: `${Math.round(n)}/10`,
+        rating: HYDRO_LEVEL_TO_RATING[level] ?? null,
+        label: `${level}/10`,
         scale: 'hydro-1-10',
         native: nativeText,
       };
