@@ -5,6 +5,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields } from '../../../shared/src/difficulty.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { asHttpClient, sleep, type HttpInit } from './http.ts';
 
@@ -179,19 +180,15 @@ function normalize(
 ): NormalizedSubmission {
   const title = problems.get(s.problem_id)?.title ?? s.problem_id;
   const rawDifficulty = models.get(s.problem_id)?.difficulty;
-  // kenkoooo 难度模型对极简题（abc A 题）会给出负值（如 -1152），
-  // 与题库路径 fetchAtcoderBank 一致钳到 CF 实际下限 800，避免负难度
-  // 入库拉低难度分位/能力值统计
-  const difficulty =
-    typeof rawDifficulty === 'number' && Number.isFinite(rawDifficulty)
-      ? Math.max(800, Math.round(rawDifficulty))
-      : undefined;
+  // kenkoooo 难度模型对极简题（abc A 题）会给出负值（如 -1152）。
+  // 钳位与分段映射统一由 shared/src/difficulty.ts 负责（ATCODER_ANCHORS）：
+  // 此处只透传 θ 原文，nativeDifficulty 也保留原文，便于平台改档后按标度重算。
   return {
     problem: {
       platform: 'atcoder' as PlatformId,
       problemKey: s.problem_id,
       title,
-      ...(difficulty !== undefined ? { difficulty } : {}),
+      ...difficultyFields('atcoder', rawDifficulty ?? null),
       url: `https://atcoder.jp/contests/${s.contest_id}/tasks/${s.problem_id}`,
       tags: [],
     },

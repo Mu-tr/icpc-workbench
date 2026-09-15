@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS problems (
   tags        TEXT NOT NULL DEFAULT '[]',      -- JSON 数组字符串（写入即净化：噪声标签已过滤 + 同义词已归并）
   -- 难度来源（优先级 manual > backfill > sync > bank）：决定新值能否覆盖已有值，见 import/problemWritePolicy.ts
   difficulty_source TEXT,
+  -- 平台原生难度原文与所属标度（如 '4' + 'luogu-2026-06'）：平台改档后可按标度重算，UI 可显示双标度
+  native_difficulty TEXT,
+  difficulty_scale TEXT,
   UNIQUE (platform, problem_key)
 );
 -- 难度过滤/排序（题库页 ORDER BY difficulty、stats 难度分布）在 2 万题规模上依赖此索引

@@ -2,12 +2,14 @@ import { Router } from 'express';
 import { canonicalTag, expandTag, filterNoiseTags } from '../../../shared/src/index.ts';
 import type { PlatformId } from '../../../shared/src/index.ts';
 import { PLATFORMS } from '../../../shared/src/index.ts';
+import { nativeDifficultyLabel } from '../../../shared/src/difficulty.ts';
 import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { safeTags } from '../analysis/stats.ts';
 import { backfillDifficulties } from '../analysis/difficultyBackfill.ts';
 import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBank, fetchAtcoderBank, fetchDaimayuanBank, fetchJisuankeBank } from '../adapters/problemBank.ts';
+import type { LuoguProblemType } from '../adapters/problemBank.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
 import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr } from '../knowledge/store.ts';
 import { isValidCode } from '../knowledge/taxonomy.ts';
@@ -20,6 +22,10 @@ interface ProblemRow {
   difficulty: number | null;
   url: string | null;
   tags: string;
+  /** 平台原生难度原文（未知为 null；与 difficulty 双标度并存） */
+  native_difficulty: string | null;
+  /** 原生难度所属标度（见 shared/src/difficulty.ts） */
+  difficulty_scale: string | null;
   attempts: number;
   ac_count: number;
   last_ac_at: string | null;
@@ -38,6 +44,11 @@ const DIFFICULTY_BUCKETS: Record<string, { min: number | null; max: number | nul
 
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 50;
+
+/** 洛谷题库类型白名单（与 adapters/problemBank.ts 的 LuoguProblemType 同源；此处只做入参校验） */
+const LUOGU_PROBLEM_TYPES: ReadonlySet<LuoguProblemType> = new Set<LuoguProblemType>([
+  'P', 'B', 'CF', 'AT', 'SP', 'UVA',
+]);
 
 type StatusFilter = 'all' | 'ac' | 'tried' | 'none';
 
@@ -184,6 +195,7 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
   `;
   const coreSelect = `
       SELECT p.id, p.platform, p.problem_key, p.title, p.difficulty, p.url,
+             p.native_difficulty, p.difficulty_scale,
              ${knowledgeTagsCoalesceSql()},
              COUNT(s.id) AS attempts,
              COALESCE(SUM(CASE WHEN s.verdict = 'AC' THEN 1 ELSE 0 END), 0) AS ac_count,
@@ -318,11 +330,23 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
     });
   });
 
-  // POST /api/problems/bank  body: { platform: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke', max?, luoguMinDifficulty? }
+  // POST /api/problems/bank
+  // body: { platform: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke',
+  //         max?, luoguMinDifficulty?, luoguTypes?, atcoderTags? }
   // 拉取公开题库入库（匿名可访问），扩充待选题目池（不产生提交记录）。
   // codeforces / atcoder 为单次 API 调用（全量），通常仅在刷新内置快照后的新题时使用。
+  // luoguTypes：洛谷题库类型（'P' 普通题 / 'CF'、'AT' 镜像题 / 'B' 入门与面试 / 'SP'、'UVA'），
+  //   默认 ['P']；镜像题用来批量补齐 CF/AtCoder 题面上的中文标签。
+  // atcoderTags：用洛谷 AT 镜像题给 AtCoder 题补算法标签（覆盖有限，命中计数随响应回传）。
   r.post('/bank', asyncHandler(async (req, res) => {
-    const { platform, max, luoguMinDifficulty } = req.body ?? {};
+    const { platform, max, luoguMinDifficulty, luoguTypes, atcoderTags } = req.body ?? {};
+    // QOJ 没有公开题库页（站点在 Cloudflare 挑战之后，且平台数据模型里没有难度字段）：
+    // 明确拒绝而不是落到默认分支去拉别的平台 —— 否则前端会以为「QOJ 题库已入库」。
+    if (platform === 'qoj') {
+      return res.status(400).json({
+        error: 'qoj 无公开题库页（站点在 Cloudflare 挑战之后，且平台无难度字段），不支持拉取题库',
+      });
+    }
     if (
       platform !== 'luogu' && platform !== 'nowcoder' &&
       platform !== 'codeforces' && platform !== 'leetcode' &&
@@ -330,6 +354,24 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
       platform !== 'jisuanke'
     ) {
       return res.status(400).json({ error: 'platform 需为 luogu / nowcoder / codeforces / leetcode / atcoder / daimayuan / jisuanke' });
+    }
+    // luoguTypes 校验：非法类型直接拒绝，不静默回退默认 ['P']
+    // （静默回退会让「我要 CF 镜像题」变成一次普通题拉取，调用方无从察觉）
+    let types: LuoguProblemType[] | undefined;
+    if (luoguTypes !== undefined) {
+      if (
+        !Array.isArray(luoguTypes) ||
+        luoguTypes.some((t) => !LUOGU_PROBLEM_TYPES.has(t as LuoguProblemType))
+      ) {
+        return res.status(400).json({
+          error: `luoguTypes 需为 'P' | 'B' | 'CF' | 'AT' | 'SP' | 'UVA' 构成的数组`,
+        });
+      }
+      const picked = [...new Set(luoguTypes as LuoguProblemType[])];
+      if (picked.length > 0) types = picked; // 空数组 = 未指定类型 → 交由拉取器用默认 ['P']
+    }
+    if (atcoderTags !== undefined && typeof atcoderTags !== 'boolean') {
+      return res.status(400).json({ error: 'atcoderTags 需为布尔值' });
     }
     const maxCap = platform === 'codeforces' ? 20000 : platform === 'atcoder' ? 10000 : 5000;
     const maxN =
@@ -359,7 +401,12 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
               : platform === 'jisuanke'
                 ? fetchJisuankeBank
                 : fetchCodeforcesBank;
-      const result = await fetcher(fetchFn, { max: maxN, ...(minDiff !== undefined ? { luoguMinDifficulty: minDiff } : {}) });
+      const result = await fetcher(fetchFn, {
+        max: maxN,
+        ...(minDiff !== undefined ? { luoguMinDifficulty: minDiff } : {}),
+        ...(types !== undefined ? { luoguTypes: types } : {}),
+        ...(atcoderTags === true ? { atcoderTagsFromLuogu: true } : {}),
+      });
       const imported = upsertBankProblems(db, result.problems);
       res.json({
         ok: true,
@@ -368,6 +415,15 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
         fetched: result.problems.length,
         inserted: imported[0]?.inserted ?? 0,
         updated: imported[0]?.updated ?? 0,
+        // 标签桥计数只在真的开了桥时下发（未开时不产出这些键，避免前端把 undefined 当 0 展示）
+        ...(result.tagScanned === undefined
+          ? {}
+          : {
+              tagScanned: result.tagScanned,
+              tagMatched: result.tagMatched,
+              tagWithTags: result.tagWithTags,
+              tagSkipped: result.tagSkipped,
+            }),
       });
     } catch (e) {
       res.status(502).json({ error: (e as Error).message });
@@ -405,10 +461,16 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
   }));
 
   // POST /api/problems/backfill-difficulty
-  // 对库内未知难度的洛谷/牛客题逐题查询公开接口回填（匿名可访问）：
+  // 对库内未知难度/未知原生难度/无标签的题逐题查询公开接口回填（匿名可访问）：
   // - 牛客顺带修复标题污染/空标签（题库搜索接口返回分离的标题与算法标签）
+  // - 全平台覆盖（整表型平台 CF/AtCoder/力扣/计蒜客 一次拉表后在内存里查，QOJ 无数据来源）
   // - CF 未知难度题为 gym/官方 Unrated 比赛，官方无 rating，不参与回填
-  // 耗时与待补题数成正比（牛客 ~0.5s/题），大库时前端需提示等待
+  // 耗时与待补题数成正比（洛谷 ~0.3s/题、牛客 ~0.45s/题），故每平台单次运行题数有上限
+  // （PLATFORM_LIMITS.maxPerRun）：超出的题数用 capped 如实回传，下次点击继续
+  // 响应：{ ok, results: [{ platform, scanned, filled, nativeFilled, repaired, missing, failed, capped, details }], unknownLeft }
+  //   nativeFilled = 该平台 native_difficulty 由 NULL 被补上的题数（与 filled 相互独立：
+  //   难度已有值但原生值缺失时只增 nativeFilled —— 双标度要能各自如实上报）
+  //   scanned = 本次实际处理的题数（已扣除 capped）；capped = 本次因上限未处理的题数
   r.post('/backfill-difficulty', asyncHandler(async (_req, res) => {
     try {
       const results = await backfillDifficulties(db, fetchFn);
@@ -483,11 +545,27 @@ function bucketName(difficulty: number | null): string {
   return '2200+';
 }
 
-/** 行 → API 形态（tags 反序列化 + 派生 status） */
-function toApiProblem(r: ProblemRow): Omit<ProblemRow, 'tags'> & { tags: string[]; status: 'ac' | 'tried' | 'none' } {
+/**
+ * 行 → API 形态：tags 反序列化、派生 status，并把原生难度三件套转成 camelCase 下发。
+ * `difficultyLabel` 由 `nativeDifficultyLabel(platform, native_difficulty)` 派生（映射表只在
+ * shared/src/difficulty.ts 一份，路由层不做任何本地换算）；原生难度未知 → label 也是 null
+ * （**未知一律 null，不猜**：绝不退回用 CF rating 反推一个「档位名」）。
+ */
+function toApiProblem(r: ProblemRow): Omit<ProblemRow, 'tags' | 'native_difficulty' | 'difficulty_scale'> & {
+  tags: string[];
+  nativeDifficulty: string | null;
+  difficultyScale: string | null;
+  difficultyLabel: string | null;
+  status: 'ac' | 'tried' | 'none';
+} {
+  const { native_difficulty, difficulty_scale, ...rest } = r;
   return {
-    ...r,
+    ...rest,
     tags: safeTags(r.tags),
+    nativeDifficulty: native_difficulty,
+    difficultyScale: difficulty_scale,
+    difficultyLabel:
+      native_difficulty === null ? null : nativeDifficultyLabel(r.platform, native_difficulty),
     status: r.ac_count > 0 ? 'ac' : r.attempts > 0 ? 'tried' : 'none',
   };
 }

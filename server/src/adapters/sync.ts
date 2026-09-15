@@ -8,13 +8,14 @@ import { insertNormalized } from '../import/importService.ts';
 import { getAdapter } from './registry.ts';
 import { createBackup } from '../backup.ts';
 import { ManualImportRequiredError, SyncError, type FetchOptions, type SyncErrorCode } from './types.ts';
+import { cancelAutoContinue, scheduleAutoContinue } from './syncScheduler.ts';
 
 export interface SyncOptions {
   userId?: number;
   /** 仅同步最近 N 天（补充拉取窗口）：不改 platform_accounts 状态，插入仍按唯一键去重 */
   days?: number;
-  /** 同步触发来源（写入 sync_runs.triggered_by，供同步中心展示） */
-  triggeredBy?: 'manual' | 'retry' | 'days' | 'all';
+  /** 同步触发来源（写入 sync_runs.triggered_by，供同步中心展示）；auto = 后台分批续拉 */
+  triggeredBy?: 'manual' | 'retry' | 'days' | 'all' | 'auto';
 }
 
 /** 每个平台建议的同步间隔（毫秒）：按平台风控强度选定，同步中心据此展示「下次推荐同步时间」 */
@@ -25,6 +26,8 @@ const SUGGESTED_SYNC_INTERVAL_MS: Partial<Record<PlatformId, number>> = {
   nowcoder: 12 * 3600_000,
   leetcode: 12 * 3600_000,
   daimayuan: 12 * 3600_000,
+  // QOJ：前置 Cloudflare，请求密度越低越安全；提交记录按页（10 条/页）拉取，不宜过于频繁
+  qoj: 12 * 3600_000,
 };
 const DEFAULT_SYNC_INTERVAL_MS = 12 * 3600_000;
 
@@ -80,11 +83,38 @@ function isAscendingPlatform(platform: PlatformId): boolean {
 }
 
 /**
+ * 同平台互斥锁（进程内）：手动点击、一键同步、失败重试、days 补拉与后台分批续拉可能同时到达
+ * 同一平台，并发请求会成倍放大平台风控/封号风险，故同一平台同时只允许一个同步在跑。
+ *
+ * 重复触发**不排队**：直接返回一个带解释的 SyncResult，且不写 sync_runs 行——它没有产生任何
+ * 平台请求，不是「同步失败」，写失败行会污染同步中心的健康度推导。
+ * 锁在所有退出路径（含异常）释放，见 syncPlatform 的 try/finally。
+ */
+const SYNC_IN_FLIGHT = new Set<PlatformId>();
+
+/**
+ * 会抢占后台续拉队列的触发来源：**用户主动发起的完整同步**（manual 手动点同步 / all 一键全同步 /
+ * retry 失败重试）。只有它们接管队列——它们会完整走一遍「拉取 → 写 platform_accounts →
+ * 若仍被截断则在末尾重新注册第 1 轮」，队列语义因此被新任务接续。
+ *
+ * 明确排除：
+ * - `days`：补充拉取窗口，不改 platform_accounts、末尾也不重新注册（见 runSyncPlatform）。
+ *   若在此取消待续拉，DB 里仍标着 sync_truncated=1 / backfill_page=N，但剩余轮次已被静默丢弃。
+ * - `auto`：后台续拉自身，当然不清自己的队列。
+ * - `undefined`（未声明来源的调用方，如模板页「例题一键同步」）：不是「完整同步」语义，
+ *   不清队列；本次若被截断，末尾的注册逻辑会复用/接续既有队列。
+ */
+function preemptsAutoContinue(triggeredBy: SyncOptions['triggeredBy']): boolean {
+  return triggeredBy === 'manual' || triggeredBy === 'all' || triggeredBy === 'retry';
+}
+
+/**
  * 同步某个平台账号的刷题记录（分批防封号）：
- * 1. 检查平台开关（settings.adapter.<platform>.enabled，缺省启用）
- * 2. 读取 platform_accounts.last_sync_at / sync_truncated 做增量或补全
- * 3. 适配器按 maxSubmissions 上限分批拉取 → insertNormalized 事务入库
- * 4. 更新 last_sync_at / sync_truncated 与账号信息
+ * 1. 同平台互斥 + 抢占续拉队列（仅用户主动发起的完整同步会取消该平台待执行的续拉）
+ * 2. 检查平台开关（settings.adapter.<platform>.enabled，缺省启用）
+ * 3. 读取 platform_accounts.last_sync_at / sync_truncated 做增量或补全
+ * 4. 适配器按 maxSubmissions 上限分批拉取 → insertNormalized 事务入库
+ * 5. 更新 last_sync_at / sync_truncated 与账号信息；截断时注册后台续拉
  *
  * 防封号策略：单次同步只拉 maxSubmissions 条新增（默认 1000），触及上限即停止并标记
  * sync_truncated=1；下次同步自动进入补全模式（backfill）继续拉取更早的历史，把原本一次性的
@@ -93,6 +123,39 @@ function isAscendingPlatform(platform: PlatformId): boolean {
  * 平台无公开 API（ManualImportRequiredError）→ 转为引导提示而非失败。
  */
 export async function syncPlatform(
+  db: Db,
+  platform: PlatformId,
+  handle: string,
+  opts: SyncOptions = {},
+): Promise<SyncResult> {
+  // 用户主动触发的完整同步（manual / all / retry）抢占后台续拉队列：先取消该平台待执行的续拉，
+  // 本次若仍被截断会在末尾重新注册一个第 1 轮任务——用户的一次同步即接管队列，
+  // 不会与后台续拉交错请求同一平台。days（补充拉取，末尾不重新注册）与 auto（续拉自身）
+  // 都不抢占；triggeredBy 缺省同样不抢占（未见声明即不假设是完整同步）。
+  //
+  // 位置：必须在内存互斥锁**之后**。被锁拒绝的重复触发没有发出任何平台请求、也没写
+  // platform_accounts，若在锁前取消，则「正在同步中：已跳过本次重复触发」会顺带杀掉待续拉队列
+  // （调度器 settle 时 jobs.get(platform) !== job → 不再排期），用户不点第二次就永远不续拉。
+  if (SYNC_IN_FLIGHT.has(platform)) {
+    return {
+      platform,
+      handle,
+      imported: 0,
+      skipped: 0,
+      errors: [`平台 ${platform} 正在同步中：已跳过本次重复触发（同平台串行执行，请等待当前同步结束）`],
+    };
+  }
+  SYNC_IN_FLIGHT.add(platform);
+  try {
+    if (preemptsAutoContinue(opts.triggeredBy)) cancelAutoContinue(platform);
+    return await runSyncPlatform(db, platform, handle, opts);
+  } finally {
+    SYNC_IN_FLIGHT.delete(platform);
+  }
+}
+
+/** syncPlatform 的实际执行体（仅在同平台互斥锁内调用，不对外导出）。 */
+async function runSyncPlatform(
   db: Db,
   platform: PlatformId,
   handle: string,
@@ -168,7 +231,13 @@ export async function syncPlatform(
     };
     const cookie = readSetting(`cookie.${platform}`);
     const csrf = readSetting(`csrf.${platform}`);
+    // 复刻浏览器 UA（QOJ 等 cf_clearance 绑定 UA 的平台需要；缺省由适配器用内置 UA）
+    const ua = readSetting(`ua.${platform}`);
     const maxSubmissions = readMaxSubmissions(db);
+    // 计蒜客练习（题库）提交开关：缺省开启，仅字面量 'false' 关闭
+    const practiceSync = platform === 'jisuanke'
+      ? readSetting('jisuanke.practiceSync') !== 'false'
+      : undefined;
     // 补全模式：上次同步被截断（仍有更早历史待拉），且非换账号全量重拉
     const backfill = !daysWindow && !handleChanged && account?.sync_truncated === 1;
     mode = daysWindow ? 'days' : handleChanged ? 'full' : backfill ? 'backfill' : 'incremental';
@@ -181,8 +250,10 @@ export async function syncPlatform(
       ...(daysWindow && since ? { windowSince: since } : {}),
       ...(cookie ? { cookie } : {}),
       ...(csrf ? { csrf } : {}),
+      ...(ua ? { ua } : {}),
       ...(knownExternalIds ? { knownExternalIds } : {}),
       maxSubmissions,
+      ...(practiceSync !== undefined ? { practiceSync } : {}),
       ...(backfill ? { backfill: true } : {}),
       ...(backfill && account?.backfill_page ? { backfillFromPage: account.backfill_page } : {}),
     };
@@ -247,6 +318,14 @@ export async function syncPlatform(
       result.note =
         `提交记录较多，已分批同步 ${r.imported} 条以防触发平台风控；再次点击同步可继续补全更早的历史记录。` +
         `（单次上限可在「设置 → 平台账号与适配器」中调整）`;
+    }
+    // 截断后按平台节奏注册后台续拉：把「多次点击同步」变成自动分批。
+    // days 窗口模式是补充拉取（不改账号状态）、auto 是续拉自身再截断——两者都不注册，避免无限续拉。
+    if (truncated && opts.triggeredBy !== 'auto' && opts.triggeredBy !== 'days') {
+      const state = scheduleAutoContinue(db, platform, handle);
+      if (state) {
+        result.autoContinue = { round: state.round, maxRounds: state.maxRounds, nextAt: state.nextAt };
+      }
     }
     recordSyncRun(db, userId, platform, handle, startedAt, startedTick, {
       mode, status: 'ok', imported: r.imported, skipped: r.skipped, truncated, waitedMs,

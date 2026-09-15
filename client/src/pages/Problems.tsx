@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Alert,
   Button,
   Checkbox,
   Form,
@@ -9,6 +10,7 @@ import {
   Modal,
   Select,
   Space,
+  Switch,
   Table,
   Tabs,
   Tag,
@@ -25,7 +27,7 @@ import { PLATFORMS } from '../../../shared/src/index.ts'
 import IntentPopover from '../components/IntentPopover'
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
-import { difficultyColor, PLATFORM_COLOR, tagColor } from '../ui'
+import { difficultyColor, formatDifficulty, PLATFORM_COLOR, platformName, tagColor } from '../ui'
 import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
 import { codeOptionsFromTags } from '../intentOptions'
 import { get, post, put } from '../api'
@@ -69,6 +71,12 @@ interface ProblemRow {
   problem_key: string
   title: string
   difficulty: number | null
+  /** 平台原生难度原文（服务端下发的 nativeDifficulty；未知为 null） */
+  nativeDifficulty?: string | null
+  /** 原生难度所属标度（服务端下发的 difficultyScale） */
+  difficultyScale?: string | null
+  /** 服务端按标度派生的原生档位名（如洛谷「提高」/ 力扣「中等」；原生难度未知时为 null） */
+  difficultyLabel?: string | null
   url: string | null
   tags: string[]
   attempts: number
@@ -143,6 +151,8 @@ export default function Problems() {
   // 内置题库开箱即用：默认包含未做题库题（否则题库再大默认视图也只有做过的题）
   const [includeBank, setIncludeBank] = useState(true)
   const [importOpen, setImportOpen] = useState(false)
+  /** 「导入刷题记录」弹窗当前页签（受控：SyncTab 用它判断自己是否活跃，从而刷新/轮询续拉状态） */
+  const [importTab, setImportTab] = useState('sync')
   const [cleaning, setCleaning] = useState(false)
   const [manualForm] = Form.useForm()
   // 知识点管线（P4）：覆盖率 + 批跑/无 Key 导出入口
@@ -557,10 +567,17 @@ export default function Problems() {
       dataIndex: 'difficulty',
       width: 88,
       align: 'right',
-      render: (v: number | null) =>
-        v == null ? <span style={{ color: '#4e5a68' }}>-</span> : (
-          <span className="rating-pill mono" style={{ color: difficultyColor(v) }}>{v}</span>
-        ),
+      // 单元格只放 CF 标尺数值（列宽有限）；悬停给出「数值 · 平台 原生档位」双标度，
+      // 原生档位名直接用服务端下发的 difficultyLabel（前端不重算档位映射表）
+      render: (v: number | null, r) => (
+        <Tooltip title={formatDifficulty(v, r.difficultyLabel, r.difficultyScale)}>
+          {v == null ? (
+            <span style={{ color: '#4e5a68' }}>-</span>
+          ) : (
+            <span className="rating-pill mono" style={{ color: difficultyColor(v) }}>{v}</span>
+          )}
+        </Tooltip>
+      ),
     },
     {
       title: '标签',
@@ -882,11 +899,20 @@ export default function Problems() {
 
       <Modal title="导入刷题记录" open={importOpen} onCancel={() => setImportOpen(false)} footer={null} width={620}>
         <Tabs
+          // 受控页签：把「弹窗打开 + 当前是平台同步页签」作为 SyncTab 的 active，
+          // 打开弹窗/切回该页签时重新拉续拉状态（组件本身不随弹窗关闭卸载）
+          activeKey={importTab}
+          onChange={setImportTab}
           items={[
             {
               key: 'sync',
               label: '平台同步',
-              children: <SyncTab onDone={() => { setImportOpen(false); loadRef.current() }} />,
+              children: (
+                <SyncTab
+                  active={importOpen && importTab === 'sync'}
+                  onDone={() => { setImportOpen(false); loadRef.current() }}
+                />
+              ),
             },
             {
               key: 'bank',
@@ -1061,12 +1087,70 @@ export default function Problems() {
   )
 }
 
-function SyncTab({ onDone }: { onDone: () => void }) {
+/** GET /api/sync/status 的平台条目（Task 8 起含 autoContinue：该平台待执行的后台续拉） */
+interface SyncPlatformStatus {
+  platform: PlatformId
+  platformName: string
+  handle: string
+  enabled: boolean
+  lastSyncAt: string | null
+  status: string
+  latestRun: unknown
+  /** 后台续拉排期；无排期（未截断 / 已跑完 / 已取消 / 轮数设为 0）时为 null */
+  autoContinue: {
+    platform: PlatformId
+    handle: string
+    round: number
+    maxRounds: number
+    /** 下一轮预计开始时间（ISO 字符串） */
+    nextAt: string
+    running: boolean
+  } | null
+}
+
+/** 续拉排期时间 → 界面用的 HH:MM（无法解析时原样回显，不显示 Invalid Date） */
+function formatNextRunAt(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** 续拉状态轮询间隔：续拉按平台节奏排期（秒级到分钟级），10 秒粒度足以看到轮次推进，请求极轻 */
+const AUTO_CONTINUE_POLL_MS = 10_000
+
+function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boolean }) {
   const { message } = AntdApp.useApp()
   const [platform, setPlatform] = useState<PlatformId>('codeforces')
   const [handle, setHandle] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string>()
+  // 各平台后台续拉状态（GET /api/sync/status）：截断后服务端会自行分批续拉，这里给出进度与手动停止
+  const [statuses, setStatuses] = useState<SyncPlatformStatus[]>([])
+  const [cancelling, setCancelling] = useState<string>()
+
+  const loadStatus = useCallback(() => {
+    get<{ statuses: SyncPlatformStatus[] }>('/api/sync/status')
+      .then((r) => setStatuses(r.statuses ?? []))
+      .catch(() => { /* 服务端未升级时静默：仅影响续拉提示 */ })
+  }, [])
+
+  // 弹窗打开 / 切回本页签时重新拉取：本组件一旦挂载就不会随弹窗关闭而卸载
+  // （Modal 无 destroyOnClose、Tabs 不销毁非活动面板），只在挂载时拉一次会让横幅
+  // 永远停在旧轮次——续拉跑完/被取消后仍显示「后台续拉中，预计 HH:MM 继续」。
+  useEffect(() => {
+    if (active) loadStatus()
+  }, [active, loadStatus])
+
+  // Boolean(...)：旧版服务端整段没有 autoContinue 字段（undefined），不能被当成「有待续拉」而空转轮询
+  const hasPending = statuses.some((s) => Boolean(s.autoContinue))
+
+  // 有待续拉时轻量轮询，让轮次与预计时间自行推进（无需用户操作）；
+  // 没有待续拉或页签不活跃时不保留任何定时器（自停轮询）。
+  useEffect(() => {
+    if (!active || !hasPending) return
+    const timer = setInterval(loadStatus, AUTO_CONTINUE_POLL_MS)
+    return () => clearInterval(timer)
+  }, [active, hasPending, loadStatus])
 
   const run = async () => {
     if (!handle.trim()) return
@@ -1078,12 +1162,29 @@ function SyncTab({ onDone }: { onDone: () => void }) {
       if (r.truncated && r.note) parts.push(r.note)
       setResult(parts.join('，'))
       if (r.imported > 0) onDone()
+      // 本次若被分批上限截断，服务端已排下一次续拉：立刻刷新续拉提示
+      loadStatus()
     } catch (e) {
       message.error((e as Error).message)
     } finally {
       setBusy(false)
     }
   }
+
+  const cancelAutoContinue = async (p: PlatformId) => {
+    setCancelling(p)
+    try {
+      const r = await post<{ ok: boolean; cancelled: boolean }>('/api/sync/auto-continue/cancel', { platform: p })
+      message.success(r.cancelled ? `${platformName(p)}后台续拉已停止` : `${platformName(p)}当前没有待执行的续拉`)
+      loadStatus()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setCancelling(undefined)
+    }
+  }
+
+  const pending = statuses.filter((s) => s.autoContinue)
 
   return (
     <div>
@@ -1093,6 +1194,33 @@ function SyncTab({ onDone }: { onDone: () => void }) {
         <Button type="primary" loading={busy} onClick={run}>同步</Button>
       </Space>
       {result && <p style={{ marginTop: 12 }}>{result}</p>}
+      {pending.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {pending.map((s) => {
+            const ac = s.autoContinue!
+            return (
+              <Alert
+                key={s.platform}
+                type="info"
+                showIcon
+                style={{ marginBottom: 8 }}
+                // running 时服务端正在拉本轮，nextAt 尚未落到下一轮：此时不报「预计 HH:MM」（会显示成过去时间）
+                message={
+                  ac.running
+                    ? `后台续拉中：第 ${ac.round}/${ac.maxRounds} 轮（正在拉取）`
+                    : `后台续拉中：第 ${ac.round}/${ac.maxRounds} 轮，预计 ${formatNextRunAt(ac.nextAt)} 继续`
+                }
+                description={`${s.platformName}（${ac.handle}）：单次同步受分批上限截断后由后台自动续拉，可随时停止；停止不影响已导入的数据。`}
+                action={
+                  <Button size="small" loading={cancelling === s.platform} onClick={() => void cancelAutoContinue(s.platform)}>
+                    停止续拉
+                  </Button>
+                }
+              />
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -1105,30 +1233,27 @@ const LUOGU_DIFFICULTY_OPTIONS = [
   { value: 6, label: '省选/NOI- 及以上' },
 ]
 
+/** 平台默认拉取条数：CF / AtCoder 单次 API 调用即可拿全量，LeetCode 全量约 3300 题、代码源约 500 题 */
+function defaultBankMax(p: PlatformId): number {
+  return p === 'codeforces' ? 10000 : p === 'leetcode' ? 3500 : p === 'atcoder' ? 5000 : 1000
+}
+
 /** 「拉取题库」页签：从公开题库批量入库，扩充训练计划待选题池（无需账号）。 */
 function BankTab({ onDone }: { onDone: () => void }) {
   const { message } = AntdApp.useApp()
-  const [platform, setPlatform] = useState<'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke'>('luogu')
-  const [max, setMax] = useState(1000)
+  // 平台列表来自共享定义的题库能力（PLATFORMS.hasBank），不硬编码：QOJ 无公开题库接口，故不在此提供
+  const bankPlatforms = useMemo(() => PLATFORMS.filter((p) => p.hasBank), [])
+  const [platform, setPlatform] = useState<PlatformId>('luogu')
+  const [max, setMax] = useState(() => defaultBankMax('luogu'))
   const [luoguMin, setLuoguMin] = useState(3)
+  // AtCoder：用洛谷 AT 镜像题补算法标签（默认关，覆盖有限）。仅该平台时随请求下发 atcoderTags
+  const [atcoderTags, setAtcoderTags] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string>()
 
-  const BANK_PLATFORM_NAMES: Record<typeof platform, string> = {
-    luogu: '洛谷',
-    nowcoder: '牛客',
-    codeforces: 'Codeforces',
-    leetcode: 'LeetCode',
-    atcoder: 'AtCoder',
-    daimayuan: '代码源',
-    jisuanke: '计蒜客',
-  }
-
-  const switchPlatform = (v: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke') => {
+  const switchPlatform = (v: PlatformId) => {
     setPlatform(v)
-    // Codeforces / AtCoder 单次 API 调用即可拿全量，默认直接全拉
-    // LeetCode 全量约 3300+ 题（按页拉取，约 1 分钟）；代码源约 500 题
-    setMax(v === 'codeforces' ? 10000 : v === 'leetcode' ? 3500 : v === 'atcoder' ? 5000 : 1000)
+    setMax(defaultBankMax(v))
   }
 
   const run = async () => {
@@ -1137,14 +1262,21 @@ function BankTab({ onDone }: { onDone: () => void }) {
     try {
       const r = await post<{
         ok: boolean; platform: string; total: number | null; fetched: number; inserted: number; updated: number
+        tagScanned?: number; tagMatched?: number; tagWithTags?: number; tagSkipped?: number
       }>('/api/problems/bank', {
         platform,
         max,
         ...(platform === 'luogu' ? { luoguMinDifficulty: luoguMin } : {}),
+        ...(platform === 'atcoder' && atcoderTags ? { atcoderTags: true } : {}),
       })
       const totalPart = r.total ? `（题库共 ${r.total} 题）` : ''
-      setResult(`拉取 ${r.fetched} 题${totalPart}：新增 ${r.inserted}，更新 ${r.updated}`)
-      message.success(`${BANK_PLATFORM_NAMES[platform]}题库已入库，训练计划选题池已扩充`)
+      // 标签桥统计只在真的开了桥时由服务端下发（未开时无这些键）
+      const tagPart =
+        r.tagScanned === undefined
+          ? ''
+          : `；洛谷镜像补标签：扫描 ${r.tagScanned} 题、命中题号 ${r.tagMatched ?? 0}、其中带标签 ${r.tagWithTags ?? 0}`
+      setResult(`拉取 ${r.fetched} 题${totalPart}：新增 ${r.inserted}，更新 ${r.updated}${tagPart}`)
+      message.success(`${platformName(platform)}题库已入库，训练计划选题池已扩充`)
       onDone()
     } catch (e) {
       message.error((e as Error).message)
@@ -1158,21 +1290,14 @@ function BankTab({ onDone }: { onDone: () => void }) {
       <p style={{ color: '#8993a2' }}>
         软件已内置 Codeforces 等题库，开箱即可供训练计划/题单选题；需要更多题目时从这里扩充（无需账号/Cookie，不影响刷题统计）。
         Codeforces / AtCoder 一次调用秒级完成；洛谷/牛客/LeetCode/代码源按页拉取，拉取量越大耗时越长（约 1-2 分钟/千题）。
+        列表只列有公开题库的平台（QOJ 无题库接口，故不提供拉取）。
       </p>
       <Space wrap>
         <Select
           style={{ width: 140 }}
           value={platform}
           onChange={switchPlatform}
-          options={[
-            { value: 'luogu' as const, label: '洛谷' },
-            { value: 'nowcoder' as const, label: '牛客' },
-            { value: 'codeforces' as const, label: 'Codeforces' },
-            { value: 'atcoder' as const, label: 'AtCoder' },
-            { value: 'leetcode' as const, label: 'LeetCode' },
-            { value: 'daimayuan' as const, label: '代码源' },
-            { value: 'jisuanke' as const, label: '计蒜客' },
-          ]}
+          options={bankPlatforms.map((p) => ({ value: p.id, label: p.name }))}
         />
         <InputNumber
           min={50}
@@ -1197,13 +1322,24 @@ function BankTab({ onDone }: { onDone: () => void }) {
           />
         </div>
       )}
+      {platform === 'atcoder' && (
+        <div style={{ marginTop: 12 }}>
+          <Space>
+            <Switch checked={atcoderTags} onChange={setAtcoderTags} />
+            <span style={{ color: '#8993a2' }}>
+              用洛谷镜像补标签（默认关；覆盖有限：实测 250 行样本中 139 行命中题号、仅 68 行真的带标签，
+              结果里的命中计数如实回传）
+            </span>
+          </Space>
+        </div>
+      )}
       {result && <p style={{ marginTop: 12 }}>{result}</p>}
       <BackfillDifficultyCard />
     </div>
   )
 }
 
-/** 「拉取题库」页签内的难度回填区块：对库内未知难度的洛谷/牛客题逐题查询公开接口补全。 */
+/** 「拉取题库」页签内的难度回填区块：对库内未知难度/未知原生难度/缺标签的题跨平台查询公开接口补全。 */
 function BackfillDifficultyCard() {
   const { message } = AntdApp.useApp()
   const [busy, setBusy] = useState(false)
@@ -1215,14 +1351,17 @@ function BackfillDifficultyCard() {
     try {
       const r = await post<{
         ok: boolean
-        results: Array<{ platform: string; scanned: number; filled: number; repaired: number; missing: number; failed: number }>
+        results: Array<{
+          platform: string; scanned: number; filled: number; nativeFilled: number
+          repaired: number; missing: number; failed: number; capped: number
+        }>
         unknownLeft: number
       }>('/api/problems/backfill-difficulty', {})
       const parts = r.results.map((x) => {
-        const name = x.platform === 'nowcoder' ? '牛客' : x.platform === 'luogu' ? '洛谷' : x.platform
-        return `${name}：补难度 ${x.filled} 题、修标题/标签 ${x.repaired} 题${x.missing ? `、官方无难度 ${x.missing} 题` : ''}${x.failed ? `、失败 ${x.failed} 题` : ''}`
+        const name = platformName(x.platform as PlatformId)
+        return `${name}：补难度 ${x.filled} 题、补原生难度 ${x.nativeFilled} 题、修标题/标签 ${x.repaired} 题${x.missing ? `、官方无难度 ${x.missing} 题` : ''}${x.failed ? `、失败 ${x.failed} 题` : ''}${x.capped ? `、本次上限外还有 ${x.capped} 题（再点一次继续）` : ''}`
       })
-      setResult(parts.length ? parts.join('；') + `。全库剩余未知难度 ${r.unknownLeft} 题` : '库内没有待补难度的洛谷/牛客题')
+      setResult(parts.length ? parts.join('；') + `。全库剩余未知难度 ${r.unknownLeft} 题` : '库内没有待回填难度的题')
       message.success('难度回填完成')
     } catch (e) {
       message.error((e as Error).message)
@@ -1234,8 +1373,13 @@ function BackfillDifficultyCard() {
   return (
     <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #222831' }}>
       <p style={{ color: '#8993a2' }}>
-        补全库内「未知难度」的洛谷/牛客题（逐题查询官方接口，牛客约 0.5 秒/题，请耐心等待）；
-        牛客同时修复历史遗留的标题混入标签问题。Codeforces 未知难度来自 gym 与官方 Unrated 比赛，无公开难度可补。
+        补全库内「未知难度 / 未知原生难度 / 缺标签」的题，覆盖所有平台：整表型平台
+        （Codeforces / AtCoder / 力扣 / 计蒜客）先拉一次题库表再在本地比对；逐题型平台
+        （洛谷 / 牛客 / 代码源）逐题查询官方接口（洛谷约 0.3 秒/题、牛客约 0.45 秒/题，请耐心等待），
+        连续失败会被判定为风控并中止该平台。牛客同时修复历史遗留的标题混入标签问题。
+        为避免一次点击耗时过长，单次每个平台有题数上限（洛谷 400、牛客/代码源 300、整表平台 2000），
+        超出部分在结果里如实提示，再点一次即可继续。
+        QOJ 无难度数据来源；Codeforces 的 gym 与官方 Unrated 比赛无公开难度可补。
       </p>
       <Button loading={busy} onClick={run}>一键回填未知难度</Button>
       {result && <p style={{ marginTop: 12 }}>{result}</p>}

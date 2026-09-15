@@ -347,12 +347,50 @@ function extractXmlText(xml: string, depth: number, out: string[]): void {
   }
 }
 
+/**
+ * 清洗第三方库错误信息中的二进制字节。
+ * epub2/adm-zip 解析失败时会把文件内容拼进 message（如 `Invalid/missing file PK\x03\x04…`），
+ * 该 message 会经 routes/ai.ts 原样返回给客户端，故剥掉控制字符与 U+FFFD 替换符。
+ * 注意用黑名单而非「只留 ASCII」：后者会把中文错误信息一起清空。
+ */
+function sanitizeErrorMessage(err: unknown, maxChars = 120): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const cleaned = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '无法解析文件内容';
+  return cleaned.length > maxChars ? `${cleaned.slice(0, maxChars)}…` : cleaned;
+}
+
+/** zip 容器魔数：PK\x03\x04（普通）/ PK\x05\x06（空归档）/ PK\x07\x08（分卷） */
+function looksLikeZip(data: Uint8Array): boolean {
+  if (data.length < 4) return false;
+  if (data[0] !== 0x50 || data[1] !== 0x4b) return false;
+  const b2 = data[2];
+  const b3 = data[3];
+  return (b2 === 0x03 && b3 === 0x04) || (b2 === 0x05 && b3 === 0x06) || (b2 === 0x07 && b3 === 0x08);
+}
+
 /** EPub (.epub)：epub2 提取章节 HTML → turndown 转 Markdown */
 async function convertEpub(data: Uint8Array): Promise<ConvertResult> {
+  // 先按 zip 魔数拦截：epub2 对非 zip 输入会把整个文件内容拼进错误信息
+  if (!looksLikeZip(data)) {
+    throw new Error('EPub 解析失败：不是有效的 zip 容器（文件可能已损坏或被截断）');
+  }
   // epub2 是 CJS 包，动态 import 兼容；无类型声明，按 any 处理
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { EPub } = await import('epub2') as any;
-  const epub = await EPub.createAsync(toArrayBuffer(data));
+  // 必须传 Buffer：epub2 的 zipfile 兜底分支把入参交给 adm-zip，而 adm-zip 只认
+  // Buffer/路径字符串（ArrayBuffer 会被当成空归档，导致 "No files in archive"）。
+  // epub2 的类型声明写的是 string，与它运行时的实际行为不符。
+  let epub: any;
+  try {
+    epub = await EPub.createAsync(Buffer.from(data));
+  } catch (e) {
+    throw new Error(`EPub 解析失败：${sanitizeErrorMessage(e)}`);
+  }
   const td = createTurndown();
   const parts: string[] = [];
   // 元数据标题

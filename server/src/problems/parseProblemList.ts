@@ -55,6 +55,10 @@ const URL_PATTERNS: UrlPattern[] = [
   // 力扣题单：slug 即 problemKey（同步/题库同键）。cn 为接入平台，com 链接同 slug 一并识别
   { re: /leetcode\.cn\/problems\/([a-z0-9_-]+)/i, platform: 'leetcode', key: (m) => m[1].toLowerCase() },
   { re: /leetcode\.com\/problems\/([a-z0-9_-]+)/i, platform: 'leetcode', key: (m) => m[1].toLowerCase() },
+  // QOJ 比赛内题目：qoj.ac/contest/3588/problem/17753 → key 3588-17753（与同步适配器同键）
+  { re: /qoj\.ac\/contest\/(\d+)\/problem\/([A-Za-z0-9_]+)/i, platform: 'qoj', key: (m) => `${m[1]}-${m[2]}` },
+  // QOJ 题库题目：qoj.ac/problem/9242 → key 9242（与同步适配器同键）
+  { re: /qoj\.ac\/problem\/([A-Za-z0-9_]+)/i, platform: 'qoj', key: (m) => m[1] },
 ];
 
 /**
@@ -64,7 +68,8 @@ const URL_PATTERNS: UrlPattern[] = [
  * - CF-1234A → codeforces / 1234A
  * - 洛谷-P1001 → luogu / P1001
  * - AtCoder-abc300_a → atcoder / abc300_a
- * 其他不支持的 OJ（如 QOJ、SPOJ 等）返回 null 跳过。
+ * - QOJ-9242 → qoj / 9242
+ * 其他不支持的 OJ（如 SPOJ 等）返回 null 跳过。
  */
 function parseVJudgeUrl(line: string): { platform: PlatformId; problemKey: string; url?: string; rest: string } | null {
   // OJ 标识可为英文（Gym/CF/AtCoder）或中文（洛谷）；ID 为字母数字下划线
@@ -90,6 +95,9 @@ function parseVJudgeUrl(line: string): { platform: PlatformId; problemKey: strin
     problemKey = id.toLowerCase();
   } else if (oj === 'nowcoder') {
     platform = 'nowcoder';
+    problemKey = id;
+  } else if (oj === 'qoj') {
+    platform = 'qoj';
     problemKey = id;
   }
   if (!platform) return null;

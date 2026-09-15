@@ -173,17 +173,30 @@ node server/scripts/build-exe.mjs
 
 ## 各平台接入状态
 
-| 平台 | 自动同步 | 方式 | 说明 |
-|------|---------|------|------|
-| Codeforces | ✅ | 官方公开 API `user.status` | 无需登录；按新到旧分页，整页提交号已知即提前终止（增量） |
-| AtCoder | ✅ | 社区 API `kenkoooo.com` v3 | 支持增量（from_second）；题目资源 24h 磁盘缓存；官方要求页间 ≥1s |
-| 洛谷 | ✅（需 Cookie） | `record/list` 非官方 API | 设置页填写 `_uid` / `__client_id` 两项 Cookie 后自动同步；难度分级（0-8）自动映射为 CF rating；标签经 `x-lentille-request` 头 + `/_lfe/tags` 字典获取 |
-| 牛客 | ✅ | 公开 HTML `acm/contest/profile/{uid}/practice-coding` | 无需登录/Cookie（牛客已下线 JSON API）；解析提交表格，支持增量与分页；题目无难度/标签字段（数据源限制） |
-| 代码源 | ✅（需 Cookie） | Hydro JSON API `/record?uidOrName=`（`Accept: application/json`） | 设置页填写 `sid` 一项会话 Cookie 后自动同步（每页 100 条，增量提前终止）；走 Hydro 原生 JSON 内容协商直接取 rdocs 数组，不依赖 HTML 模板解析，Hydro 升级改前端模板不会破坏适配器；状态按 Hydro STATUS 数字枚举映射统一 Verdict；仅含非比赛提交；题库页 `/p/{id}` 公开 |
-| LeetCode | ✅（需 Cookie） | leetcode.cn GraphQL `submissionList` | 设置页填写 Cookie 后自动同步（每页 40 条，最多 250 页）；仅接入力扣中国（leetcode.cn），国际版接口结构不同暂未接入；题库匿名可访问 |
-| 计蒜客 | ✅（需 Cookie） | `/api/contests?hasParticipated=true` + 逐赛 `/api/contest/submissions` | 设置页整段粘贴登录 Cookie 后自动同步（站点给未登录访客也发游客 `s` 会话，需确认已登录再从 Network 请求头复制）；无统一记录页，按「参加过的比赛」逐场拉取提交（每场至多 2 个请求，30 场/次分批）；以比赛序号为补全游标；作业/练习题不在同步范围 |
+| 平台 | 自动同步 | 方式 | 难度标度（映射为 CF rating，800–3500） | 说明 |
+|------|---------|------|------|------|
+| Codeforces | ✅ | 官方公开 API `user.status` | `rating` 800–3500（参考标尺，原值直接用；Gym/Unrated 无值） | 无需登录；按新到旧分页，整页提交号已知即提前终止（增量） |
+| AtCoder | ✅ | 社区 API `kenkoooo.com` v3 | kenkoooo IRT `difficulty`（−10000…4383，社区模型非官方）→ 按实测锚点分段线性映射 | 支持增量（from_second）；题目资源 24h 磁盘缓存；官方要求页间 ≥1s；拉取题库页签内有「用洛谷镜像补标签」开关（默认关，覆盖有限，命中计数随结果回传） |
+| 洛谷 | ✅（需 Cookie） | `record/list` 非官方 API | `difficulty` **0–8 共 9 档**（0 = 暂无评定 → 未知）→ 800/1000/1500/1800/2200/2400/2600/3400 | 设置页填写 `_uid` / `__client_id` 两项 Cookie 后自动同步；标签经 `x-lentille-request` 头 + `/_lfe/tags` 字典获取 |
+| 牛客 | ✅ | 公开 HTML `acm/contest/profile/{uid}/practice-coding` | 「难度分」**200–4000、100 的倍数**（与 CF 同量纲，原值钳到 800–3500 直接用；约 20% 题目为空 → 未知） | 无需登录/Cookie（牛客已下线 JSON API）；解析提交表格，支持增量与分页；题库页可解析算法标签 |
+| 代码源 | ✅（需 Cookie） | Hydro JSON API `/record?uidOrName=`（`Accept: application/json`） | 站内 1–10 档（管理员设定，否则按 Hydro `round(10 − 13·s·acRate)` 算法复算）→ 800/900/1000/1200/1400/1600/1800/2000/2200/2400 | 设置页填写 `sid` 一项会话 Cookie 后自动同步（每页 100 条，增量提前终止）；走 Hydro 原生 JSON 内容协商直接取 rdocs 数组，不依赖 HTML 模板解析，Hydro 升级改前端模板不会破坏适配器；状态按 Hydro STATUS 数字枚举映射统一 Verdict；仅含非比赛提交；题库页 `/p/{id}` 公开 |
+| LeetCode | ✅（需 Cookie） | leetcode.cn GraphQL `submissionList` | easy/medium/hard 三档 → 1000/1500/2100（面试导向，启发式） | 设置页填写 Cookie 后自动同步（每页 40 条，最多 250 页）；仅接入力扣中国（leetcode.cn），国际版接口结构不同暂未接入；题库匿名可访问，拉取带中文标签（`nameTranslated`） |
+| 计蒜客 | ✅（需 Cookie） | `/api/contests?hasParticipated=true` + 逐赛 `/api/contest/submissions`；另含练习（题库）提交 | `difficultyType` = level1…level8 共 8 档（入门/普及−/普及/普及+/提高−/提高/提高+/省选/国赛）→ 与洛谷同表 800/1000/1500/1800/2200/2400/2600/3400 | 设置页整段粘贴登录 Cookie 后自动同步（站点给未登录访客也发游客 `s` 会话，需确认已登录再从 Network 请求头复制）；无统一记录页，按「参加过的比赛」逐场拉取提交（每场至多 2 个请求，30 场/次分批）；以比赛序号为补全游标；**练习（自由练题/题库）提交默认同步**（预筛 `/api/problems` 的 `status=passed` / `status=attempted` 两轮过滤 + 逐题 `/api/problem/submissions`），可在设置页关闭，「仅同步最近 N 天」窗口模式不跑练习段 |
+| QOJ | ✅（需 Cookie） | UOJ 系接口（Cloudflare 挑战后，需完整 Cookie 与浏览器 UA） | **不提供难度**（UOJ 数据模型无难度字段）→ 难度恒为「未知」 | 提交可同步；**不支持拉取题库**（题目列表在 Cloudflare 挑战之后，且平台无难度字段）；因难度为空，QOJ 题目不进入训练计划候选池 |
+
+> **难度统一标尺**：上表各平台的原生难度都映射到 Codeforces rating（800–3500），映射表**只有一份**，在 `shared/src/difficulty.ts`；原生值一并落库（`problems.native_difficulty` + `problems.difficulty_scale`），平台改档只需改这一个文件。映射为**近似值（±100–200）**，用于训练推荐与弱项分档，不作为精确评级。
 
 > 洛谷基于社区维护的非官方 API，接口结构可能随平台变更；若同步失败请更新 Cookie 重试。Cookie 仅保存在本机数据库，请勿外泄。
+
+## 已知限制
+
+- **洛谷难度是官方「临时定义」**：官方难度文档明确标注为临时定义，且 2026-06 已调整过档位体系（新增青题「提高」），黑题拆分（NOI / NOI+/CTS）也在计划中 —— 本文档的洛谷映射表基于当时实测，官方定稿后需要复核重算（表驱动 + `difficulty_scale` 使其成本可控）。
+- **牛客约 20% 题目没有难度分**：主要是新题，多为空值 → 这些题难度显示「未知」，回填管线会重试但仍可能长期为空。
+- **QOJ 不提供难度**：平台数据模型里没有难度字段，本软件不猜、不发明 —— QOJ 题目难度恒为空，**因此不进入训练计划候选池**。
+- **映射是近似值**：各平台难度与 CF rating 并非严格同构（AtCoder 的 kenkoooo 难度是社区 IRT 模型，力扣/代码源为启发式），映射误差约 ±100–200，仅用于训练推荐与弱项分档；平台改档或调整定义时，映射值可能需要重新实测。
+- **AtCoder 的「用洛谷镜像补标签」覆盖有限**：标签来自第三方（洛谷镜像题）归属，默认关闭（开关在「拉取题库」页签、选中 AtCoder 时出现）；实测 250 行样本中 139 行命中题号、其中仅 68 行真的带标签，不作为完整标签来源。
+- **难度回填按平台分批**：一次点击会遍历所有平台，但**每平台单次上限**（洛谷 400 题、牛客/代码源 300 题、整表平台 2000 题）会截断，超出的题数随响应回传，再点一次继续；未评级的题（洛谷「暂无评定」等）每次仍会被重新查询，属已知代价。
+- **后台续拉是进程内计划**：同步被单次上限截断时，后台按平台节奏（20–90 秒）自动续拉，默认最多 6 轮（设置页可改，0 = 关闭，可随时停止）；服务重启后续拉计划丢失，手动点一次同步即从已保存的游标继续。
 
 ## Cookie 配置方法（洛谷 / 代码源 / LeetCode / 计蒜客需要）
 

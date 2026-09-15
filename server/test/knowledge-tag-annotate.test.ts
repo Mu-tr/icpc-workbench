@@ -410,7 +410,7 @@ test('题库路径：新入库题并联 tag 标注，且按库内落定标签（
   // tag 标注必须按**落库后的** ['贪心'] 映射，而不是本次入参的 []
   db.prepare("INSERT INTO problems (platform,problem_key,title,tags) VALUES ('codeforces','9B','A. 题','[\"贪心\"]')").run();
   upsertBankProblems(db, [
-    { platform: 'codeforces', problemKey: '9B', title: 'A. 题', difficulty: null, url: null, tags: [] },
+    { platform: 'codeforces', problemKey: '9B', title: 'A. 题', difficulty: null, nativeDifficulty: null, difficultyScale: null, url: null, tags: [] },
   ]);
   assert.deepEqual(codeSourcesOf('9B'), ['basic.greedy:tag']);
 });

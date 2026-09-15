@@ -65,6 +65,20 @@ export function parseRetryAfter(header: string | null, now = Date.now()): number
   return null;
 }
 
+/**
+ * 该响应是否带 Cloudflare 托管挑战标记（`cf-mitigated: challenge`）。
+ *
+ * 用途：部分站点（如 qoj.ac）对非浏览器指纹的请求**间歇性**下发挑战——
+ * 同一凭据、同一头部连续请求会实测出「403 挑战 / 200 正常」交替。
+ * 挑战属于可重试的瞬时状态（下一次请求即可能放行），因此这类平台的传输层
+ * 应在自己的重试里把它当作可重试；本函数只提供判定，不改变默认策略。
+ *
+ * 只依据响应头判定：响应体在重试位置读取会消耗掉调用方要用的流。
+ */
+export function hasCloudflareChallenge(res: Response): boolean {
+  return (res.headers.get('cf-mitigated') ?? '').toLowerCase() === 'challenge';
+}
+
 /** 指数退避 + 抖动，并尊重 Retry-After（取二者较大值） */
 export function backoffDelayMs(
   attempt: number,

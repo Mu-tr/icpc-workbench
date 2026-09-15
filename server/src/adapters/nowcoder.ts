@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields } from '../../../shared/src/difficulty.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { pagedFetch } from './pagination.ts';
 import { asHttpClient, type HttpInit } from './http.ts';
@@ -129,6 +130,7 @@ export function createNowcoderAdapter(fetchFn: HttpInit = fetch): PlatformAdapte
               platform: 'nowcoder' as PlatformId,
               problemKey: row.pid,
               title: row.title || row.pid,
+              ...difficultyFields('nowcoder', null), // 提交列表不含难度：由题库/回填路径按难度分补齐
               url: `https://ac.nowcoder.com/acm/problem/${row.pid}`,
               tags: [],
             },

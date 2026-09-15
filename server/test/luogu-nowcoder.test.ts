@@ -167,7 +167,9 @@ test('luogu: with cookie normalizes records and problem info', async () => {
   assert.equal(r0.verdict, 'AC'); // status 12 = AC
   assert.equal(r0.problem.problemKey, 'P1001');
   assert.equal(r0.problem.title, 'A+B Problem');
-  assert.equal(r0.problem.difficulty, 1300); // 洛谷难度 2（普及-）→ CF 1300
+  assert.equal(r0.problem.difficulty, 1000); // 洛谷难度 2（普及-）→ CF 1000（统一实测表：2 → 1000）
+  assert.equal(r0.problem.nativeDifficulty, '2');
+  assert.equal(r0.problem.difficultyScale, 'luogu-2026-06');
   assert.deepEqual(r0.problem.tags, ['入门', '模拟']);
   assert.equal(r0.problem.url, 'https://www.luogu.com.cn/problem/P1001');
   assert.equal(r0.externalId, '9001');

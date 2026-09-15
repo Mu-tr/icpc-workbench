@@ -5,6 +5,7 @@ import { createDb } from './db/index.ts';
 import { applyPendingRestore, createBackup, maybeDailyBackup } from './backup.ts';
 import { seedBuiltinBank } from './db/builtinBank.ts';
 import { initAdapters } from './adapters/index.ts';
+import { configureSyncScheduler } from './adapters/syncScheduler.ts';
 import { asyncHandler } from './asyncHandler.ts';
 import { errorHandler, securityHeaders } from './middleware.ts';
 import { backupsRoutes } from './routes/backups.ts';
@@ -34,6 +35,8 @@ applyPendingRestore(config.dbPath);
 const db = createDb(config.dbPath);
 seedBuiltinBank(db); // 内置题库播种：版本变化时 upsert 一次，日常启动零开销
 initAdapters(config.dataDir);
+// 后台分批续拉调度器：截断的同步按平台节奏自动续拉下一批（未装配则不排期，不影响手动同步）
+configureSyncScheduler({ db });
 // 知识点管线：JSONL 源真相 → SQLite 索引幂等重建（无 JSONL 时零开销）
 initKnowledgeStore(config.dataDir);
 try {

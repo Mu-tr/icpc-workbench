@@ -15,6 +15,7 @@ export const PLATFORM_COLOR: Record<PlatformId, string> = {
   daimayuan: '#f2965c',
   leetcode: '#ffa116',
   jisuanke: '#7ee0a3', // 计蒜客品牌绿（暗色底可读版）
+  qoj: '#b18cff', // QOJ / Universal Cup：暗色底可读的紫罗兰
 }
 
 export function platformName(id: PlatformId): string {
@@ -31,6 +32,49 @@ export function difficultyColor(d: number | null | undefined): string {
   if (d < 2100) return '#a887ff' // candidate master
   if (d < 2400) return '#ffbd61' // master
   return '#ff5d70' // grandmaster+
+}
+
+/** 平台难度标度 → 展示用的平台名（标度名只在 shared/src/difficulty.ts 定义，这里只做中文名映射） */
+const SCALE_PLATFORM_NAME: Record<string, string> = {
+  'luogu-2026-06': '洛谷',
+  'jisuanke-level-8': '计蒜客',
+  'leetcode-tier': '力扣',
+  'hydro-1-10': '代码源',
+  'atcoder-kenkoooo-irt': 'AtCoder',
+  'nowcoder-score': '牛客',
+}
+
+/**
+ * 难度展示：CF 统一标尺数值 + 平台原生档位（题库未入库难度时给空态文案）。
+ *
+ * `difficulty` 是服务端映射到 CF rating 标尺后的值；`nativeLabel` 传服务端下发的
+ * `difficultyLabel`（映射表只在 shared/src/difficulty.ts 一份，前端不再自行换算档位名）。
+ * - 数值为空 → `emptyText`（默认「难度未知」），有原生档位也不显示；
+ * - 有原生档位且标度有对应平台名 → `1800 · 洛谷 提高`；
+ * - 其余（无原生档位、标度未知、cf-rating 的原生标签就是数值本身）→ 只给数值。
+ */
+export function formatDifficulty(
+  difficulty: number | null | undefined,
+  nativeLabel?: string | null,
+  scale?: string | null,
+  emptyText = '难度未知',
+): string {
+  if (difficulty == null) return emptyText
+  const platformName = scale ? SCALE_PLATFORM_NAME[scale] : undefined
+  return nativeLabel && platformName ? `${difficulty} · ${platformName} ${nativeLabel}` : String(difficulty)
+}
+
+/**
+ * 百分数展示的唯一格式化入口。
+ *
+ * 约定：后端 `server/src/analysis/stats.ts` 的 `rate()` 以及由它派生的
+ * `acRate` / `avgAcRate` / `gap`（`analysis/weakness.ts`）单位都是**百分数**
+ * ——`14.3` 表示 14.3%，`gap` 是百分点差值。因此本函数**只补 '%'、不做比例换算**；
+ * 曾出现的缺陷正是消费者误当 0–1 比例再乘 100（显示成 1430% / 4330.0%）。
+ * 使用方一律走这里，避免再次各写一份。
+ */
+export function pct(v: number): string {
+  return `${Math.round(v * 10) / 10}%`
 }
 
 /** AC 率文本配色（表格 / 统计用） */

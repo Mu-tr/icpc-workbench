@@ -1,25 +1,58 @@
 import type { PlatformId } from '../../../shared/src/index.ts';
-import { fetchWithChallenge, luoguDifficultyToRating } from './luogu.ts';
-import { leetcodeDifficultyToRating } from './leetcode.ts';
-import { jisuankeDifficultyToRating } from './jisuanke.ts';
+import { difficultyFields, parseNowcoderScore, toCfRating, type DifficultyScale } from '../../../shared/src/difficulty.ts';
+import { fetchWithChallenge } from './luogu.ts';
+import { parseJisuankeProblemTags } from './jisuanke.ts';
 import { asHttpClient, sleep, type HttpInit } from './http.ts';
+
+export { parseJisuankeProblemTags };
+
+/** 洛谷题库类型：P 常规题 / B 入门与面试 / CF、AT 为镜像题 / SP、UVA 为外站题 */
+export type LuoguProblemType = 'P' | 'B' | 'CF' | 'AT' | 'SP' | 'UVA';
 
 /** 题库题目（无提交记录，仅供扩充待选池） */
 export interface BankProblem {
   platform: PlatformId;
   problemKey: string;
   title: string;
-  /** CF rating 统一标尺 */
+  /** CF rating 统一标尺（未知一律 null，不产出猜测值） */
   difficulty: number | null;
+  /** 平台原生难度原文（未知为 null；平台改档后可据此按新标度重算） */
+  nativeDifficulty: string | null;
+  /** 原生难度所属标度（见 shared/src/difficulty.ts 的 DifficultyScale） */
+  difficultyScale: DifficultyScale | null;
   url: string;
   tags: string[];
+}
+
+/**
+ * `difficultyFields` 的题库包装：题库行的三个难度字段都是必填（未知 = null）。
+ * 映射表只此一份（shared/src/difficulty.ts），这里不做任何本地换算。
+ */
+function bankDifficulty(
+  platform: PlatformId,
+  raw: unknown,
+): { difficulty: number | null; nativeDifficulty: string | null; difficultyScale: DifficultyScale } {
+  const f = difficultyFields(platform, raw);
+  return {
+    difficulty: f.difficulty ?? null,
+    nativeDifficulty: f.nativeDifficulty ?? null,
+    difficultyScale: f.difficultyScale,
+  };
 }
 
 export interface BankFetchOptions {
   /** 洛谷难度下限（1-8 官方分级；默认 3=普及/提高-，过滤纯水题） */
   luoguMinDifficulty?: number;
+  /** 洛谷题库类型（默认 `['P']`；镜像题用 'CF' / 'AT'） */
+  luoguTypes?: LuoguProblemType[];
   /** 每平台最大拉取题数（默认 2000；洛谷约 40 页、牛客约 40 页） */
   max?: number;
+  /**
+   * 用洛谷 AT 镜像题补 AtCoder 算法标签（默认 false）。
+   * 洛谷 AT 镜像题号只有一部分能对应 kenkoooo 题号（`AT_abc300_a` → `abc300_a`；
+   * `AT1202Contest_a` 这类洛谷自定义比赛号无对应），故默认关闭并在结果里如实上报命中计数。
+   */
+  atcoderTagsFromLuogu?: boolean;
   /** 进度回调（每完成一页触发） */
   onProgress?: (fetched: { platform: PlatformId; count: number; total: number | null }) => void;
 }
@@ -29,6 +62,11 @@ export interface BankFetchResult {
   problems: BankProblem[];
   /** 服务端报告的题目总数（洛谷 count / 牛客「共 N 条」；解析失败为 null） */
   total: number | null;
+  /** AtCoder 标签桥统计（仅在 atcoderTagsFromLuogu 开启时给出） */
+  tagScanned?: number;
+  tagMatched?: number;
+  tagWithTags?: number;
+  tagSkipped?: number;
 }
 
 const LUOGU_API = 'https://www.luogu.com.cn';
@@ -63,61 +101,66 @@ export async function fetchLuoguBank(
 ): Promise<BankFetchResult> {
   const max = opts.max ?? 2000;
   const minDiff = clamp(opts.luoguMinDifficulty ?? 3, 1, 8);
+  const types = opts.luoguTypes && opts.luoguTypes.length > 0 ? opts.luoguTypes : (['P'] as LuoguProblemType[]);
   const problems: BankProblem[] = [];
   const tagDict = await fetchLuoguTagDict(fetchFn);
   let total: number | null = null;
 
-  for (let page = 1; page <= 200; page += 1) {
-    const url = `${LUOGU_API}/problem/list?page=${page}&type=P&difficulty=${minDiff}`;
-    const res = await fetchWithChallenge(asHttpClient(fetchFn), url, '', undefined, {
-      'x-lentille-request': 'content-only',
-      Accept: 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      Referer: `${LUOGU_API}/problem/list`,
-    });
-    if (!res.ok) {
-      throw new Error(`洛谷题库接口 HTTP ${res.status}，请稍后重试`);
-    }
-    const text = await res.text();
-    if (!text.trim().startsWith('{')) {
-      throw new Error('洛谷题库接口返回非 JSON（触发风控或接口变化），请稍后重试');
-    }
-    const data = JSON.parse(text) as {
-      status?: number;
-      data?: {
-        problems?: {
-          count?: number;
-          perPage?: number;
-          result?: LuoguListProblem[];
+  // 多类型：逐类型翻到空页/难度越界为止（每类型各自按难度升序返回）
+  outer: for (const type of types) {
+    for (let page = 1; page <= 200; page += 1) {
+      const url = `${LUOGU_API}/problem/list?page=${page}&type=${type}&difficulty=${minDiff}`;
+      const res = await fetchWithChallenge(asHttpClient(fetchFn), url, '', undefined, {
+        'x-lentille-request': 'content-only',
+        Accept: 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Referer: `${LUOGU_API}/problem/list`,
+      });
+      if (!res.ok) {
+        throw new Error(`洛谷题库接口 HTTP ${res.status}，请稍后重试`);
+      }
+      const text = await res.text();
+      if (!text.trim().startsWith('{')) {
+        throw new Error('洛谷题库接口返回非 JSON（触发风控或接口变化），请稍后重试');
+      }
+      const data = JSON.parse(text) as {
+        status?: number;
+        data?: {
+          problems?: {
+            count?: number;
+            perPage?: number;
+            result?: LuoguListProblem[];
+          };
         };
       };
-    };
-    const list = data.data?.problems;
-    if (!list || !Array.isArray(list.result)) {
-      throw new Error('洛谷题库接口响应结构异常，请稍后重试');
-    }
-    if (typeof list.count === 'number') total = list.count;
-    if (list.result.length === 0) break;
+      const list = data.data?.problems;
+      if (!list || !Array.isArray(list.result)) {
+        throw new Error('洛谷题库接口响应结构异常，请稍后重试');
+      }
+      // 多类型时 total 为各类型服务端总数之和（单类型即该类型的 count）
+      if (typeof list.count === 'number' && page === 1) total = (total ?? 0) + list.count;
+      if (list.result.length === 0) break;
 
-    for (const p of list.result) {
-      if (typeof p.pid !== 'string' || !p.pid) continue;
-      const rating =
-        typeof p.difficulty === 'number' ? luoguDifficultyToRating(p.difficulty) : null;
-      problems.push({
-        platform: 'luogu',
-        problemKey: p.pid,
-        title: p.name ?? p.pid,
-        difficulty: rating,
-        url: `https://www.luogu.com.cn/problem/${p.pid}`,
-        tags: (p.tags ?? [])
-          .map((id) => tagDict.get(id))
-          .filter((t): t is string => typeof t === 'string'),
-      });
+      for (const p of list.result) {
+        if (typeof p.pid !== 'string' || !p.pid) continue;
+        problems.push({
+          platform: 'luogu',
+          problemKey: p.pid,
+          title: p.name ?? p.pid,
+          // difficulty=0 = 洛谷「暂无评定」（注意与列表接口 difficulty 参数的「最小难度」语义不同，
+          // 后者由 luoguMinDifficulty 表达）→ 未知难度一律 null，不产出 difficulty 键
+          ...bankDifficulty('luogu', p.difficulty),
+          url: `https://www.luogu.com.cn/problem/${p.pid}`,
+          tags: (p.tags ?? [])
+            .map((id) => tagDict.get(id))
+            .filter((t): t is string => typeof t === 'string'),
+        });
+      }
+      opts.onProgress?.({ platform: 'luogu', count: problems.length, total });
+      if (problems.length >= max) break outer;
+      if (list.result.length < (list.perPage ?? LUOGU_PER_PAGE)) break;
+      await sleep(400); // 洛谷限速：页间间隔
     }
-    opts.onProgress?.({ platform: 'luogu', count: problems.length, total });
-    if (problems.length >= max) break;
-    if (list.result.length < (list.perPage ?? LUOGU_PER_PAGE)) break;
-    await sleep(400); // 洛谷限速：页间间隔
   }
   return { platform: 'luogu', problems: problems.slice(0, max), total };
 }
@@ -146,13 +189,17 @@ async function fetchLuoguTagDict(fetchFn: HttpInit): Promise<Map<number, string>
 interface NcBankRow {
   problemId: string;
   title: string;
+  /** CF rating 统一标尺（由原生难度分映射而来；未知为 null） */
   difficulty: number | null;
+  /** 站点难度分原文（映射前；未知为 null） */
+  nativeScore: number | null;
+  tags: string[];
 }
 
 /**
  * 牛客公开题库页（无需登录）：GET /acm/problem/list?page={n}
- * 表格行 <tr data-problemId="...">：列依次为 NC 题号 / 标题 / 难度分 / 通过数 / 收藏。
- * 难度分为 CF 风格分值（如 700 / 1100 / 1500），直接作为统一难度标尺。
+ * 表格行 <tr data-problemId="...">：列依次为 NC 题号 / 标题（+算法标签）/ 难度分 / 通过数 / 收藏。
+ * 难度分为 CF 风格分值（如 700 / 1100 / 1500），经统一标尺映射（[800,3500] 钳位）。
  * 页面无服务端难度筛选（前端 JS 过滤），按 orderById 顺序翻页。
  */
 export async function fetchNowcoderBank(
@@ -180,7 +227,7 @@ export async function fetchNowcoderBank(
       const m = html.match(/共\s*(\d+)\s*条/);
       if (m) total = Number(m[1]);
     }
-    const rows = parseNcRows(html);
+    const rows = parseNcBankRows(html);
     if (rows.length === 0) break;
 
     for (const row of rows) {
@@ -192,8 +239,11 @@ export async function fetchNowcoderBank(
         problemKey: key,
         title: row.title || `NC${key}`,
         difficulty: row.difficulty,
+        // 原生分落原文（而不是映射后的 CF 值）：分数低于 CF 下限时钳位会丢掉站点原值
+        nativeDifficulty: row.nativeScore === null ? null : String(row.nativeScore),
+        difficultyScale: 'nowcoder-score',
         url: `https://ac.nowcoder.com/acm/problem/${key}`,
-        tags: [],
+        tags: row.tags,
       });
     }
     opts.onProgress?.({ platform: 'nowcoder', count: problems.length, total });
@@ -204,22 +254,67 @@ export async function fetchNowcoderBank(
   return { platform: 'nowcoder', problems: problems.slice(0, max), total };
 }
 
-/** 解析牛客题库页表格行（data-problemId 行；列：NC 题号 / 标题 / 难度 / 通过数 / 收藏） */
-function parseNcRows(html: string): NcBankRow[] {
+/**
+ * 牛客行内单元格文本净化：去标签、`&nbsp;` 归一、空白压缩。
+ */
+export function stripNcCell(raw: string): string {
+  return raw.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** 牛客表格行的单元格解析结果（标题 / 算法标签 / 难度分） */
+export interface NcRowCells {
+  /** 标题单元格文本（行内无 `class="title"` 锚点时为 ''） */
+  title: string;
+  tags: string[];
+  /** 难度分（由共享校验器 parseNowcoderScore 裁决；未知为 null） */
+  nativeScore: number | null;
+}
+
+/**
+ * **唯一的**牛客行解析（题库列表页与标题搜索页两处读取方共用这一份，不得各写一套）。
+ *
+ * 三个必须遵守的坑：
+ * 1. **先收标签、再取标题**：标签是 `class="tag-label"` 的 `<a>`，标题是 `class="title"` 的 `<a>`；
+ *    若把整行文本抠一遍再 trim，标签文本会并进标题（本项目已踩过一次）。
+ * 2. **难度只认「标题单元格的下一个单元格」**：标题单元格带 `colspan="2"`，行内单元格数量不固定，
+ *    但难度列恒紧跟在标题单元格之后。没有标题单元格 → 难度未知（不得从 `tds[0]` 之类的位置顺延）；
+ *    绝**不**向后继续扫描找数字——否则难度为空的行会取到通过数（伪造成难度）。
+ *    历史缺陷：回填路径曾直接取 `tds[2]`，与题库路径的「标题锚点 + 后一格」规则不一致，
+ *    行内列数一变就会把通过数当难度写库，而 backfill(3) 的优先级高于 bank(1)/sync(2)。
+ * 3. **取值规则由 `parseNowcoderScore` 统一裁决**（200..4000、100 的倍数；详见 shared/src/difficulty.ts）：
+ *    空值 / 非纯数字 / 离网值（通过数列）/ 越界值 → 未知，不猜。
+ */
+export function parseNcRowCells(cell: string): NcRowCells {
+  const tds = [...cell.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]);
+  const tags = [...cell.matchAll(/class="tag-label[^"]*"[^>]*>([\s\S]*?)<\/a>/g)]
+    .map((t) => stripNcCell(t[1]))
+    .filter(Boolean);
+  const title = stripNcCell(/class="title"[^>]*>([\s\S]*?)<\/a>/.exec(cell)?.[1] ?? '');
+  const titleIdx = tds.findIndex((t) => /class="title"/.test(t));
+  const diffCell = titleIdx >= 0 ? tds[titleIdx + 1] : undefined;
+  const nativeScore = parseNowcoderScore(diffCell === undefined ? null : stripNcCell(diffCell));
+  return { title, tags, nativeScore };
+}
+
+/**
+ * 解析牛客题库页表格行（`parseNcRowCells` 的行级包装）。
+ * 题号行里标题与标签都为空时跳过（分页尾部可能夹带空行/模板行）。
+ */
+export function parseNcBankRows(html: string): NcBankRow[] {
   const rows: NcBankRow[] = [];
   const trRe = /<tr[^>]*data-problemId="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
   let m: RegExpExecArray | null;
   while ((m = trRe.exec(html)) !== null) {
     const problemId = m[1];
-    const tds = [...m[2].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) =>
-      x[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim(),
-    );
-    if (tds.length < 3) continue; // 异常行跳过
-    const diffText = tds[2];
-    // 牛客难度分为 CF 风格分值（约 200-3800）；过小值（如 NC1 Hello 演示题的 2）
-    // 是站点脏数据，越界无效 → null，避免拉低难度分位统计
-    const difficulty = /^\d+$/.test(diffText) && Number(diffText) >= 100 ? Number(diffText) : null;
-    rows.push({ problemId, title: tds[1], difficulty });
+    const { title, tags, nativeScore } = parseNcRowCells(m[2]);
+    if (title === '' && tags.length === 0) continue;
+    rows.push({
+      problemId,
+      title,
+      difficulty: nativeScore === null ? null : toCfRating('nowcoder', nativeScore),
+      nativeScore,
+      tags,
+    });
   }
   return rows;
 }
@@ -269,7 +364,8 @@ export async function fetchCodeforcesBank(
       platform: 'codeforces',
       problemKey: `${p.contestId}${p.index}`.toUpperCase(),
       title: p.name ?? `${p.contestId}${p.index}`,
-      difficulty: typeof p.rating === 'number' ? p.rating : null,
+      // CF rating 本身就是统一标尺：原生原文 = rating 原文，标度 cf-rating（钳位由 shared 负责）
+      ...bankDifficulty('codeforces', p.rating ?? null),
       url: `https://codeforces.com/contest/${p.contestId}/problem/${p.index}`,
       tags: Array.isArray(p.tags) ? p.tags : [],
     });
@@ -291,16 +387,22 @@ interface LcBankQuestion {
   titleSlug?: string;
   difficulty?: string;
   paidOnly?: boolean;
-  topicTags?: Array<{ name?: string }>;
+  topicTags?: Array<{ name?: string; nameTranslated?: string }>;
 }
 
 const LEETCODE_GRAPHQL = 'https://leetcode.cn/graphql';
-const LEETCODE_BANK_PAGE = 100;
+export const LEETCODE_BANK_PAGE = 100;
 
-const LEETCODE_BANK_QUERY = `query problemsetQuestionList($limit: Int, $skip: Int) {
+/**
+ * 力扣题库列表查询（`problemsetQuestionList`）。
+ * 该节点支持 `titleCn` 与 `topicTags.nameTranslated`（中文标签）；
+ * 逐题的 `question(titleSlug)` 节点**不支持**这两个字段（实测 GraphQL 400 Cannot query field），
+ * 因此题库拉取与元数据回填都走本查询分页扫描（全库约 45 次请求）。
+ */
+export const LEETCODE_BANK_QUERY = `query problemsetQuestionList($limit: Int, $skip: Int) {
   problemsetQuestionList(limit: $limit, skip: $skip) {
     total
-    questions { frontendQuestionId title titleCn titleSlug difficulty paidOnly topicTags { name } }
+    questions { frontendQuestionId title titleCn titleSlug difficulty paidOnly topicTags { name nameTranslated } }
   }
 }`;
 
@@ -351,10 +453,11 @@ export async function fetchLeetcodeBank(
         platform: 'leetcode',
         problemKey: q.titleSlug.toLowerCase(),
         title: q.titleCn || q.title || q.titleSlug,
-        difficulty: leetcodeDifficultyToRating(q.difficulty),
+        ...bankDifficulty('leetcode', q.difficulty),
         url: `https://leetcode.cn/problems/${q.titleSlug.toLowerCase()}/`,
+        // 中文标签优先（直接命中知识体系）；英文名转小写以便同义词归并（binary search → 二分查找）
         tags: (q.topicTags ?? [])
-          .map((t) => (t.name ?? '').trim().toLowerCase())
+          .map((t) => (t.nameTranslated || t.name || '').trim().toLowerCase())
           .filter(Boolean),
       });
     }
@@ -384,9 +487,10 @@ interface KenkoooModel {
 /**
  * AtCoder 公开题库：使用社区维护的 kenkoooo/AtCoderProblems 资源接口（匿名可访问）。
  * - GET /resources/problems.json：全量题目列表（约 4000+ 题，含 id / contest_id / title）
- * - GET /resources/problem-models.json：题目难度模型（difficulty 为 AtCoder 预估难度，约 -1000~4000+）
+ * - GET /resources/problem-models.json：题目难度模型（difficulty 为 AtCoder 预估难度 θ，约 -1000~4000+）
  * 两次单次调用即可拿全量，无翻页；kenkoooo 要求请求间隔 >= 1s，两次调用间 sleep。
- * difficulty 经四舍五入后统一到 CF rating 标尺；负值（极简题）钳到 800（CF 实际下限）。
+ * difficulty 走 shared 的 θ→CF 分段锚点映射（与同步路径同源：此前题库路径自行把 θ<800 钳到 800，
+ * 同一道 abc-A 在题库得到 800、在同步得到 922，两处不一致）。
  */
 export async function fetchAtcoderBank(
   fetchFn: HttpInit,
@@ -419,56 +523,184 @@ export async function fetchAtcoderBank(
     throw new Error('AtCoder 题库接口响应结构异常，请稍后重试');
   }
 
+  // 标签桥（可选）：先按 kenkoooo 题号集合建洛谷 AT 镜像标签映射，再逐题取标签
+  let tagMap = new Map<string, string[]>();
+  let tagStats: { scanned: number; matched: number; withTags: number; skipped: number } | null = null;
+  if (opts.atcoderTagsFromLuogu === true) {
+    const knownIds = new Set(
+      probList
+        .filter((p) => typeof p.id === 'string' && p.id !== '')
+        .map((p) => p.id),
+    );
+    const bridge = await luoguAtcoderTagMap(fetchFn, { knownIds, onProgress: opts.onProgress });
+    tagMap = bridge.map;
+    tagStats = {
+      scanned: bridge.scanned,
+      matched: bridge.matched,
+      withTags: bridge.withTags,
+      skipped: bridge.skipped,
+    };
+  }
+
   const problems: BankProblem[] = [];
   for (const p of probList) {
     if (typeof p.id !== 'string' || !p.id || typeof p.contest_id !== 'string' || !p.contest_id) continue;
     const model = modelMap[p.id];
-    let difficulty: number | null = null;
-    if (model && typeof model.difficulty === 'number' && Number.isFinite(model.difficulty)) {
-      const d = Math.round(model.difficulty);
-      difficulty = d < 800 ? 800 : d; // 负值/极低值钳到 CF 实际下限
-    }
+    // θ 原文透传给 shared（nativeDifficulty 保留原文，平台改档后可按标度重算）
+    const rawTheta =
+      model && typeof model.difficulty === 'number' && Number.isFinite(model.difficulty)
+        ? model.difficulty
+        : null;
     problems.push({
       platform: 'atcoder',
       problemKey: p.id,
       title: p.title || p.name || p.id,
-      difficulty,
+      ...bankDifficulty('atcoder', rawTheta),
       url: `https://atcoder.jp/contests/${p.contest_id}/tasks/${p.id}`,
-      tags: [],
+      tags: tagMap.get(p.id) ?? [],
     });
     if (problems.length >= max) break;
   }
-  return { platform: 'atcoder', problems, total: probList.length };
+  return {
+    platform: 'atcoder',
+    problems,
+    total: probList.length,
+    ...(tagStats
+      ? {
+          tagScanned: tagStats.scanned,
+          tagMatched: tagStats.matched,
+          tagWithTags: tagStats.withTags,
+          tagSkipped: tagStats.skipped,
+        }
+      : {}),
+  };
+}
+
+/**
+ * 用洛谷 AT 镜像题补 AtCoder 算法标签（默认关闭，见 BankFetchOptions.atcoderTagsFromLuogu）。
+ * 洛谷 pid `AT_abc300_a` → kenkoooo 题号 `abc300_a`；洛谷自定义比赛号（如 `AT1202Contest_a`）
+ * 无对应题号 → 计入 skipped。**覆盖率有限**：实测 250 行样本中 139 行命中 kenkoooo，
+ * 其中仅 68 行真的带洛谷标签 —— 调用方据此如实展示，不得宣称「全覆盖」。
+ */
+async function luoguAtcoderTagMap(
+  fetchFn: HttpInit,
+  opts: {
+    /** kenkoooo 题号集合（判定镜像题号是否真的有对应题） */
+    knownIds: ReadonlySet<string>;
+    maxPages?: number;
+    onProgress?: BankFetchOptions['onProgress'];
+  },
+): Promise<{
+  map: Map<string, string[]>;
+  scanned: number;
+  matched: number;
+  withTags: number;
+  skipped: number;
+}> {
+  const map = new Map<string, string[]>();
+  const tagDict = await fetchLuoguTagDict(fetchFn);
+  const maxPages = opts.maxPages ?? 60;
+  let scanned = 0;
+  let matched = 0;
+  let withTags = 0;
+  let skipped = 0;
+  for (let page = 1; page <= maxPages; page += 1) {
+    const res = await fetchWithChallenge(asHttpClient(fetchFn), `${LUOGU_API}/problem/list?page=${page}&type=AT`, '', undefined, {
+      'x-lentille-request': 'content-only',
+      Accept: 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Referer: `${LUOGU_API}/problem/list`,
+    });
+    if (!res.ok) break;
+    const text = await res.text();
+    if (!text.trim().startsWith('{')) break;
+    const list =
+      (JSON.parse(text) as { data?: { problems?: { result?: LuoguListProblem[] } } }).data?.problems?.result ?? [];
+    if (list.length === 0) break;
+    for (const p of list) {
+      scanned += 1;
+      const pid = typeof p.pid === 'string' ? p.pid : '';
+      if (!pid.startsWith('AT_')) {
+        skipped += 1; // 洛谷自定义比赛号：无法映射为 AtCoder 题号
+        continue;
+      }
+      const atcoderId = pid.slice(3).toLowerCase();
+      if (!opts.knownIds.has(atcoderId)) {
+        skipped += 1; // 有题号但 kenkoooo 里没有该题
+        continue;
+      }
+      matched += 1;
+      const tags = (p.tags ?? []).map((id) => tagDict.get(id)).filter((t): t is string => typeof t === 'string');
+      if (tags.length > 0) {
+        withTags += 1;
+        map.set(atcoderId, tags);
+      }
+    }
+    opts.onProgress?.({ platform: 'atcoder', count: map.size, total: null });
+    await sleep(700);
+  }
+  return { map, scanned, matched, withTags, skipped };
 }
 
 // ---------- 代码源（bs.daimayuan.top，Hydro OJ） ----------
 
-/** 代码源难度 1-10 → CF rating 统一标尺 */
-const DAIMAYUAN_DIFFICULTY_TO_RATING: Record<number, number> = {
-  1: 800,
-  2: 1000,
-  3: 1200,
-  4: 1400,
-  5: 1600,
-  6: 1800,
-  7: 2000,
-  8: 2200,
-  9: 2500,
-  10: 2800,
-};
+/** 代码源（Hydro）1-10 难度 → CF rating：映射表位于 shared/src/difficulty.ts。
+ *  兼容别名：内部题库解析与既有测试依赖此名 */
+export const daimayuanDifficultyToRating = (d: number): number | null => toCfRating('daimayuan', d);
 
-interface DmyBankRow {
-  pid: string;
-  title: string;
-  difficulty: number | null;
-  tags: string[];
+// Hydro `packages/hydrooj/src/lib/difficulty.ts` 的 difficultyAlgorithm 逐字实现：
+//   s = ∫_0^{nSubmit} 2·exp(−2·ln²x)/(x·√π) dx（步长 0.1，采样密度 2）
+//   difficulty = max(1, round(10 − 13·s·acRate))
+// 缓存在模块级：积分是单调累加的，一次进程内只需向前推进（与上游同构）。
+const HYDRO_CACHE = { s: 0, y: 0, values: [0] as number[] };
+
+function hydroLogp(x: number): number {
+  return (2 * Math.exp(-2 * (Math.log(x) ** 2))) / x / 2.506628274631;
+}
+
+function hydroIntegrate(y: number): number {
+  let lastY = HYDRO_CACHE.y;
+  if (y <= lastY) return HYDRO_CACHE.values[y] ?? 0;
+  let s = HYDRO_CACHE.s;
+  let x0 = (lastY / 2) * 0.1;
+  while (y > lastY) {
+    x0 += 0.1;
+    s += hydroLogp(x0) * 0.1;
+    for (let i = 1; i <= 2; i += 1) HYDRO_CACHE.values.push(s);
+    lastY += 2;
+  }
+  HYDRO_CACHE.y = lastY;
+  HYDRO_CACHE.s = s;
+  return HYDRO_CACHE.values[y] ?? s;
 }
 
 /**
- * 代码源公开题库页（无需登录）：GET /p?page={n}（每页 100 题，按 pid 升序）。
- * Hydro 渲染表格行 <tr data-pid="{id}">：列含题号/标题（含标签）/通过数/难度（1-10）。
- * 难度 1-10 映射为 CF rating 标尺；标签为中文知识点（模拟/数据结构/线段树…），直接入库。
- * 总数从 <p>{N} problems</p> 提取；翻页至空页或达到 max 终止。
+ * 代码源题库难度（Hydro 1-10 档）：站点手工设定值优先，否则按 Hydro 算法本地复算；
+ * 无提交统计（nSubmit ≤ 0）→ null（**未知就是未知**，不猜档位）。
+ * 实测 7 条站点样本（nSubmit/nAccept/JSON 原值 → 页面显示值）见 test/problem-bank.test.ts。
+ */
+export function hydroDifficulty(nSubmit: number, nAccept: number, stored?: number | null): number | null {
+  if (typeof stored === 'number' && Number.isFinite(stored) && stored > 0) return Math.round(stored);
+  if (!Number.isFinite(nSubmit) || nSubmit <= 0) return null;
+  const acRate = Math.max(0, Math.min(1, nAccept / nSubmit));
+  return Math.max(1, Math.round(10 - 13 * hydroIntegrate(Math.floor(nSubmit)) * acRate));
+}
+
+interface DmyPdoc {
+  docId?: number;
+  title?: string;
+  tag?: string[];
+  nSubmit?: number;
+  nAccept?: number;
+  difficulty?: number;
+}
+
+/**
+ * 代码源公开题库（Hydro，无需登录）：GET /p?page={n} + `Accept: application/json`。
+ * 响应 `{ pcount, ppcount, pdocs }`：pcount = 题目总数、ppcount = 总页数、pdocs = 本页题（实测每页 100）。
+ * 难度取 `pdoc.difficulty`（站点手工值，0 = 未设定）优先，否则用 nSubmit/nAccept 按 Hydro
+ * difficultyAlgorithm 本地复算（见 hydroDifficulty）；标签取 `pdoc.tag`（中文知识点）。
+ * 不再解析 HTML：页面表格就是同一份 pdoc 的模板渲染，JSON 少一次抠标签的误伤风险。
  */
 export async function fetchDaimayuanBank(
   fetchFn: HttpInit,
@@ -484,93 +716,49 @@ export async function fetchDaimayuanBank(
     const res = await asHttpClient(fetchFn).fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Accept: 'application/json',
         Referer: `${DAIMAYUAN_BASE}/p`,
       },
     });
     if (!res.ok) {
-      throw new Error(`代码源题库页 HTTP ${res.status}，请稍后重试`);
+      throw new Error(`代码源题库接口 HTTP ${res.status}，请稍后重试`);
     }
-    const html = await res.text();
-    if (total === null) {
-      const m = html.match(/(\d+)\s*problems/);
-      if (m) total = Number(m[1]);
-    }
-    const rows = parseDmyRows(html);
-    if (rows.length === 0) break;
+    const body = (await res.json().catch(() => null)) as
+      | { pcount?: number; ppcount?: number; pdocs?: DmyPdoc[] }
+      | null;
+    if (body === null) throw new Error('代码源题库接口返回非 JSON（接口变化），请稍后重试');
+    const list = Array.isArray(body.pdocs) ? body.pdocs : [];
+    if (total === null && typeof body.pcount === 'number') total = body.pcount;
+    if (list.length === 0) break;
 
-    for (const row of rows) {
-      if (seen.has(row.pid)) continue;
-      seen.add(row.pid);
+    for (const p of list) {
+      const key = typeof p.docId === 'number' ? String(p.docId) : '';
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const level = hydroDifficulty(p.nSubmit ?? 0, p.nAccept ?? 0, p.difficulty ?? null);
       problems.push({
         platform: 'daimayuan',
-        problemKey: row.pid,
-        title: row.title || row.pid,
-        difficulty: row.difficulty,
-        url: `${DAIMAYUAN_BASE}/p/${row.pid}`,
-        tags: row.tags,
+        problemKey: key,
+        title: (p.title ?? '').trim() || key,
+        // 1-10 档经 shared 表映射为 CF rating（未知 = null）
+        ...bankDifficulty('daimayuan', level),
+        url: `${DAIMAYUAN_BASE}/p/${key}`,
+        tags: Array.isArray(p.tag) ? p.tag.map((t) => String(t).trim()).filter(Boolean) : [],
       });
+      if (problems.length >= max) break;
     }
     opts.onProgress?.({ platform: 'daimayuan', count: problems.length, total });
     if (problems.length >= max) break;
-    if (rows.length < DAIMAYUAN_PER_PAGE) break;
+    if (typeof body.ppcount === 'number' && page >= body.ppcount) break;
+    if (list.length < DAIMAYUAN_PER_PAGE) break;
     await sleep(400); // 页间限速
   }
   return { platform: 'daimayuan', problems: problems.slice(0, max), total };
 }
 
-/**
- * 解析代码源题库页表格行（Hydro problem_main 模板）。
- * 行结构：<tr data-pid="{id}">，含：
- *   - col--name 列：<a href="/p/{id}"><b>{id}</b>&nbsp;&nbsp;{标题}</a> + <ul class="problem__tags">标签列表</ul>
- *   - col--difficulty 列：难度 1-10
- */
-function parseDmyRows(html: string): DmyBankRow[] {
-  const rows: DmyBankRow[] = [];
-  const trRe = /<tr\s+data-pid="([^"]+)"[^>]*>([\s\S]*?)<\/tr>/g;
-  let m: RegExpExecArray | null;
-  while ((m = trRe.exec(html)) !== null) {
-    const pid = m[1];
-    const cell = m[2];
-
-    // 标题：<a href="/p/{pid}"><b>{pid}</b>&nbsp;&nbsp;{标题}</a>
-    const titleMatch = cell.match(/<a\s+href="\/p\/[^"]*"[^>]*>([\s\S]*?)<\/a>/);
-    let title = pid;
-    if (titleMatch) {
-      title = titleMatch[1]
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      // 去掉前导题号（如 "1 [R1A]最大奇数" → "[R1A]最大奇数"）
-      title = title.replace(new RegExp(`^${pid}\\s+`), '');
-    }
-
-    // 标签：<li class="problem__tag"><a class="problem__tag-link" href="...">{标签}</a></li>
-    const tags: string[] = [];
-    const tagRe = /class="problem__tag-link"[^>]*>([\s\S]*?)<\/a>/g;
-    let tm: RegExpExecArray | null;
-    while ((tm = tagRe.exec(cell)) !== null) {
-      const tag = tm[1].replace(/<[^>]+>/g, '').trim();
-      if (tag) tags.push(tag);
-    }
-
-    // 难度：<td class="col--difficulty">N</td>
-    const diffMatch = cell.match(/class="col--difficulty"[^>]*>\s*(\d+)\s*<\/td>/);
-    const diffNum = diffMatch ? Number(diffMatch[1]) : null;
-    const difficulty =
-      diffNum !== null && DAIMAYUAN_DIFFICULTY_TO_RATING[diffNum] !== undefined
-        ? DAIMAYUAN_DIFFICULTY_TO_RATING[diffNum]
-        : null;
-
-    rows.push({ pid, title, difficulty, tags });
-  }
-  return rows;
-}
-
 // ---------- 计蒜客 ----------
 
 const JISUANKE_BASE = 'https://www.jisuanke.com';
-const JISUANKE_PER_PAGE = 50;
 
 interface JisuankeListProblem {
   problemIdentifier?: string;
@@ -579,8 +767,8 @@ interface JisuankeListProblem {
   submit?: number;
   difficultyType?: string | number;
   passingRate?: number;
-  /** 实测为标签数组（可能只回传数量或对象数组），防御性解析 */
-  countOfTags?: unknown;
+  /** 实测为标签数组（`[{ tagName, type }]`，type 为 difficulty / knowledge） */
+  problemTags?: unknown;
 }
 
 /** /api/problems 单页响应体：数组或 { data / problems / result } 包裹，防御性解包 */
@@ -593,23 +781,12 @@ function unpackJisuankeProblemPage(body: unknown): JisuankeListProblem[] {
   return [];
 }
 
-/** 标签字段防御性解析：数组（字符串/对象 {name|tagName}）→ 名称数组；其余 → 空数组 */
-function parseJisuankeTags(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return v
-    .map((t) =>
-      typeof t === 'string'
-        ? t
-        : String((t as { name?: string; tagName?: string })?.name ?? (t as { tagName?: string })?.tagName ?? ''),
-    )
-    .filter(Boolean);
-}
-
 /**
  * 计蒜客公开题库（匿名可访问，无需 Cookie）：
- * GET /api/problems?page={n}（约 3600 题，每页约 50 条；total 随首页返回）。
- * difficultyType（level1…levelN）→ jisuankeDifficultyToRating 映射统一难度标尺。
+ * GET /api/problems?page={n}（约 3600 题，每页 20 条；total 随首页返回）。
+ * difficultyType（level1…levelN）→ 统一难度标尺；原生档位原文落 native_difficulty。
  * 题号 problemIdentifier（如 T1001）即 problemKey，题目页 /problem/{identifier}。
+ * 算法标签取 `problemTags` 里的 knowledge 类（difficulty 类已由 difficultyType 表达）。
  */
 export async function fetchJisuankeBank(
   fetchFn: HttpInit,
@@ -644,13 +821,14 @@ export async function fetchJisuankeBank(
     for (const p of rows) {
       const key = typeof p.problemIdentifier === 'string' ? p.problemIdentifier.trim() : '';
       if (!key) continue;
+      const { knowledge } = parseJisuankeProblemTags(p.problemTags);
       problems.push({
         platform: 'jisuanke',
         problemKey: key,
         title: p.title?.trim() || key,
-        difficulty: jisuankeDifficultyToRating(p.difficultyType),
+        ...bankDifficulty('jisuanke', p.difficultyType),
         url: `${JISUANKE_BASE}/problem/${encodeURIComponent(key)}`,
-        tags: parseJisuankeTags(p.countOfTags),
+        tags: knowledge,
       });
     }
     if (problems.length >= max) break;

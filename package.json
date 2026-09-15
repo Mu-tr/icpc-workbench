@@ -23,5 +23,8 @@
     "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2.11.4",
     "concurrently": "^9.1.2"
+  },
+  "overrides": {
+    "adm-zip": "^0.6.1"
   }
 }

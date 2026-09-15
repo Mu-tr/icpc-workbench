@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createJisuankeAdapter,
+  fetchJisuankePracticeProblems,
+  fetchJisuankeProblemSubmissions,
   fetchParticipatedContests,
   mapJisuankeVerdict,
   parseJisuankeTime,
@@ -265,6 +267,189 @@ test('jisuanke: expired login (302 on submissions) raises ManualImportRequiredEr
   await assert.rejects(() => adapter.fetchUserSubmissions('nick', { cookie: 'stale', pageDelayMs: 0 }), /登录态已失效/);
 });
 
+// ---------- 练习（题库）提交：默认开启，settings['jisuanke.practiceSync'] 可关 ----------
+
+/** JSON 响应小工具（练习路径需要按 page/status 参数分流，用不上通用 router） */
+function jsonRes(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+test('jisuanke: 练习预筛：status=passed/attempted 两次过滤请求，解析题库行', async () => {
+  const seen: string[] = [];
+  const fetchFn = (async (input: string | URL) => {
+    const u = String(input);
+    seen.push(u);
+    if (u.includes('status=passed')) {
+      return new Response(JSON.stringify({ total: 2, problems: [
+        { problemId: 34486, problemIdentifier: 'T1001', title: '计算A+B', difficultyType: 'level1', problemTags: [{ tagName: '入门', type: 'difficulty' }, { tagName: '输入和输出', type: 'knowledge' }] },
+      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('status=attempted')) {
+      return new Response(JSON.stringify({ total: 1, problems: [
+        { problemId: 34487, problemIdentifier: 'T1002', title: '输出马里奥', difficultyType: 'level1', problemTags: [] },
+      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+
+  const r = await fetchJisuankePracticeProblems(fetchFn, COOKIE, { pageDelayMs: 0 });
+  assert.deepEqual(r.problems.map((p) => p.problemIdentifier), ['T1001', 'T1002']);
+  assert.equal(r.problems[0].difficultyType, 'level1');
+  assert.deepEqual(r.problems[0].tags, ['输入和输出']);
+  assert.ok(seen.some((u) => u.includes('status=passed')));
+  assert.ok(seen.some((u) => u.includes('status=attempted')));
+});
+
+test('jisuanke: 练习提交：北京时间字符串 → ISO，hashId 为 externalId，total 用于早停', async () => {
+  const fetchFn = (async () => new Response(JSON.stringify({
+    submissions: [{ hashId: '4zoBj7', language: 'c++', status: 'AC', time: '2026-09-13 12:37:47', usedTime: 1, usedMemory: 3820 }],
+    total: 1,
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+  const r = await fetchJisuankeProblemSubmissions(fetchFn, COOKIE, 34486, 1);
+  assert.equal(r.total, 1);
+  assert.equal(r.rows[0].hashId, '4zoBj7');
+  assert.equal(r.rows[0].time, '2026-09-13 12:37:47');
+});
+
+test('jisuanke: 练习提交入库键用 problemIdentifier，且带难度与标签（与题库行合并）', async () => {
+  const fetchFn = (async (input: string | URL) => {
+    const u = String(input);
+    if (u.includes('/api/problems')) {
+      return new Response(JSON.stringify({ total: 1, problems: [
+        { problemId: 34486, problemIdentifier: 'T1001', title: '计算A+B', difficultyType: 'level1', problemTags: [{ tagName: '输入和输出', type: 'knowledge' }] },
+      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/api/problem/submissions')) {
+      return new Response(JSON.stringify({ submissions: [{ hashId: 'h1', status: 'AC', time: '2026-09-13 12:37:47', language: 'c++' }], total: 1 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+
+  const adapter = createJisuankeAdapter(fetchFn);
+  const out = await adapter.fetchUserSubmissions('hieZF123', { cookie: COOKIE, pageDelayMs: 0 });
+  const practice = out.find((s) => s.problem.problemKey === 'T1001');
+  assert.ok(practice, '练习提交应按 problemIdentifier 入库');
+  assert.equal(practice.verdict, 'AC');
+  assert.equal(practice.problem.difficulty, 800);
+  assert.equal(practice.problem.nativeDifficulty, 'level1');
+  assert.deepEqual(practice.problem.tags, ['输入和输出']);
+  assert.equal(practice.problem.url, 'https://www.jisuanke.com/problem/T1001');
+});
+
+test('jisuanke: 练习增量——整页已知且 total 已覆盖则跳过该题（1 次请求），有新题的题翻满剩余页', async () => {
+  const calls: string[] = [];
+  const knownRows = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => ({ hashId: `${prefix}-${i}`, status: 'AC', time: '2026-09-13 12:37:47' }));
+  const fetchFn = (async (input: string | URL) => {
+    const u = String(input);
+    const url = new URL(u);
+    if (u.includes('/api/problems')) {
+      const status = url.searchParams.get('status');
+      if (status !== 'passed') return jsonRes({ total: 0, problems: [] });
+      return jsonRes({ total: 3, problems: [
+        { problemId: 1, problemIdentifier: 'T2001', title: 'A', difficultyType: 'level1', problemTags: [] },
+        { problemId: 2, problemIdentifier: 'T2002', title: 'B', difficultyType: 'level2', problemTags: [] },
+        { problemId: 3, problemIdentifier: 'T2003', title: 'C', difficultyType: 'level3', problemTags: [] },
+      ] });
+    }
+    if (u.includes('/api/problem/submissions')) {
+      const problemId = Number(url.searchParams.get('problemId'));
+      const page = Number(url.searchParams.get('page'));
+      calls.push(`${problemId}:${page}`);
+      // 题 1：整页已知且 total=1（一次请求即可判定无新增）
+      if (problemId === 1) return jsonRes({ submissions: knownRows(1, 'k1'), total: 1 });
+      // 题 2：有新提交
+      if (problemId === 2) return jsonRes({ submissions: [{ hashId: 'new-2', status: 'WA', time: '2026-09-13 12:37:47' }], total: 1 });
+      // 题 3：首页 20 条全已知，但 total=21 → 必须继续翻第 2 页拿到新提交
+      if (page === 1) return jsonRes({ submissions: knownRows(20, 'k3'), total: 21 });
+      return jsonRes({ submissions: [{ hashId: 'new-3', status: 'AC', time: '2026-09-13 12:37:47' }], total: 21 });
+    }
+    return jsonRes([]);
+  }) as unknown as typeof fetch;
+
+  const adapter = createJisuankeAdapter(fetchFn);
+  const known = new Set<string>([...knownRows(1, 'k1').map((r) => r.hashId), ...knownRows(20, 'k3').map((r) => r.hashId)]);
+  const out = await adapter.fetchUserSubmissions('u', { cookie: COOKIE, pageDelayMs: 0, knownExternalIds: known });
+  assert.deepEqual(calls, ['1:1', '2:1', '3:1', '3:2']); // 题 1 只 1 次请求（早停）；题 3 翻满 2 页
+  assert.deepEqual(out.map((s) => s.externalId), ['new-2', 'new-3']);
+});
+
+test('jisuanke: 练习分批——单次最多 40 题，回写负数游标，下一轮从游标续拉', async () => {
+  const TOTAL = 45;
+  const all = Array.from({ length: TOTAL }, (_, i) => ({
+    problemId: 9001 + i,
+    problemIdentifier: `T${9001 + i}`,
+    title: `题 ${9001 + i}`,
+    difficultyType: 'level1',
+    problemTags: [],
+  }));
+  const requested: number[] = [];
+  const fetchFn = (async (input: string | URL) => {
+    const u = String(input);
+    const url = new URL(u);
+    if (u.includes('/api/problems')) {
+      const page = Number(url.searchParams.get('page'));
+      if (url.searchParams.get('status') !== 'passed') return jsonRes({ total: 0, problems: [] });
+      return jsonRes({ total: TOTAL, problems: all.slice((page - 1) * 20, page * 20) });
+    }
+    if (u.includes('/api/problem/submissions')) {
+      const problemId = Number(url.searchParams.get('problemId'));
+      requested.push(problemId);
+      return jsonRes({ submissions: [{ hashId: `h-${problemId}`, status: 'AC', time: '2026-09-13 12:37:47' }], total: 1 });
+    }
+    return jsonRes([]);
+  }) as unknown as typeof fetch;
+
+  const adapter = createJisuankeAdapter(fetchFn);
+  const opts: FetchOptions = { cookie: COOKIE, pageDelayMs: 0 };
+  const first = await adapter.fetchUserSubmissions('u', opts);
+  assert.equal(first.length, 40); // 单次处理题目数上限
+  assert.equal(requested.length, 40);
+  assert.equal(opts.truncated, true);
+  assert.equal(opts.backfillReachedPage, -40); // 负数 = 练习题目序号（与比赛序号区分）
+
+  // 第二轮：从游标续拉（-40 → 第 40 题起），已入库的题按已知跳过
+  const opts2: FetchOptions = {
+    cookie: COOKIE, pageDelayMs: 0, backfill: true, backfillFromPage: -40,
+    knownExternalIds: new Set(first.map((s) => s.externalId)),
+  };
+  const second = await adapter.fetchUserSubmissions('u', opts2);
+  assert.deepEqual(second.map((s) => s.problem.problemKey), ['T9041', 'T9042', 'T9043', 'T9044', 'T9045']);
+  assert.notEqual(opts2.truncated, true); // 续拉到底，不再截断
+});
+
+test('jisuanke: practiceSync=false 时不请求题库接口（仅比赛路径）', async () => {
+  const seen: string[] = [];
+  const fetchFn = (async (input: string | URL) => {
+    const u = String(input);
+    seen.push(u);
+    if (u.includes('hasParticipated=true')) return jsonRes([{ contestId: 9101, startTime: '2026-09-05 10:00:00' }]);
+    if (u.includes('api/contest/submissions')) return jsonRes([{ hashId: 'c1', identifier: 'A', title: 'A 题', time: 1788768000, status: 'AC' }]);
+    return jsonRes([]);
+  }) as unknown as typeof fetch;
+  const adapter = createJisuankeAdapter(fetchFn);
+  const out = await adapter.fetchUserSubmissions('u', { cookie: COOKIE, pageDelayMs: 0, practiceSync: false });
+  assert.equal(seen.filter((u) => u.includes('/api/problems')).length, 0);
+  assert.deepEqual(out.map((s) => s.externalId), ['c1']);
+});
+
+test('jisuanke: days 窗口模式不跑练习段（无 knownIds/无可持久化游标），比赛段照常', async () => {
+  const seen: string[] = [];
+  const fetchFn = (async (input: string | URL) => {
+    const u = String(input);
+    seen.push(u);
+    if (u.includes('hasParticipated=true')) return jsonRes([{ contestId: 9201, startTime: '2026-09-05 10:00:00' }]);
+    if (u.includes('api/contest/submissions')) return jsonRes([{ hashId: 'w1', identifier: 'A', title: 'A 题', time: 1788768000, status: 'AC' }]);
+    return jsonRes([]);
+  }) as unknown as typeof fetch;
+  const adapter = createJisuankeAdapter(fetchFn);
+  const out = await adapter.fetchUserSubmissions('u', {
+    cookie: COOKIE, pageDelayMs: 0, windowSince: '2026-09-01T00:00:00.000Z',
+  });
+  assert.equal(seen.filter((u) => u.includes('/api/problems')).length, 0);
+  assert.deepEqual(out.map((s) => s.externalId), ['w1']);
+});
+
 // ---------- checkAuth / 注册 ----------
 
 test('jisuanke: checkAuth validates via /api/user/info uuid field', async () => {
@@ -304,12 +489,12 @@ import { jisuankeDifficultyToRating } from '../src/adapters/jisuanke.ts';
 import { fetchJisuankeBank } from '../src/adapters/problemBank.ts';
 import { classifyJisuankeContest, fetchJisuankeContests, toJisuankeContest } from '../src/contests/jisuankeContests.ts';
 
-test('jisuanke: jisuankeDifficultyToRating maps level strings/numbers, caps at 2800', () => {
+test('jisuanke: jisuankeDifficultyToRating maps level strings/numbers via 统一难度表', () => {
   assert.equal(jisuankeDifficultyToRating('level1'), 800);
-  assert.equal(jisuankeDifficultyToRating('level4'), 1600);
-  assert.equal(jisuankeDifficultyToRating('level8'), 2800);
-  assert.equal(jisuankeDifficultyToRating('level12'), 2800); // level8+ 封顶
-  assert.equal(jisuankeDifficultyToRating(5), 1900);
+  assert.equal(jisuankeDifficultyToRating('level4'), 1800); // 实测表：4 → 1800（原本地表 1600）
+  assert.equal(jisuankeDifficultyToRating('level8'), 3400); // 实测表：8 → 3400（原本地表 2800）
+  assert.equal(jisuankeDifficultyToRating('level12'), null); // 越界档位：未知就是未知（原本地表封顶当 level8）
+  assert.equal(jisuankeDifficultyToRating(5), 2200); // 整数档位一并接受（原本地表 1900）
   assert.equal(jisuankeDifficultyToRating('level0'), null);
   assert.equal(jisuankeDifficultyToRating(undefined), null);
   assert.equal(jisuankeDifficultyToRating('weird'), null);
@@ -324,8 +509,22 @@ test('jisuanke: fetchJisuankeBank pages, maps difficulty/tags/urls, dedupes tota
     if (u.includes('page=1')) {
       return new Response(
         page([
-          { problemIdentifier: 'T1001', title: '入门题', difficultyType: 'level1', countOfTags: ['模拟'] },
-          { problemIdentifier: 'T1002', title: '进阶题', difficultyType: 'level5', countOfTags: [{ name: '动态规划' }] },
+          {
+            problemIdentifier: 'T1001',
+            title: '入门题',
+            difficultyType: 'level1',
+            // 实测 /api/problems 行内 problemTags 为 [{ tagName, type }]：difficulty 类为难度档位、其余为知识点
+            problemTags: [
+              { tagName: '入门', type: 'difficulty' },
+              { tagName: '模拟', type: 'knowledge' },
+            ],
+          },
+          {
+            problemIdentifier: 'T1002',
+            title: '进阶题',
+            difficultyType: 'level5',
+            problemTags: [{ tagName: '动态规划', type: 'knowledge' }],
+          },
           { problemIdentifier: '', title: '无题号应跳过' },
         ]),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -339,9 +538,11 @@ test('jisuanke: fetchJisuankeBank pages, maps difficulty/tags/urls, dedupes tota
   assert.equal(r.problems.length, 2);
   assert.equal(r.problems[0].problemKey, 'T1001');
   assert.equal(r.problems[0].difficulty, 800);
-  assert.deepEqual(r.problems[0].tags, ['模拟']);
+  assert.equal(r.problems[0].nativeDifficulty, 'level1'); // 原生档位原文
+  assert.equal(r.problems[0].difficultyScale, 'jisuanke-level-8');
+  assert.deepEqual(r.problems[0].tags, ['模拟']); // 只取 knowledge 类（难度类由 difficultyType 表达）
   assert.equal(r.problems[0].url, 'https://www.jisuanke.com/problem/T1001');
-  assert.equal(r.problems[1].difficulty, 1900);
+  assert.equal(r.problems[1].difficulty, 2200); // level5 → CF 2200（统一实测表）
   assert.deepEqual(r.problems[1].tags, ['动态规划']);
   assert.ok(seenPages[0].includes('page=1'));
   assert.ok(seenPages[1].includes('page=2'), '首页未满 max 应继续翻页');
@@ -360,7 +561,7 @@ test('jisuanke: fetchJisuankeBank stops at max and unwraps bare arrays', async (
     );
   const r = await fetchJisuankeBank(fetchFn, { max: 2 });
   assert.equal(r.problems.length, 2);
-  assert.equal(r.problems[1].difficulty, 1300);
+  assert.equal(r.problems[1].difficulty, 1500); // level3 → CF 1500（统一实测表）
 });
 
 test('jisuanke: bank endpoint error surfaces message', async () => {

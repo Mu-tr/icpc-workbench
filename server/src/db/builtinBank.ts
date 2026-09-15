@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { PlatformId } from '../../../shared/src/index.ts';
+import type { DifficultyScale } from '../../../shared/src/difficulty.ts';
 import type { Db } from './index.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
 
@@ -22,6 +23,9 @@ interface BuiltinBankProblem {
   problemKey: string;
   title: string;
   difficulty: number | null;
+  /** 可选：内置题库 JSON 未生成这两列时按未知处理（回填路径会补） */
+  nativeDifficulty?: string | null;
+  difficultyScale?: DifficultyScale | null;
   url: string | null;
   tags: string[];
 }
@@ -77,7 +81,14 @@ export function seedBuiltinBank(db: Db): void {
       | undefined
   )?.value;
   if (current === bank.version) return;
-  upsertBankProblems(db, bank.problems);
+  upsertBankProblems(
+    db,
+    bank.problems.map((p) => ({
+      ...p,
+      nativeDifficulty: p.nativeDifficulty ?? null,
+      difficultyScale: p.difficultyScale ?? null,
+    })),
+  );
   db.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
   ).run(BUILTIN_BANK_VERSION_KEY, bank.version);

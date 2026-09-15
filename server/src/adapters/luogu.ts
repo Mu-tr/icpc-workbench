@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields, toCfRating } from '../../../shared/src/difficulty.ts';
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { ManualImportRequiredError } from './types.ts';
 import { sleep, type HttpInit, asHttpClient } from './http.ts';
@@ -33,22 +34,9 @@ const STATUS_MAP: Record<number, Verdict> = {
   14: 'WA', // Unaccepted（含部分正确）
 };
 
-const LUOGU_DIFFICULTY_TO_RATING: Record<number, number> = {
-  1: 1000, // 入门
-  2: 1300, // 普及-
-  3: 1500, // 普及/提高-
-  4: 1700, // 普及+/提高
-  5: 2000, // 提高+/省选-
-  6: 2300, // 省选/NOI-
-  7: 2600, // NOI/NOI+
-  8: 3000, // 高级
-};
-
-/** 洛谷难度分级（0-8）→ CF rating 近似值（社区公认对照），供统一难度标尺 */
-export function luoguDifficultyToRating(d: number): number | null {
-  if (d <= 0 || !Number.isFinite(d)) return null;
-  return LUOGU_DIFFICULTY_TO_RATING[d] ?? null;
-}
+/** 洛谷难度分级（0-8）→ CF rating 近似值（实测中位数表，位于 shared/src/difficulty.ts）。
+ *  兼容别名：调用点（analysis/difficultyBackfill、problemBank）与既有测试依赖此名与签名 */
+export const luoguDifficultyToRating = (d: number): number | null => toCfRating('luogu', d);
 
 interface LuoguProblem {
   pid?: string;
@@ -375,20 +363,20 @@ export function createLuoguAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
       return raws.map((rec) => {
         const pid = rec.problem?.pid ?? `luogu-${rec.id}`;
         const info = problemCache.get(pid) ?? { tags: [] };
-        // 洛谷难度分级（0-8，record 自带或题目信息补充）→ 映射为 CF rating 统一标尺
+        // 洛谷难度分级（0-8，record 自带或题目信息补充）→ 统一标尺；
+        // 0 = 暂无评定 → 不下发 difficulty 键，nativeDifficulty 亦不写（未知不给原生值）
         const recDiff = rec.problem?.difficulty;
         const rawDifficulty =
           recDiff !== undefined && recDiff > 0 ? recDiff : info.difficulty;
-        const difficulty =
-          typeof rawDifficulty === 'number' && rawDifficulty > 0
-            ? luoguDifficultyToRating(rawDifficulty)
-            : null;
         return {
           problem: {
             platform: 'luogu' as PlatformId,
             problemKey: pid,
             title: info.title ?? rec.problem?.title ?? pid,
-            ...(difficulty !== null ? { difficulty } : {}),
+            ...difficultyFields(
+              'luogu',
+              typeof rawDifficulty === 'number' && rawDifficulty > 0 ? rawDifficulty : null,
+            ),
             url: `https://www.luogu.com.cn/problem/${pid}`,
             tags: info.tags,
           },

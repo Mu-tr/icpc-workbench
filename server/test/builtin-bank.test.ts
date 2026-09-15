@@ -66,10 +66,13 @@ test('codeforces bank: 单次调用解析键/难度/标签/URL，跳过无 conte
     problemKey: '1001A',
     title: 'Theatre Square',
     difficulty: 1000,
+    nativeDifficulty: '1000', // CF rating 本身即原生值
+    difficultyScale: 'cf-rating',
     url: 'https://codeforces.com/contest/1001/problem/A',
     tags: ['math'],
   });
   assert.equal(r.problems[1].difficulty, null);
+  assert.equal(r.problems[1].nativeDifficulty, null);
   assert.deepEqual(r.problems[1].tags, ['dp', 'graphs']);
 });
 

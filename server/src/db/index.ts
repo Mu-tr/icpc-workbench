@@ -66,6 +66,9 @@ function migrate(db: Db): void {
     // 历史行来源未知：按 'sync' 视之（优先级 2），保持既有行为不变
     db.exec("UPDATE problems SET difficulty_source = 'sync' WHERE difficulty IS NOT NULL");
   }
+  // v0.6: 难度双标度——保留平台原生难度原文与所属标度（便于平台改档后重算 + UI 展示）
+  if (!problemCols.has('native_difficulty')) db.exec('ALTER TABLE problems ADD COLUMN native_difficulty TEXT');
+  if (!problemCols.has('difficulty_scale')) db.exec('ALTER TABLE problems ADD COLUMN difficulty_scale TEXT');
   mergeSlashedCfKeys(db);
   // v0.4.5 数据修复：洛谷秒级时间戳曾被按毫秒解析（见 fixLuoguTimestamps）
   fixLuoguTimestamps(db);

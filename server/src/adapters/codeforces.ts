@@ -3,6 +3,7 @@ import type {
   PlatformId,
   Verdict,
 } from '../../../shared/src/index.ts';
+import { difficultyFields } from '../../../shared/src/difficulty.ts';
 import type { PlatformAdapter } from './types.ts';
 import { asHttpClient, sleep, type HttpInit } from './http.ts';
 import { recordWait } from './pagination.ts';
@@ -140,7 +141,8 @@ function normalize(s: CFSubmission): NormalizedSubmission {
       platform: 'codeforces' as PlatformId,
       problemKey: key,
       title: s.problem.name,
-      ...(s.problem.rating !== undefined ? { difficulty: s.problem.rating } : {}),
+      // 难度统一走 shared/src/difficulty.ts：未评级（rating 缺省）时不下发 difficulty 键
+      ...difficultyFields('codeforces', s.problem.rating ?? null),
       url: problemUrlFor(contestId, index),
       tags: s.problem.tags ?? [],
     },
