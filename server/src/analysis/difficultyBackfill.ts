@@ -1,11 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PlatformId } from '../../../shared/src/index.ts';
-import { difficultyFields, parseNowcoderScore, type DifficultyScale } from '../../../shared/src/difficulty.ts';
+import { difficultyFields, type DifficultyScale } from '../../../shared/src/difficulty.ts';
 import type { Db } from '../db/index.ts';
 import { fetchWithChallenge } from '../adapters/luogu.ts';
 import { parseJisuankeProblemTags } from '../adapters/jisuanke.ts';
-import { hydroDifficulty, LEETCODE_BANK_PAGE, LEETCODE_BANK_QUERY } from '../adapters/problemBank.ts';
+import {
+  hydroDifficulty,
+  LEETCODE_BANK_PAGE,
+  LEETCODE_BANK_QUERY,
+  parseNcRowCells,
+} from '../adapters/problemBank.ts';
 import { asHttpClient, sleep } from '../adapters/http.ts';
 import { purifyTags } from '../import/problemWritePolicy.ts';
 import { effectiveDataDir } from '../knowledge/store.ts';
@@ -45,7 +50,7 @@ export interface ProblemMeta {
 /** 单平台回填结果 */
 export interface PlatformBackfillResult {
   platform: string;
-  /** 参与回填的题数（该平台需补难度/原生难度/标签的题） */
+  /** 参与回填的题数（该平台需补难度/原生难度/标签的题；已扣除本次未处理的 capped 部分） */
   scanned: number;
   /** 难度被补上的题数 */
   filled: number;
@@ -57,6 +62,8 @@ export interface PlatformBackfillResult {
   missing: number;
   /** 拉取失败（风控/网络/上游无此题）的题数 */
   failed: number;
+  /** 本次因「单平台单次运行上限」未处理的题数（0 = 该平台目标已全部处理；>0 时再点一次继续） */
+  capped: number;
   /** 每题明细（problemKey → 说明） */
   details: Array<{ problemKey: string; action: 'filled' | 'repaired' | 'missing' | 'failed'; note?: string }>;
 }
@@ -80,18 +87,26 @@ const JISUANKE_BANK_PAGE = 20;
  * - `delayMs`：**逐题**请求之间的间隔（只有逐题型平台 luogu/nowcoder/daimayuan 会请求上游；
  *   整表型平台的元数据来自整表/缓存，逐题循环不再发请求 → 间隔为 0，页间限速见 SCAN_DELAY_MS）。
  * - `failLimit`：连续失败阈值，超过即视为触发风控并中止该平台（下次运行继续补）。
- *   只有牛客开启（实测匿名搜索连续失败后会被限流，继续打会加重风控）。
+ *   牛客与洛谷开启（实测匿名逐题查询连续失败后会被限流，继续打会加重风控）；
+ *   两者都是「逐题发请求」的平台，一次点击可能发出上千个请求，故必须有熔断。
+ * - `maxPerRun`：**单次运行**最多处理的题数（一次点击的耗时上限 =
+ *   maxPerRun × delayMs）。没有它时，一个「全库原生难度为空」的旧库点一次回填会串行跑十几分钟
+ *   才发现没补上几题；超出部分留在库里（状态即游标），下次点击继续。
+ *   整表型平台不发逐题请求，上限只限制本次写库量，取 2000。
  */
-const PLATFORM_LIMITS: Record<PlatformId, { delayMs: number; failLimit: number | null }> = {
-  nowcoder: { delayMs: 450, failLimit: 8 },
-  luogu: { delayMs: 300, failLimit: null },
-  daimayuan: { delayMs: 400, failLimit: null },
-  leetcode: { delayMs: 0, failLimit: null },
-  jisuanke: { delayMs: 0, failLimit: null },
-  atcoder: { delayMs: 0, failLimit: null },
-  codeforces: { delayMs: 0, failLimit: null },
-  qoj: { delayMs: 0, failLimit: null },
+const PLATFORM_LIMITS: Record<PlatformId, { delayMs: number; failLimit: number | null; maxPerRun: number }> = {
+  nowcoder: { delayMs: 450, failLimit: 8, maxPerRun: 300 }, // ≈2.3 分钟
+  luogu: { delayMs: 300, failLimit: 8, maxPerRun: 400 }, // ≈2 分钟
+  daimayuan: { delayMs: 400, failLimit: null, maxPerRun: 300 }, // ≈2 分钟
+  leetcode: { delayMs: 0, failLimit: null, maxPerRun: 2000 },
+  jisuanke: { delayMs: 0, failLimit: null, maxPerRun: 2000 },
+  atcoder: { delayMs: 0, failLimit: null, maxPerRun: 2000 },
+  codeforces: { delayMs: 0, failLimit: null, maxPerRun: 2000 },
+  qoj: { delayMs: 0, failLimit: null, maxPerRun: 2000 },
 };
+
+/** 未登记平台的兜底限额：不发逐题请求、不熔断、本次不设额外上限（见 backfillPlatform） */
+const DEFAULT_PLATFORM_LIMITS = { delayMs: 0, failLimit: null, maxPerRun: 0 } as const;
 
 /** 整表扫描的页间/请求间间隔（力扣分页 400ms；计蒜客分页 300ms；AtCoder 要求 >= 1s） */
 const SCAN_DELAY_MS = { leetcode: 400, jisuanke: 300, atcoder: 1000 } as const;
@@ -142,30 +157,24 @@ export function pickBackfillTargets(db: Db): BackfillTarget[] {
 /**
  * 解析牛客搜索结果行，分离标题与标签（.title 链接为标题，.tag-label 为算法标签）。
  * 返回 null 表示未命中该题号。
+ *
+ * 单元格定位与取值**共用题库路径的同一份解析器**（`parseNcRowCells`：标题锚点 + 后一格 + 共享校验器）。
+ * 历史缺陷：本读取方直接取 `tds[2]`，与题库路径的「紧随标题单元格」规则不一致 ——
+ * 行内列数一变（多一列勾选框/少一列难度）就会把通过数当成难度写库，
+ * 而回填的 backfill(3) 优先级高于 bank(1)/sync(2)，会覆盖掉原本正确的难度。
  */
 export function parseNcSearchRow(html: string, problemKey: string): BackfillInfo | null {
   const trRe = new RegExp(`<tr[^>]*data-problemId="${problemKey}"[^>]*>([\\s\\S]*?)</tr>`);
   const m = trRe.exec(html);
   if (!m) return null;
-  const titleMatch = /class="title"[^>]*>([\s\S]*?)<\/a>/.exec(m[1]);
-  const title = titleMatch
-    ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
-    : null;
-  const tags = [...m[1].matchAll(/class="tag-label[^"]*"[^>]*>([\s\S]*?)<\/a>/g)]
-    .map((t) => t[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim())
-    .filter(Boolean);
-  const tds = [...m[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]);
-  const diffText = (tds[2] ?? '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-  // 难度分取值规则与题库路径**共用同一个校验器**（200..4000、100 的倍数；离网/越界/空值 → 未知），
-  // 否则同一行会对一方「未知」、对另一方「有效」，而 backfill(3) 的优先级会盖掉 bank(1) 的结果
-  const nativeScore = parseNowcoderScore(diffText);
+  const { title, tags, nativeScore } = parseNcRowCells(m[1]);
   const mapped = difficultyFields('nowcoder', nativeScore);
   return {
     problemKey,
     difficulty: mapped.difficulty ?? null,
     nativeDifficulty: mapped.nativeDifficulty ?? null,
     difficultyScale: mapped.difficultyScale,
-    title,
+    title: title === '' ? null : title,
     tags: tags.length > 0 ? tags : null,
   };
 }
@@ -219,7 +228,9 @@ export async function fetchLgProblemInfo(
   const p = data.currentData?.problem ?? data.data?.problem ?? data.problem;
   if (!p) return null;
   // difficulty=0 = 洛谷「暂无评定」：难度未知（null），但原生原文 '0' 照落库 ——
-  // 这样该题不会因为「原生值已存在」在下次回填时被反复重查
+  // 原生原文落库是为了**如实记录上游状态**（避免显示与上游不一致），并让「难度与原生值同源」
+  // 这一不变量成立。注意：它**不会**让该题退出回填目标（pickBackfillTargets 还看 difficulty IS NULL），
+  // 所以永久未评级的题每次回填都会被重新查一次（本次运行上限 capped 之前，这是已知代价）。
   const mapped = difficultyFields('luogu', typeof p.difficulty === 'number' ? p.difficulty : null);
   // 标题字段为 name（旧结构 title）；tags 新结构为 id 数组（需字典），旧结构为 {name} 对象数组
   const title = typeof p.name === 'string' ? p.name : typeof p.title === 'string' ? p.title : null;
@@ -571,13 +582,19 @@ export function cleanNcTitle(title: string): string {
 /**
  * 未知难度/原生难度/标签的全平台回填：
  * - 目标选择见 pickBackfillTargets（QOJ 排除）
- * - 每平台按 PLATFORM_LIMITS 限速；牛客连续失败 8 次判定风控并中止该平台
+ * - 每平台按 PLATFORM_LIMITS 限速；牛客/洛谷连续失败 8 次判定风控并中止该平台
+ * - 每平台单次运行题数上限见 PLATFORM_LIMITS.maxPerRun：一次点击的耗时因此有上界，
+ *   未处理的题数随结果回传（capped），下次点击从剩余目标继续
  * - 写库统一走 difficulty_source='backfill'（优先级 3）：难度、原生难度、标度、标题、标签
  *   都只在「库内为空 / 上游有值」时补齐，绝不覆盖已有手动值
  */
 export async function backfillDifficulties(
   db: Db,
   fetchFn: typeof fetch = fetch,
+  opts: {
+    /** 覆盖「单平台单次运行上限」（默认取 PLATFORM_LIMITS[platform].maxPerRun）；仅供测试与运维调低 */
+    maxTargetsPerPlatform?: number;
+  } = {},
 ): Promise<PlatformBackfillResult[]> {
   const targets = pickBackfillTargets(db);
   if (targets.length === 0) return [];
@@ -588,6 +605,16 @@ export async function backfillDifficulties(
     if (list) list.push(t);
     else byPlatform.set(t.platform, [t]);
   }
+  // 单平台单次运行上限：逐题平台把它折算成「一次点击最多几分钟」，整表平台只限制本次写库量。
+  // 超出部分不丢弃（DB 状态就是游标，目标选择每次都从库里重新挑），只如实计入 capped。
+  const cappedByPlatform = new Map<PlatformId, number>();
+  for (const [platform, list] of byPlatform) {
+    const limit = opts.maxTargetsPerPlatform ?? platformLimits(platform).maxPerRun;
+    if (limit > 0 && list.length > limit) {
+      cappedByPlatform.set(platform, list.length - limit);
+      byPlatform.set(platform, list.slice(0, limit));
+    }
+  }
   const ctx: BackfillCtx = {
     fetchFn,
     tables: new Map(),
@@ -596,9 +623,19 @@ export async function backfillDifficulties(
 
   const results: PlatformBackfillResult[] = [];
   for (const [platform, list] of byPlatform) {
-    results.push(await backfillPlatform(db, platform, list, ctx));
+    const r = await backfillPlatform(db, platform, list, ctx);
+    r.capped = cappedByPlatform.get(platform) ?? 0;
+    results.push(r);
   }
   return results;
+}
+
+/**
+ * 取平台限额；未登记的平台串（配置/调用方传入的意外值）回落到保守默认值 ——
+ * 不能因为查不到限额就让整轮回填抛错（其他平台的回填结果会一起丢掉）。
+ */
+function platformLimits(platform: PlatformId): { delayMs: number; failLimit: number | null; maxPerRun: number } {
+  return PLATFORM_LIMITS[platform] ?? DEFAULT_PLATFORM_LIMITS;
 }
 
 async function backfillPlatform(
@@ -607,7 +644,7 @@ async function backfillPlatform(
   targets: BackfillTarget[],
   ctx: BackfillCtx,
 ): Promise<PlatformBackfillResult> {
-  const limits = PLATFORM_LIMITS[platform];
+  const limits = platformLimits(platform);
   const r: PlatformBackfillResult = {
     platform,
     scanned: targets.length,
@@ -616,6 +653,7 @@ async function backfillPlatform(
     repaired: 0,
     missing: 0,
     failed: 0,
+    capped: 0,
     details: [],
   };
   const before = db.prepare(

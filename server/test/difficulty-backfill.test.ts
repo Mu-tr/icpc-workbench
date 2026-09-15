@@ -7,6 +7,7 @@ import {
   backfillDifficulties,
   pickBackfillTargets,
 } from '../src/analysis/difficultyBackfill.ts';
+import { parseNcBankRows } from '../src/adapters/problemBank.ts';
 
 let db: Db;
 beforeEach(() => {
@@ -234,7 +235,9 @@ test('回填：上游无难度的题记 missing，且不写 difficulty_source', 
   assert.equal(lg.missing, 1);
   const row = db.prepare("SELECT difficulty, native_difficulty, difficulty_source FROM problems WHERE problem_key='P9998'").get() as any;
   assert.equal(row.difficulty, null);
-  assert.equal(row.native_difficulty, '0'); // 洛谷 0 = 暂无评定，作为原生原文落库（下次不再重复回填）
+  assert.equal(row.native_difficulty, '0'); // 洛谷 0 = 暂无评定：原生原文照落库（如实记录上游状态）
+  // 注意：落了原生原文并不会让该题退出回填目标 —— 目标选择还看 difficulty IS NULL，
+  // 所以永久未评级的题每次回填仍会被重新查询（本次运行上限 capped 之前，这是已知代价）
   assert.equal(row.difficulty_source, 'sync'); // 难度未变 → 来源不被改写
 });
 
@@ -279,6 +282,43 @@ test('parseNcSearchRow: 离网/越界难度分一律未知（与题库读取方�
   }
 });
 
+test('parseNcSearchRow: 与题库路径共用同一套「标题锚点 + 后一格」定位规则（列数变动不改变结论）', () => {
+  // 真实页面形态：标题单元格带 colspan="2"，行内 td 数与列数并不对应；
+  // 某些行还会多出一列（勾选框/序号），此时任何按列下标硬取（旧实现取 tds[2]）的读取方
+  // 都会取到标题单元格 → 同一行对回填路径「未知」、对题库路径 1500，而 backfill(3) 优先级更高。
+  const shifted = `<tr data-problemId="16640">
+    <td class="text-center"><input type="checkbox"/></td>
+    <td><a href="/acm/problem/16640">NC16640</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/16640">纪念品分组</a></td>
+    <td> 1500 </td><td>1049</td><td></td>
+  </tr>`;
+  const info = parseNcSearchRow(shifted, '16640');
+  assert.ok(info);
+  assert.equal(info!.difficulty, 1500); // 难度恒紧随标题单元格
+  assert.equal(info!.nativeDifficulty, '1500');
+  assert.equal(info!.title, '纪念品分组');
+  const rows = parseNcBankRows(shifted);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].difficulty, 1500); // 题库路径对同一行给出同一结论
+  assert.equal(rows[0].nativeScore, 1500);
+});
+
+test('parseNcSearchRow: 难度单元格为空时取未知，不得顺延到相邻的通过数（不得臆造难度）', () => {
+  // 通过数恰为难度网格值（1500）：若向后扫描找数字，就会把通过数当成难度，
+  // 并以 backfill(3) 覆盖 bank(1)/sync(2) 已落定的正确难度。
+  const html = `<tr data-problemId="50039">
+    <td><a href="/acm/problem/50039">NC50039</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/50039">kotori和气球</a></td>
+    <td> </td><td>1500</td><td></td>
+  </tr>`;
+  const info = parseNcSearchRow(html, '50039');
+  assert.ok(info);
+  assert.equal(info!.difficulty, null);
+  assert.equal(info!.nativeDifficulty, null);
+  assert.equal(parseNcBankRows(html)[0].difficulty, null); // 两个读取方一致为「未知」
+  assert.equal(parseNcBankRows(html)[0].nativeScore, null);
+});
+
 // ---------- 标题清洗 ----------
 
 test('cleanNcTitle: strips tag residue from polluted title', () => {
@@ -315,9 +355,11 @@ function ncListPage(info: { id: string; title: string; diff: string; tags: strin
   const tagLinks = info.tags
     .map((t) => `<a href="javascript:void(0);" class="tag-label js-tag">${t}</a>`)
     .join('');
+  // 真实页面形态：标题与算法标签同处一个 `colspan="2"` 单元格，难度是**紧随其后**的那一格。
+  // fixture 必须带上 colspan，否则「按列下标硬取」与「标题锚点 + 后一格」两种规则在测试里看不出差别。
   return `<table><tr data-problemId="${info.id}">
     <td><a href="/acm/problem/${info.id}">NC${info.id}</a></td>
-    <td><a href="/acm/problem/${info.id}" class="title">${info.title}</a>${tagLinks}</td>
+    <td class="fn-right" colspan="2"><a href="/acm/problem/${info.id}" class="title">${info.title}</a>${tagLinks}</td>
     <td>${info.diff}</td><td>100</td><td></td>
   </tr></table>`;
 }
@@ -423,6 +465,24 @@ test('backfill: luogu tag dict failure degrades (difficulty still filled)', asyn
   assert.equal(row.difficulty, 1500);
 });
 
+test('backfill: 洛谷连续失败达阈值即熔断（与牛客同一套风控中止语义）', async () => {
+  for (let i = 0; i < 10; i += 1) insertProblem('luogu', `P90${i}`, `T${i}`, null, []);
+  let requests = 0;
+  const fetchFn = router({
+    // 逐题详情全部失败（HTTP 500 = 风控/上游异常）：洛谷是逐题型平台，一次点击可能上千请求，必须熔断
+    'luogu.com.cn/problem': () => {
+      requests += 1;
+      return { status: 500, body: '' };
+    },
+    '_lfe/tags': () => ({ tags: [] }),
+  });
+  const results = await backfillDifficulties(db, fetchFn);
+  const lg = results.find((r) => r.platform === 'luogu')!;
+  assert.equal(lg.failed, 10); // 全部计入失败（含熔断后跳过的题）
+  assert.equal(requests, 8); // 只发出 8 个请求（= failLimit）：第 9 题起判定风控并中止
+  assert.ok(lg.details.some((d) => d.note?.includes('风控')), '中止的题需带风控说明');
+});
+
 test('backfill: luogu unrated difficulty (0) recorded as missing', async () => {
   insertProblem('luogu', 'P9999', 'X', null, []);
   const fetchFn = router({
@@ -432,6 +492,69 @@ test('backfill: luogu unrated difficulty (0) recorded as missing', async () => {
   const lg = results.find((r) => r.platform === 'luogu')!;
   assert.equal(lg.filled, 0);
   assert.equal(lg.missing, 1);
+});
+
+test('回填：单平台单次运行题数上限（capped 如实回传，未处理的题留作下次目标）', async () => {
+  // 上限存在的意义：一次点击的耗时必须有上界（逐题平台＝上限 × delayMs）。
+  // 这里用整表平台 + 显式调低上限来验证截断语义（整表平台 delayMs=0，测试无需真实等待）。
+  insertProblem('codeforces', '1001A', 'A', null, []);
+  insertProblem('codeforces', '1001B', 'B', null, []);
+  insertProblem('codeforces', '1001C', 'C', null, []);
+  const fetchFn = router({
+    'problemset.problems': () => ({
+      status: 'OK',
+      result: {
+        problems: [
+          { contestId: 1001, index: 'A', name: 'A', rating: 1000, tags: [] },
+          { contestId: 1001, index: 'B', name: 'B', rating: 1200, tags: [] },
+          { contestId: 1001, index: 'C', name: 'C', rating: 1400, tags: [] },
+        ],
+      },
+    }),
+  });
+  const results = await backfillDifficulties(db, fetchFn, { maxTargetsPerPlatform: 2 });
+  const cf = results.find((r) => r.platform === 'codeforces')!;
+  assert.equal(cf.scanned, 2); // 目标按题号升序，只处理前 2 题
+  assert.equal(cf.filled, 2);
+  assert.equal(cf.capped, 1); // 剩余题数如实回传（前端据此提示「再点一次继续」）
+  const done = db.prepare("SELECT difficulty FROM problems WHERE problem_key='1001A'").get() as any;
+  assert.equal(done.difficulty, 1000);
+  const left = db.prepare("SELECT difficulty FROM problems WHERE problem_key='1001C'").get() as any;
+  assert.equal(left.difficulty, null); // 未处理的题保持原样 → 仍是下次运行的目标
+
+  // 未设上限（默认 PLATFORM_LIMITS）时整表平台一次把剩余目标补完
+  const again = await backfillDifficulties(db, fetchFn);
+  const cf2 = again.find((r) => r.platform === 'codeforces')!;
+  assert.equal(cf2.capped, 0);
+  const filled = db.prepare("SELECT difficulty FROM problems WHERE problem_key='1001C'").get() as any;
+  assert.equal(filled.difficulty, 1400);
+});
+
+test('回填：未登记的平台串不会让整轮回填抛错（限额回落默认值，其他平台照常出结果）', async () => {
+  // platforms 表可被未来版本/迁移写入本代码未登记的平台（PLATFORM_LIMITS 查不到）：
+  // 旧实现直接读 PLATFORM_LIMITS[platform].failLimit → 抛 TypeError → 整轮 502，
+  // 所有平台的回填结果一起丢掉。
+  db.prepare("INSERT INTO platforms (id, name) VALUES ('weird-oj', 'Weird OJ')").run();
+  db.prepare(
+    `INSERT INTO problems (platform, problem_key, title, difficulty, url, tags)
+     VALUES ('weird-oj', 'X1', '未知平台题', NULL, NULL, '[]')`,
+  ).run();
+  insertProblem('codeforces', '1001A', 'A', null, []);
+  const fetchFn = router({
+    'problemset.problems': () => ({
+      status: 'OK',
+      result: { problems: [{ contestId: 1001, index: 'A', name: 'A', rating: 1000, tags: [] }] },
+    }),
+  });
+  const results = await backfillDifficulties(db, fetchFn);
+  const weird = results.find((r) => r.platform === 'weird-oj')!;
+  assert.equal(weird.scanned, 1);
+  assert.equal(weird.failed, 1); // 无元数据来源 → 记单题失败（不抛错、不中断）
+  assert.equal(weird.capped, 0);
+  const cf = results.find((r) => r.platform === 'codeforces')!;
+  assert.equal(cf.filled, 1); // 其他平台照常补完
+  const row = db.prepare("SELECT difficulty FROM problems WHERE problem_key='1001A'").get() as any;
+  assert.equal(row.difficulty, 1000);
 });
 
 test('backfill: no targets returns empty results without any fetch', async () => {

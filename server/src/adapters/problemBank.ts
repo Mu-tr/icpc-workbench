@@ -255,33 +255,58 @@ export async function fetchNowcoderBank(
 }
 
 /**
- * 解析牛客题库页表格行。三个必须遵守的坑：
+ * 牛客行内单元格文本净化：去标签、`&nbsp;` 归一、空白压缩。
+ */
+export function stripNcCell(raw: string): string {
+  return raw.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** 牛客表格行的单元格解析结果（标题 / 算法标签 / 难度分） */
+export interface NcRowCells {
+  /** 标题单元格文本（行内无 `class="title"` 锚点时为 ''） */
+  title: string;
+  tags: string[];
+  /** 难度分（由共享校验器 parseNowcoderScore 裁决；未知为 null） */
+  nativeScore: number | null;
+}
+
+/**
+ * **唯一的**牛客行解析（题库列表页与标题搜索页两处读取方共用这一份，不得各写一套）。
+ *
+ * 三个必须遵守的坑：
  * 1. **先收标签、再取标题**：标签是 `class="tag-label"` 的 `<a>`，标题是 `class="title"` 的 `<a>`；
  *    若把整行文本抠一遍再 trim，标签文本会并进标题（本项目已踩过一次）。
  * 2. **难度只认「标题单元格的下一个单元格」**：标题单元格带 `colspan="2"`，行内单元格数量不固定，
  *    但难度列恒紧跟在标题单元格之后。没有标题单元格 → 难度未知（不得从 `tds[0]` 之类的位置顺延）；
  *    绝**不**向后继续扫描找数字——否则难度为空的行会取到通过数（伪造成难度）。
+ *    历史缺陷：回填路径曾直接取 `tds[2]`，与题库路径的「标题锚点 + 后一格」规则不一致，
+ *    行内列数一变就会把通过数当难度写库，而 backfill(3) 的优先级高于 bank(1)/sync(2)。
  * 3. **取值规则由 `parseNowcoderScore` 统一裁决**（200..4000、100 的倍数；详见 shared/src/difficulty.ts）：
  *    空值 / 非纯数字 / 离网值（通过数列）/ 越界值 → 未知，不猜。
  */
+export function parseNcRowCells(cell: string): NcRowCells {
+  const tds = [...cell.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]);
+  const tags = [...cell.matchAll(/class="tag-label[^"]*"[^>]*>([\s\S]*?)<\/a>/g)]
+    .map((t) => stripNcCell(t[1]))
+    .filter(Boolean);
+  const title = stripNcCell(/class="title"[^>]*>([\s\S]*?)<\/a>/.exec(cell)?.[1] ?? '');
+  const titleIdx = tds.findIndex((t) => /class="title"/.test(t));
+  const diffCell = titleIdx >= 0 ? tds[titleIdx + 1] : undefined;
+  const nativeScore = parseNowcoderScore(diffCell === undefined ? null : stripNcCell(diffCell));
+  return { title, tags, nativeScore };
+}
+
+/**
+ * 解析牛客题库页表格行（`parseNcRowCells` 的行级包装）。
+ * 题号行里标题与标签都为空时跳过（分页尾部可能夹带空行/模板行）。
+ */
 export function parseNcBankRows(html: string): NcBankRow[] {
   const rows: NcBankRow[] = [];
-  const strip = (raw: string): string =>
-    raw.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
   const trRe = /<tr[^>]*data-problemId="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
   let m: RegExpExecArray | null;
   while ((m = trRe.exec(html)) !== null) {
     const problemId = m[1];
-    const cell = m[2];
-    const tds = [...cell.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]);
-    const tags = [...cell.matchAll(/class="tag-label[^"]*"[^>]*>([\s\S]*?)<\/a>/g)]
-      .map((t) => strip(t[1]))
-      .filter(Boolean);
-    const title = strip(/class="title"[^>]*>([\s\S]*?)<\/a>/.exec(cell)?.[1] ?? '');
-    const titleIdx = tds.findIndex((t) => /class="title"/.test(t));
-    const diffCell = titleIdx >= 0 ? tds[titleIdx + 1] : undefined;
-    const nativeScore = parseNowcoderScore(diffCell === undefined ? null : strip(diffCell));
-    // 题号行里标题与标签都为空时跳过（分页尾部可能夹带空行/模板行）
+    const { title, tags, nativeScore } = parseNcRowCells(m[2]);
     if (title === '' && tags.length === 0) continue;
     rows.push({
       problemId,
@@ -734,7 +759,6 @@ export async function fetchDaimayuanBank(
 // ---------- 计蒜客 ----------
 
 const JISUANKE_BASE = 'https://www.jisuanke.com';
-const JISUANKE_PER_PAGE = 50;
 
 interface JisuankeListProblem {
   problemIdentifier?: string;

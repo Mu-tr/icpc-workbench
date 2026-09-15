@@ -465,10 +465,12 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
   // - 牛客顺带修复标题污染/空标签（题库搜索接口返回分离的标题与算法标签）
   // - 全平台覆盖（整表型平台 CF/AtCoder/力扣/计蒜客 一次拉表后在内存里查，QOJ 无数据来源）
   // - CF 未知难度题为 gym/官方 Unrated 比赛，官方无 rating，不参与回填
-  // 耗时与待补题数成正比（牛客 ~0.5s/题），大库时前端需提示等待
-  // 响应：{ ok, results: [{ platform, scanned, filled, nativeFilled, repaired, missing, failed, details }], unknownLeft }
+  // 耗时与待补题数成正比（洛谷 ~0.3s/题、牛客 ~0.45s/题），故每平台单次运行题数有上限
+  // （PLATFORM_LIMITS.maxPerRun）：超出的题数用 capped 如实回传，下次点击继续
+  // 响应：{ ok, results: [{ platform, scanned, filled, nativeFilled, repaired, missing, failed, capped, details }], unknownLeft }
   //   nativeFilled = 该平台 native_difficulty 由 NULL 被补上的题数（与 filled 相互独立：
   //   难度已有值但原生值缺失时只增 nativeFilled —— 双标度要能各自如实上报）
+  //   scanned = 本次实际处理的题数（已扣除 capped）；capped = 本次因上限未处理的题数
   r.post('/backfill-difficulty', asyncHandler(async (_req, res) => {
     try {
       const results = await backfillDifficulties(db, fetchFn);
