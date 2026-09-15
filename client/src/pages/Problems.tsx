@@ -10,6 +10,7 @@ import {
   Modal,
   Select,
   Space,
+  Switch,
   Table,
   Tabs,
   Tag,
@@ -1245,6 +1246,8 @@ function BankTab({ onDone }: { onDone: () => void }) {
   const [platform, setPlatform] = useState<PlatformId>('luogu')
   const [max, setMax] = useState(() => defaultBankMax('luogu'))
   const [luoguMin, setLuoguMin] = useState(3)
+  // AtCoder：用洛谷 AT 镜像题补算法标签（默认关，覆盖有限）。仅该平台时随请求下发 atcoderTags
+  const [atcoderTags, setAtcoderTags] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string>()
 
@@ -1259,13 +1262,20 @@ function BankTab({ onDone }: { onDone: () => void }) {
     try {
       const r = await post<{
         ok: boolean; platform: string; total: number | null; fetched: number; inserted: number; updated: number
+        tagScanned?: number; tagMatched?: number; tagWithTags?: number; tagSkipped?: number
       }>('/api/problems/bank', {
         platform,
         max,
         ...(platform === 'luogu' ? { luoguMinDifficulty: luoguMin } : {}),
+        ...(platform === 'atcoder' && atcoderTags ? { atcoderTags: true } : {}),
       })
       const totalPart = r.total ? `（题库共 ${r.total} 题）` : ''
-      setResult(`拉取 ${r.fetched} 题${totalPart}：新增 ${r.inserted}，更新 ${r.updated}`)
+      // 标签桥统计只在真的开了桥时由服务端下发（未开时无这些键）
+      const tagPart =
+        r.tagScanned === undefined
+          ? ''
+          : `；洛谷镜像补标签：扫描 ${r.tagScanned} 题、命中题号 ${r.tagMatched ?? 0}、其中带标签 ${r.tagWithTags ?? 0}`
+      setResult(`拉取 ${r.fetched} 题${totalPart}：新增 ${r.inserted}，更新 ${r.updated}${tagPart}`)
       message.success(`${platformName(platform)}题库已入库，训练计划选题池已扩充`)
       onDone()
     } catch (e) {
@@ -1312,13 +1322,24 @@ function BankTab({ onDone }: { onDone: () => void }) {
           />
         </div>
       )}
+      {platform === 'atcoder' && (
+        <div style={{ marginTop: 12 }}>
+          <Space>
+            <Switch checked={atcoderTags} onChange={setAtcoderTags} />
+            <span style={{ color: '#8993a2' }}>
+              用洛谷镜像补标签（默认关；覆盖有限：实测 250 行样本中 139 行命中题号、仅 68 行真的带标签，
+              结果里的命中计数如实回传）
+            </span>
+          </Space>
+        </div>
+      )}
       {result && <p style={{ marginTop: 12 }}>{result}</p>}
       <BackfillDifficultyCard />
     </div>
   )
 }
 
-/** 「拉取题库」页签内的难度回填区块：对库内未知难度的洛谷/牛客题逐题查询公开接口补全。 */
+/** 「拉取题库」页签内的难度回填区块：对库内未知难度/未知原生难度/缺标签的题跨平台查询公开接口补全。 */
 function BackfillDifficultyCard() {
   const { message } = AntdApp.useApp()
   const [busy, setBusy] = useState(false)
@@ -1330,14 +1351,17 @@ function BackfillDifficultyCard() {
     try {
       const r = await post<{
         ok: boolean
-        results: Array<{ platform: string; scanned: number; filled: number; repaired: number; missing: number; failed: number }>
+        results: Array<{
+          platform: string; scanned: number; filled: number; nativeFilled: number
+          repaired: number; missing: number; failed: number; capped: number
+        }>
         unknownLeft: number
       }>('/api/problems/backfill-difficulty', {})
       const parts = r.results.map((x) => {
-        const name = x.platform === 'nowcoder' ? '牛客' : x.platform === 'luogu' ? '洛谷' : x.platform
-        return `${name}：补难度 ${x.filled} 题、修标题/标签 ${x.repaired} 题${x.missing ? `、官方无难度 ${x.missing} 题` : ''}${x.failed ? `、失败 ${x.failed} 题` : ''}`
+        const name = platformName(x.platform as PlatformId)
+        return `${name}：补难度 ${x.filled} 题、补原生难度 ${x.nativeFilled} 题、修标题/标签 ${x.repaired} 题${x.missing ? `、官方无难度 ${x.missing} 题` : ''}${x.failed ? `、失败 ${x.failed} 题` : ''}${x.capped ? `、本次上限外还有 ${x.capped} 题（再点一次继续）` : ''}`
       })
-      setResult(parts.length ? parts.join('；') + `。全库剩余未知难度 ${r.unknownLeft} 题` : '库内没有待补难度的洛谷/牛客题')
+      setResult(parts.length ? parts.join('；') + `。全库剩余未知难度 ${r.unknownLeft} 题` : '库内没有待回填难度的题')
       message.success('难度回填完成')
     } catch (e) {
       message.error((e as Error).message)
@@ -1349,8 +1373,13 @@ function BackfillDifficultyCard() {
   return (
     <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #222831' }}>
       <p style={{ color: '#8993a2' }}>
-        补全库内「未知难度」的洛谷/牛客题（逐题查询官方接口，牛客约 0.5 秒/题，请耐心等待）；
-        牛客同时修复历史遗留的标题混入标签问题。Codeforces 未知难度来自 gym 与官方 Unrated 比赛，无公开难度可补。
+        补全库内「未知难度 / 未知原生难度 / 缺标签」的题，覆盖所有平台：整表型平台
+        （Codeforces / AtCoder / 力扣 / 计蒜客）先拉一次题库表再在本地比对；逐题型平台
+        （洛谷 / 牛客 / 代码源）逐题查询官方接口（洛谷约 0.3 秒/题、牛客约 0.45 秒/题，请耐心等待），
+        连续失败会被判定为风控并中止该平台。牛客同时修复历史遗留的标题混入标签问题。
+        为避免一次点击耗时过长，单次每个平台有题数上限（洛谷 400、牛客/代码源 300、整表平台 2000），
+        超出部分在结果里如实提示，再点一次即可继续。
+        QOJ 无难度数据来源；Codeforces 的 gym 与官方 Unrated 比赛无公开难度可补。
       </p>
       <Button loading={busy} onClick={run}>一键回填未知难度</Button>
       {result && <p style={{ marginTop: 12 }}>{result}</p>}
