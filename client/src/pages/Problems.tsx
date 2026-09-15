@@ -150,6 +150,8 @@ export default function Problems() {
   // 内置题库开箱即用：默认包含未做题库题（否则题库再大默认视图也只有做过的题）
   const [includeBank, setIncludeBank] = useState(true)
   const [importOpen, setImportOpen] = useState(false)
+  /** 「导入刷题记录」弹窗当前页签（受控：SyncTab 用它判断自己是否活跃，从而刷新/轮询续拉状态） */
+  const [importTab, setImportTab] = useState('sync')
   const [cleaning, setCleaning] = useState(false)
   const [manualForm] = Form.useForm()
   // 知识点管线（P4）：覆盖率 + 批跑/无 Key 导出入口
@@ -896,11 +898,20 @@ export default function Problems() {
 
       <Modal title="导入刷题记录" open={importOpen} onCancel={() => setImportOpen(false)} footer={null} width={620}>
         <Tabs
+          // 受控页签：把「弹窗打开 + 当前是平台同步页签」作为 SyncTab 的 active，
+          // 打开弹窗/切回该页签时重新拉续拉状态（组件本身不随弹窗关闭卸载）
+          activeKey={importTab}
+          onChange={setImportTab}
           items={[
             {
               key: 'sync',
               label: '平台同步',
-              children: <SyncTab onDone={() => { setImportOpen(false); loadRef.current() }} />,
+              children: (
+                <SyncTab
+                  active={importOpen && importTab === 'sync'}
+                  onDone={() => { setImportOpen(false); loadRef.current() }}
+                />
+              ),
             },
             {
               key: 'bank',
@@ -1103,7 +1114,10 @@ function formatNextRunAt(iso: string): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-function SyncTab({ onDone }: { onDone: () => void }) {
+/** 续拉状态轮询间隔：续拉按平台节奏排期（秒级到分钟级），10 秒粒度足以看到轮次推进，请求极轻 */
+const AUTO_CONTINUE_POLL_MS = 10_000
+
+function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boolean }) {
   const { message } = AntdApp.useApp()
   const [platform, setPlatform] = useState<PlatformId>('codeforces')
   const [handle, setHandle] = useState('')
@@ -1119,9 +1133,23 @@ function SyncTab({ onDone }: { onDone: () => void }) {
       .catch(() => { /* 服务端未升级时静默：仅影响续拉提示 */ })
   }, [])
 
+  // 弹窗打开 / 切回本页签时重新拉取：本组件一旦挂载就不会随弹窗关闭而卸载
+  // （Modal 无 destroyOnClose、Tabs 不销毁非活动面板），只在挂载时拉一次会让横幅
+  // 永远停在旧轮次——续拉跑完/被取消后仍显示「后台续拉中，预计 HH:MM 继续」。
   useEffect(() => {
-    loadStatus()
-  }, [loadStatus])
+    if (active) loadStatus()
+  }, [active, loadStatus])
+
+  // Boolean(...)：旧版服务端整段没有 autoContinue 字段（undefined），不能被当成「有待续拉」而空转轮询
+  const hasPending = statuses.some((s) => Boolean(s.autoContinue))
+
+  // 有待续拉时轻量轮询，让轮次与预计时间自行推进（无需用户操作）；
+  // 没有待续拉或页签不活跃时不保留任何定时器（自停轮询）。
+  useEffect(() => {
+    if (!active || !hasPending) return
+    const timer = setInterval(loadStatus, AUTO_CONTINUE_POLL_MS)
+    return () => clearInterval(timer)
+  }, [active, hasPending, loadStatus])
 
   const run = async () => {
     if (!handle.trim()) return
@@ -1175,7 +1203,12 @@ function SyncTab({ onDone }: { onDone: () => void }) {
                 type="info"
                 showIcon
                 style={{ marginBottom: 8 }}
-                message={`后台续拉中：第 ${ac.round}/${ac.maxRounds} 轮，预计 ${formatNextRunAt(ac.nextAt)} 继续`}
+                // running 时服务端正在拉本轮，nextAt 尚未落到下一轮：此时不报「预计 HH:MM」（会显示成过去时间）
+                message={
+                  ac.running
+                    ? `后台续拉中：第 ${ac.round}/${ac.maxRounds} 轮（正在拉取）`
+                    : `后台续拉中：第 ${ac.round}/${ac.maxRounds} 轮，预计 ${formatNextRunAt(ac.nextAt)} 继续`
+                }
                 description={`${s.platformName}（${ac.handle}）：单次同步受分批上限截断后由后台自动续拉，可随时停止；停止不影响已导入的数据。`}
                 action={
                   <Button size="small" loading={cancelling === s.platform} onClick={() => void cancelAutoContinue(s.platform)}>

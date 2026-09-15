@@ -447,8 +447,8 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
 
   // POST /api/settings/sync  body: { maxSubmissions, autoContinueRounds?, jisuankePracticeSync? }
   // maxSubmissions：100–1500（MIN/MAX_SYNC_MAX_SUBMISSIONS），单次同步新增上限，防封号。
-  // autoContinueRounds：0–50，后台续拉轮数上限（0 = 关闭）；**省略即保留已存值**（前端只改一项时
-  // 不会把另一项重置成默认）。jisuankePracticeSync：布尔，计蒜客「同步自由练题提交」开关
+  // autoContinueRounds：0–50 的**数字**，后台续拉轮数上限（0 = 关闭）；**省略即保留已存值**（前端只改
+  // 一项时不会把另一项重置成默认）。jisuankePracticeSync：布尔，计蒜客「同步自由练题提交」开关
   // （落库为 settings['jisuanke.practiceSync'] 的 'true'/'false'；同样省略即保留已存值）。
   // 各项都先校验后写入：任一非法则整次请求不落库。
   r.post('/sync', (req, res) => {
@@ -461,17 +461,20 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
     }
     let rounds: number | undefined;
     if (autoContinueRounds !== undefined) {
-      const v = Number(autoContinueRounds);
+      // 必须严格要求 number 类型，不能用 Number(...) 强转：JSON null（「保持已存值」的自然写法）、
+      // ''、false、[] 强转后都是 0，而 0 恰是本字段的合法值（关闭后台续拉）——于是「不传具体值」
+      // 会被静默写成 '0' 把续拉关掉。类型不符即 400，已存值原样保留。
       if (
-        !Number.isInteger(v) ||
-        v < MIN_SYNC_AUTO_CONTINUE_ROUNDS ||
-        v > MAX_SYNC_AUTO_CONTINUE_ROUNDS
+        typeof autoContinueRounds !== 'number' ||
+        !Number.isInteger(autoContinueRounds) ||
+        autoContinueRounds < MIN_SYNC_AUTO_CONTINUE_ROUNDS ||
+        autoContinueRounds > MAX_SYNC_AUTO_CONTINUE_ROUNDS
       ) {
         return res.status(400).json({
-          error: `autoContinueRounds 需为 ${MIN_SYNC_AUTO_CONTINUE_ROUNDS}–${MAX_SYNC_AUTO_CONTINUE_ROUNDS} 的整数（0 = 关闭后台续拉）`,
+          error: `autoContinueRounds 需为 ${MIN_SYNC_AUTO_CONTINUE_ROUNDS}–${MAX_SYNC_AUTO_CONTINUE_ROUNDS} 的整数（0 = 关闭后台续拉；省略该字段则保留已存值）`,
         });
       }
-      rounds = v;
+      rounds = autoContinueRounds;
     }
     if (jisuankePracticeSync !== undefined && typeof jisuankePracticeSync !== 'boolean') {
       return res.status(400).json({ error: 'jisuankePracticeSync 需为布尔值' });

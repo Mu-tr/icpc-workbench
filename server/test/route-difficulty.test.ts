@@ -381,18 +381,55 @@ test('POST /api/settings/sync: jisuankePracticeSync 落库为 true/false 字符�
   db.close();
 });
 
-test('POST /api/settings/sync: 越界 autoContinueRounds → 400 且不落库', async () => {
+test('POST /api/settings/sync: 越界/非数字 autoContinueRounds → 400 且原始行不变（不落库）', async () => {
   const db = createDb(':memory:');
   await withApp(settingsApp(db), async (base) => {
+    /** 直接读原始行：读侧会把越界脏值钳回默认 6，只走 GET /api/settings 断言的话
+     *  「写入 51 失败→读回 6」与「没写→读回 6」结果相同，测试不具区分力。 */
+    const raw = () =>
+      (db.prepare("SELECT value FROM settings WHERE key = 'sync.autoContinueRounds'").get() as
+        | { value: string }
+        | undefined)?.value;
+
     for (const bad of [51, -1, 2.5, 'x']) {
       const res = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, autoContinueRounds: bad });
       assert.equal(res.status, 400, `autoContinueRounds=${String(bad)} 应被拒`);
       assert.match(((await res.json()) as { error: string }).error, /autoContinueRounds/);
     }
+    assert.equal(raw(), undefined, '被拒的写入不得落库');
     const after = (await (await fetch(`${base}/api/settings`)).json()) as {
       sync: { autoContinueRounds: number };
     };
     assert.equal(after.sync.autoContinueRounds, 6);
+  });
+  db.close();
+});
+
+test('POST /api/settings/sync: null / 空串 / 布尔 / 数组等非数字 autoContinueRounds → 400 且保留已存值', async () => {
+  const db = createDb(':memory:');
+  await withApp(settingsApp(db), async (base) => {
+    const raw = () =>
+      (db.prepare("SELECT value FROM settings WHERE key = 'sync.autoContinueRounds'").get() as
+        | { value: string }
+        | undefined)?.value;
+
+    // 先落一个合法值：被拒的写入绝不能把它改成 '0'（历史缺陷：Number(null)===0 且 0 合法 →
+    // 传 JSON null（「保持已存值」的自然写法）会静默关闭后台续拉）
+    const saved = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, autoContinueRounds: 7 });
+    assert.equal(saved.status, 200);
+    assert.equal(raw(), '7');
+
+    for (const bad of [null, '', false, [], {}, '7']) {
+      const res = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, autoContinueRounds: bad });
+      assert.equal(res.status, 400, `autoContinueRounds=${JSON.stringify(bad)} 应被拒`);
+      assert.match(((await res.json()) as { error: string }).error, /autoContinueRounds/);
+      assert.equal(raw(), '7', `被拒后已存值应保持 '7'（不能变成 '0'）`);
+    }
+
+    // 「保留已存值」的正确写法是**省略该字段**（不是传 null）
+    const omitted = await postJson(base, '/api/settings/sync', { maxSubmissions: 500 });
+    assert.deepEqual(await omitted.json(), { maxSubmissions: 500, autoContinueRounds: 7, jisuankePracticeSync: true });
+    assert.equal(raw(), '7');
   });
   db.close();
 });
