@@ -12,6 +12,7 @@
 import type { SyncResult } from '../../../shared/src/index.ts';
 import type { PlatformId } from '../../../shared/src/index.ts';
 import type { Db } from '../db/index.ts';
+import { DEFAULT_USER_ID } from '../constants.ts';
 import { syncPlatform } from './sync.ts';
 
 export const AUTO_CONTINUE_DELAY_MS: Record<PlatformId, number> = {
@@ -106,9 +107,32 @@ export function scheduleAutoContinue(database: Db, platform: PlatformId, handle:
   return state;
 }
 
+/**
+ * 待执行的续拉是否仍对应当前绑定的账号（design §3.6 的前置条件「账号未变更」）。
+ *
+ * 为什么必须每轮复查：job 在注册时捕获 handle，而用户随时可能在设置页改绑
+ * （routes/settings.ts 的 /accounts 会同时把 last_sync_at 置空）。若仍用旧 handle 跑一轮，
+ * syncPlatform 的 handleChanged 判定为真 → 先建「重置前」备份、再把新账号该平台的提交全清空
+ * 换成旧账号的数据，并在末尾把 platform_accounts.handle 改回旧 handle——用户刚做的改绑被静默回滚。
+ * 因此 handle 不一致时直接丢弃该任务：不跑同步、不写游标、不写 sync_runs。
+ *
+ * 无账号记录时（假执行器注入的测试、数据库被重置等）不作废，交由 syncPlatform 自身处理。
+ */
+function handleStillBound(database: Db, platform: PlatformId, handle: string): boolean {
+  const row = database
+    .prepare('SELECT handle FROM platform_accounts WHERE user_id = ? AND platform = ?')
+    .get(DEFAULT_USER_ID, platform) as { handle: string } | undefined;
+  return row === undefined || row.handle === handle;
+}
+
 async function runRound(platform: PlatformId): Promise<void> {
   const job = jobs.get(platform);
   if (!job) return;
+  // 每轮执行前复查账号绑定：改绑后旧 handle 的续拉作废
+  if (!handleStillBound(deps!.db, platform, job.state.handle)) {
+    jobs.delete(platform);
+    return;
+  }
   job.state.running = true;
   let result: SyncResult | null = null;
   try {
@@ -116,6 +140,8 @@ async function runRound(platform: PlatformId): Promise<void> {
   } catch {
     result = null;
   }
+  // 执行期间任务可能已被取消（手动同步抢占 / __resetSyncSchedulerForTest）：不再排期
+  if (jobs.get(platform) !== job) return;
   const failed = result === null || result.errors.length > 0;
   const truncated = result?.truncated === true;
   const round = job.state.round + 1;

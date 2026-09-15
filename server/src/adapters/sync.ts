@@ -8,7 +8,7 @@ import { insertNormalized } from '../import/importService.ts';
 import { getAdapter } from './registry.ts';
 import { createBackup } from '../backup.ts';
 import { ManualImportRequiredError, SyncError, type FetchOptions, type SyncErrorCode } from './types.ts';
-import { scheduleAutoContinue } from './syncScheduler.ts';
+import { cancelAutoContinue, scheduleAutoContinue } from './syncScheduler.ts';
 
 export interface SyncOptions {
   userId?: number;
@@ -83,11 +83,22 @@ function isAscendingPlatform(platform: PlatformId): boolean {
 }
 
 /**
+ * 同平台互斥锁（进程内）：手动点击、一键同步、失败重试、days 补拉与后台分批续拉可能同时到达
+ * 同一平台，并发请求会成倍放大平台风控/封号风险，故同一平台同时只允许一个同步在跑。
+ *
+ * 重复触发**不排队**：直接返回一个带解释的 SyncResult，且不写 sync_runs 行——它没有产生任何
+ * 平台请求，不是「同步失败」，写失败行会污染同步中心的健康度推导。
+ * 锁在所有退出路径（含异常）释放，见 syncPlatform 的 try/finally。
+ */
+const SYNC_IN_FLIGHT = new Set<PlatformId>();
+
+/**
  * 同步某个平台账号的刷题记录（分批防封号）：
- * 1. 检查平台开关（settings.adapter.<platform>.enabled，缺省启用）
- * 2. 读取 platform_accounts.last_sync_at / sync_truncated 做增量或补全
- * 3. 适配器按 maxSubmissions 上限分批拉取 → insertNormalized 事务入库
- * 4. 更新 last_sync_at / sync_truncated 与账号信息
+ * 1. 同平台互斥 + 抢占续拉队列（非 auto 触发时先取消该平台待执行的续拉）
+ * 2. 检查平台开关（settings.adapter.<platform>.enabled，缺省启用）
+ * 3. 读取 platform_accounts.last_sync_at / sync_truncated 做增量或补全
+ * 4. 适配器按 maxSubmissions 上限分批拉取 → insertNormalized 事务入库
+ * 5. 更新 last_sync_at / sync_truncated 与账号信息；截断时注册后台续拉
  *
  * 防封号策略：单次同步只拉 maxSubmissions 条新增（默认 1000），触及上限即停止并标记
  * sync_truncated=1；下次同步自动进入补全模式（backfill）继续拉取更早的历史，把原本一次性的
@@ -96,6 +107,34 @@ function isAscendingPlatform(platform: PlatformId): boolean {
  * 平台无公开 API（ManualImportRequiredError）→ 转为引导提示而非失败。
  */
 export async function syncPlatform(
+  db: Db,
+  platform: PlatformId,
+  handle: string,
+  opts: SyncOptions = {},
+): Promise<SyncResult> {
+  // 用户主动触发的同步（manual / all / retry / days）抢占后台续拉队列：先取消该平台待执行的续拉，
+  // 本次若仍被截断会在末尾重新注册一个第 1 轮任务——用户的一次同步即接管队列，
+  // 不会与后台续拉交错请求同一平台。auto（续拉自身）不清自己的队列。
+  if (opts.triggeredBy !== 'auto') cancelAutoContinue(platform);
+  if (SYNC_IN_FLIGHT.has(platform)) {
+    return {
+      platform,
+      handle,
+      imported: 0,
+      skipped: 0,
+      errors: [`平台 ${platform} 正在同步中：已跳过本次重复触发（同平台串行执行，请等待当前同步结束）`],
+    };
+  }
+  SYNC_IN_FLIGHT.add(platform);
+  try {
+    return await runSyncPlatform(db, platform, handle, opts);
+  } finally {
+    SYNC_IN_FLIGHT.delete(platform);
+  }
+}
+
+/** syncPlatform 的实际执行体（仅在同平台互斥锁内调用，不对外导出）。 */
+async function runSyncPlatform(
   db: Db,
   platform: PlatformId,
   handle: string,
