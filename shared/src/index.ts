@@ -1,6 +1,9 @@
 // 跨端共享类型与常量（server / client 通过相对路径 import）
 // 1.2 阶段会扩展 Submission / Problem / Plan 等数据结构。
 
+// 仅类型引用：本模块反向 re-export difficulty.ts，用 import type 避免运行时循环依赖
+import type { DifficultyScale } from './difficulty.ts';
+
 export type PlatformId = 'codeforces' | 'atcoder' | 'luogu' | 'nowcoder' | 'daimayuan' | 'leetcode' | 'jisuanke' | 'qoj';
 
 export type PlatformSync = 'auto' | 'cookie' | 'manual';
@@ -13,25 +16,31 @@ export interface PlatformMeta {
   homepage: string;
   /** 刷题数据获取方式：auto=公开 API 自动同步；cookie=需配置登录 Cookie 后自动同步；manual=仅手动导入 */
   sync: PlatformSync;
+  /** 是否提供公开题库拉取（QOJ 无：/problems 需 cf_clearance 且无难度字段） */
+  hasBank: boolean;
+  /** 难度所属标度（前端展示与说明用） */
+  difficultyScale: DifficultyScale;
+  /** 提交来源：contest=比赛内提交；practice=自由练题/题库提交；none=不适用 */
+  syncSources: Array<'contest' | 'practice' | 'none'>;
 }
 
 export const PLATFORMS: PlatformMeta[] = [
-  { id: 'codeforces', name: 'Codeforces', nameEn: 'Codeforces', hasOfficialApi: true, homepage: 'https://codeforces.com', sync: 'auto' },
-  { id: 'atcoder', name: 'AtCoder', nameEn: 'AtCoder', hasOfficialApi: false, homepage: 'https://atcoder.jp', sync: 'auto' },
-  { id: 'luogu', name: '洛谷', nameEn: 'Luogu', hasOfficialApi: false, homepage: 'https://www.luogu.com.cn', sync: 'cookie' },
-  { id: 'nowcoder', name: '牛客', nameEn: 'Nowcoder', hasOfficialApi: false, homepage: 'https://ac.nowcoder.com', sync: 'auto' },
+  { id: 'codeforces', name: 'Codeforces', nameEn: 'Codeforces', hasOfficialApi: true, homepage: 'https://codeforces.com', sync: 'auto', hasBank: true, difficultyScale: 'cf-rating', syncSources: ['none'] },
+  { id: 'atcoder', name: 'AtCoder', nameEn: 'AtCoder', hasOfficialApi: false, homepage: 'https://atcoder.jp', sync: 'auto', hasBank: true, difficultyScale: 'atcoder-kenkoooo-irt', syncSources: ['none'] },
+  { id: 'luogu', name: '洛谷', nameEn: 'Luogu', hasOfficialApi: false, homepage: 'https://www.luogu.com.cn', sync: 'cookie', hasBank: true, difficultyScale: 'luogu-2026-06', syncSources: ['none'] },
+  { id: 'nowcoder', name: '牛客', nameEn: 'Nowcoder', hasOfficialApi: false, homepage: 'https://ac.nowcoder.com', sync: 'auto', hasBank: true, difficultyScale: 'nowcoder-score', syncSources: ['none'] },
   // 代码源（Hydro 系）：评测记录页需登录（会话 Cookie sid），题库公开
-  { id: 'daimayuan', name: '代码源', nameEn: 'Daimayuan', hasOfficialApi: false, homepage: 'https://bs.daimayuan.top', sync: 'cookie' },
+  { id: 'daimayuan', name: '代码源', nameEn: 'Daimayuan', hasOfficialApi: false, homepage: 'https://bs.daimayuan.top', sync: 'cookie', hasBank: true, difficultyScale: 'hydro-1-10', syncSources: ['none'] },
   // 力扣（leetcode.cn）：GraphQL 接口无官方公开 API；提交记录需登录 Cookie，题库匿名可访问。
   // 仅接入了力扣中国（leetcode.cn）——国际版 leetcode.com 的 GraphQL schema 不同，未接入。
-  { id: 'leetcode', name: 'LeetCode', nameEn: 'LeetCode', hasOfficialApi: false, homepage: 'https://leetcode.cn', sync: 'cookie' },
+  { id: 'leetcode', name: 'LeetCode', nameEn: 'LeetCode', hasOfficialApi: false, homepage: 'https://leetcode.cn', sync: 'cookie', hasBank: true, difficultyScale: 'leetcode-tier', syncSources: ['none'] },
   // 计蒜客（www.jisuanke.com，原 nanti.jisuanke.com 竞赛 OJ）：无公开 API；
   // 提交记录按「参加过的比赛」组织，需登录 Cookie 后逐赛拉取，题库非独立公开页。
-  { id: 'jisuanke', name: '计蒜客', nameEn: 'Jisuanke', hasOfficialApi: false, homepage: 'https://www.jisuanke.com', sync: 'cookie' },
+  { id: 'jisuanke', name: '计蒜客', nameEn: 'Jisuanke', hasOfficialApi: false, homepage: 'https://www.jisuanke.com', sync: 'cookie', hasBank: true, difficultyScale: 'jisuanke-level-8', syncSources: ['contest', 'practice'] },
   // QOJ（qoj.ac，UOJ 系评测系统，Universal Cup 等 ICPC 系列赛的官方 OJ）：
   // 无公开提交 API（/api/* 恒返回 401），提交记录只有服务端渲染的 /submissions 分页 HTML 可用；
   // 站点前置 Cloudflare 托管挑战，因此除登录会话 UOJSESSID 外通常还需浏览器签发的 cf_clearance。
-  { id: 'qoj', name: 'QOJ', nameEn: 'QOJ', hasOfficialApi: false, homepage: 'https://qoj.ac', sync: 'cookie' },
+  { id: 'qoj', name: 'QOJ', nameEn: 'QOJ', hasOfficialApi: false, homepage: 'https://qoj.ac', sync: 'cookie', hasBank: false, difficultyScale: 'none', syncSources: ['none'] },
 ];
 
 export function platformMeta(id: PlatformId): PlatformMeta {
@@ -58,6 +67,13 @@ export interface NormalizedProblem {
   title: string;
   /** 难度：CF rating；AtCoder 映射分值；洛谷难度数值；无则省略 */
   difficulty?: number;
+  /**
+   * 平台原生难度原文（洛谷 `4` / 计蒜客 `level6` / 力扣 `HARD` / 牛客 `1500` / kenkoooo `1545`）。
+   * 与 difficulty（CF rating）同时写入，供平台改档后按标度重算与 UI 展示。
+   */
+  nativeDifficulty?: string;
+  /** 原生难度所属标度（见 difficulty.ts 的 DifficultyScale） */
+  difficultyScale?: DifficultyScale;
   url?: string;
   tags: string[];
 }
@@ -466,3 +482,26 @@ export interface ContestReminderConfig {
   /** 开赛前多少分钟提醒（5-120） */
   minutesBefore: number;
 }
+
+// ---------- 平台难度 → CF rating 统一标尺（唯一真源） ----------
+
+export {
+  CF_RATING_MIN,
+  CF_RATING_MAX,
+  LUOGU_LEVEL_NAMES,
+  LUOGU_LEVEL_TO_RATING,
+  JISUANKE_LEVEL_NAMES,
+  JISUANKE_LEVEL_TO_RATING,
+  ATCODER_ANCHORS,
+  LEETCODE_TIER_TO_RATING,
+  HYDRO_LEVEL_TO_RATING,
+  atcoderThetaToRating,
+  nowcoderScoreToRating,
+  parseNativeDifficulty,
+  toCfRating,
+  nativeDifficultyLabel,
+  difficultyFields,
+  cfRatingTitle,
+  type DifficultyScale,
+  type DifficultyParse,
+} from './difficulty.ts';
