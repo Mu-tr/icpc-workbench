@@ -6,7 +6,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { difficultyColor, rateColor, tagColor, platformName } from '../src/ui.ts'
-import { assembleCookie } from '../src/cookies.ts'
+import { assembleCookie, buildCookieItem, mergeCookieFields, splitCookieFields, type CookieFieldDef } from '../src/cookies.ts'
 
 // ---------- ui.ts 纯展示函数 ----------
 
@@ -327,5 +327,72 @@ describe('cookies.ts 计蒜客双框拼装（s + JSKUSS）', () => {
   it('旧流程兼容：完整 Cookie 头整段贴进 s 框仍原样透传', () => {
     const header = 's=abc; XSRF-TOKEN=tok; remember_web_59ba36=yz'
     assert.equal(assembleCookie(def, { s: 'Cookie: ' + header }), header)
+  })
+})
+
+describe('cookies.ts 单字段合并（只改一个字段不清空另一个）', () => {
+  // 与生产字段表一致：QOJ = 整段 Cookie（raw 透传）+ 浏览器 UA（configOnly）
+  const qojDefs: CookieFieldDef[] = [
+    { key: 'clearance', cookieName: 'cf_clearance', raw: true },
+    { key: 'ua', cookieName: '__ua', configOnly: true },
+  ]
+  const FULL = 'cf_clearance=cf-tok; UOJSESSID=sess-tok'
+
+  it('补填 UA 时整段 Cookie 原样保留（历史缺陷回归：raw 项曾被截断成只有 cf_clearance）', () => {
+    const out = mergeCookieFields(FULL, qojDefs, { ua: 'Mozilla/5.0 (Windows NT 10.0) Chrome/153' })
+    assert.equal(out, FULL)
+  })
+
+  it('覆盖整段 Cookie 时 UA 不写进 Cookie 头', () => {
+    const out = mergeCookieFields(FULL, qojDefs, { clearance: 'cf_clearance=new; UOJSESSID=new-sess' })
+    assert.equal(out, 'cf_clearance=new; UOJSESSID=new-sess')
+  })
+
+  it('未做任何改动时原样保留已保存的头', () => {
+    assert.equal(mergeCookieFields(FULL, qojDefs, {}), FULL)
+  })
+
+  it('显式空串清空整段 Cookie', () => {
+    assert.equal(mergeCookieFields(FULL, qojDefs, { clearance: '' }), '')
+  })
+
+  it('cf_clearance 整段粘贴（Cookie: 前缀）剥掉前缀', () => {
+    const out = mergeCookieFields('', qojDefs, { clearance: 'Cookie: cf_clearance=cf-tok; UOJSESSID=sess-tok' })
+    assert.equal(out, 'cf_clearance=cf-tok; UOJSESSID=sess-tok')
+  })
+
+  it('逐项字段（洛谷 _uid + __client_id）按顺序合并且互不覆盖', () => {
+    const defs: CookieFieldDef[] = [
+      { key: 'uid', cookieName: '_uid' },
+      { key: 'clientId', cookieName: '__client_id' },
+    ]
+    assert.equal(mergeCookieFields('__client_id=abc', defs, { uid: '1892580' }), '_uid=1892580; __client_id=abc')
+    assert.equal(
+      mergeCookieFields('_uid=1892580; __client_id=abc', defs, { clientId: 'xyz' }),
+      '_uid=1892580; __client_id=xyz',
+    )
+    // 显式空串只清一项
+    assert.equal(mergeCookieFields('_uid=1892580; __client_id=abc', defs, { uid: '' }), '__client_id=abc')
+  })
+
+  it('buildCookieItem：裸值补前缀、整段剥前缀、configOnly 原样', () => {
+    assert.equal(buildCookieItem({ key: 's', cookieName: 'sid', raw: true }, 'raw-sid'), 'sid=raw-sid')
+    assert.equal(buildCookieItem({ key: 's', cookieName: 'sid', raw: true }, 'Cookie: sid=raw-sid'), 'sid=raw-sid')
+    assert.equal(buildCookieItem({ key: 'u', cookieName: 'UOJSESSID' }, 'tok-1'), 'UOJSESSID=tok-1')
+    assert.equal(buildCookieItem({ key: 'u', cookieName: 'UOJSESSID' }, ''), '')
+    const ua = 'Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0.0.0'
+    assert.equal(buildCookieItem({ key: 'ua', cookieName: '__ua', configOnly: true }, ua), ua)
+  })
+
+  it('splitCookieFields：已保存头拆回各字段裸值', () => {
+    const stored = 'UOJSESSID=sess-1; cf_clearance=cf-2'
+    assert.deepEqual(
+      splitCookieFields(stored, [
+        { key: 'session', cookieName: 'UOJSESSID' },
+        { key: 'clearance', cookieName: 'cf_clearance' },
+      ]),
+      { session: 'sess-1', clearance: 'cf-2' },
+    )
+    assert.deepEqual(splitCookieFields('', qojDefs), {})
   })
 })

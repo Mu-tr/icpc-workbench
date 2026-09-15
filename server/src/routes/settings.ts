@@ -1,6 +1,12 @@
 import { Router } from 'express';
 import type { PlatformId } from '../../../shared/src/index.ts';
-import { PLATFORMS } from '../../../shared/src/index.ts';
+import {
+  PLATFORMS,
+  CREDENTIAL_UA_FIELDS,
+  cookieFieldsOf,
+  cookieOnlyFieldsOf,
+  mergeCookieFields,
+} from '../../../shared/src/index.ts';
 import { aiConfigFromDb, saveAiConfig, type AiConfig, type AppConfig } from '../config.ts';
 import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
@@ -105,7 +111,7 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
       )
       .all(DEFAULT_USER_ID);
     const adapterEnabled: Record<string, boolean> = {};
-    const cookies: Record<string, { configured: boolean }> = {};
+    const cookies: Record<string, { configured: boolean; masked?: string; hasUa?: boolean }> = {};
     for (const p of PLATFORMS) {
       const row = db
         .prepare('SELECT value FROM settings WHERE key = ?')
@@ -117,8 +123,20 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
       const csrf = db
         .prepare('SELECT value FROM settings WHERE key = ?')
         .get(`csrf.${p.id}`) as { value: string } | undefined;
-      if (c || csrf) {
-        cookies[p.id] = { configured: true, ...(c?.value ? { masked: maskCookieHeader(c.value) } : {}) };
+      // 「浏览器 UA」类配置项（QOJ）：即使只有 UA 也要让前端知道已配置，否则表单会误判为未配置
+      const hasUa = CREDENTIAL_UA_FIELDS[p.id]
+        ? Boolean(
+            (db.prepare('SELECT value FROM settings WHERE key = ?').get(`ua.${p.id}`) as
+              | { value: string }
+              | undefined)?.value,
+          )
+        : false;
+      if (c || csrf || hasUa) {
+        cookies[p.id] = {
+          configured: true,
+          ...(c?.value ? { masked: maskCookieHeader(c.value) } : {}),
+          ...(CREDENTIAL_UA_FIELDS[p.id] ? { hasUa } : {}),
+        };
       }
     }
     res.json({
@@ -176,9 +194,12 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
     res.json(readContestReminder(db));
   });
 
-  // POST /api/settings/cookies  body: { platform, cookie?, csrf? }（空串可清除）
+  // POST /api/settings/cookies  body: { platform, cookie?, csrf?, cookieFields? }
+  // Cookie 为**整条替换**语义（cookie: '' 即清除）；
+  // cookieFields 为**单字段合并**语义（{ 字段key: 新值 }，空串表示显式清空该项，未列出的字段保留已保存值），
+  // 用来消除「只补填一项、另一项留空」时把另一项清空的缺陷（见 shared/src/index.ts COOKIE_FIELDS）。
   r.post('/cookies', (req, res) => {
-    const { platform, cookie, csrf } = req.body ?? {};
+    const { platform, cookie, csrf, cookieFields } = req.body ?? {};
     if (!isPlatform(platform)) {
       return res.status(400).json({ error: `platform 非法: ${String(platform)}` });
     }
@@ -186,6 +207,37 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
       'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
     );
     const remove = db.prepare('DELETE FROM settings WHERE key = ?');
+    const readSetting = (key: string): string | undefined =>
+      (db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined)?.value;
+    const readCookie = (): string => readSetting(`cookie.${platform}`) ?? '';
+
+    // 单字段合并：只动用户显式填写的字段（空串 = 显式清空该项，未列出的字段保留已保存值）
+    if (cookieFields !== undefined) {
+      if (typeof cookieFields !== 'object' || cookieFields === null || Array.isArray(cookieFields)) {
+        return res.status(400).json({ error: 'cookieFields 需为对象 { 字段key: 新值 }' });
+      }
+      const defs = cookieFieldsOf(platform);
+      if (defs.length === 0) {
+        return res.status(400).json({ error: `${platform} 未定义字段化 Cookie 表单，请改用 cookie 整条提交` });
+      }
+      const patches: Record<string, string> = {};
+      for (const [key, value] of Object.entries(cookieFields as Record<string, unknown>)) {
+        const def = defs.find((d) => d.key === key);
+        if (!def) return res.status(400).json({ error: `未知 Cookie 字段: ${key}` });
+        if (typeof value !== 'string') return res.status(400).json({ error: `Cookie 字段 ${key} 需为字符串` });
+        // configOnly 字段（如 QOJ 的浏览器 UA）不进 Cookie 头，单独存 ua.<platform>
+        if (def.configOnly) {
+          if (value.trim() === '') remove.run(`ua.${platform}`);
+          else upsert.run(`ua.${platform}`, value.trim());
+          continue;
+        }
+        patches[key] = value;
+      }
+      const merged = mergeCookieFields(readCookie(), cookieOnlyFieldsOf(platform), patches);
+      if (merged === '') remove.run(`cookie.${platform}`);
+      else upsert.run(`cookie.${platform}`, merged);
+    }
+
     if (typeof cookie === 'string') {
       if (cookie === '') remove.run(`cookie.${platform}`);
       else upsert.run(`cookie.${platform}`, cookie);
@@ -194,7 +246,18 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
       if (csrf === '') remove.run(`csrf.${platform}`);
       else upsert.run(`csrf.${platform}`, csrf);
     }
-    res.json({ ok: true });
+    // 回传合并后的字段构成（只含 Cookie 名与 UA 是否已配，不回传值），便于前端/用户确认。
+    // 注意：必须从**实际保存的头**里提取名字，而不是只看字段定义——QOJ 的 raw「完整 Cookie」
+    // 一项就携带 cf_clearance 与 UOJSESSID 等多个名字，只看定义会漏报（表现为界面提示缺项）。
+    const saved = readCookie();
+    const fields = [...saved.matchAll(/(?:^|;)\s*([A-Za-z0-9_.\-]+)=/g)].map((m) => m[1]);
+    const uaKey = CREDENTIAL_UA_FIELDS[platform];
+    res.json({
+      ok: true,
+      fields,
+      configured: saved !== '',
+      ...(uaKey ? { hasUa: Boolean(readSetting(`ua.${platform}`)) } : {}),
+    });
   });
 
   // POST /api/settings/cookies/check  body: { platform, cookie?, csrf? }
@@ -231,10 +294,17 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
     const account = db
       .prepare('SELECT handle FROM platform_accounts WHERE user_id = ? AND platform = ?')
       .get(DEFAULT_USER_ID, platform) as { handle: string } | undefined;
+    // 复刻浏览器 UA（QOJ 等 cf_clearance 绑定 UA 的平台需要）：与同步层同一来源
+    const uaVal = (
+      db.prepare('SELECT value FROM settings WHERE key = ?').get(`ua.${platform}`) as
+        | { value: string }
+        | undefined
+    )?.value;
     const result = await adapter.checkAuth({
       cookie: cookieVal,
       ...(csrfVal ? { csrf: csrfVal } : {}),
       ...(account ? { handle: account.handle } : {}),
+      ...(uaVal ? { ua: uaVal } : {}),
     });
     res.json(result);
   }));

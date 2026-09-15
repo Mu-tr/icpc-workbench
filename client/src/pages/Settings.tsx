@@ -33,7 +33,7 @@ import PageHeader from '../components/PageHeader'
 import { saveUrlAsFile } from '../download'
 import PlatformTag from '../components/PlatformTag'
 import { get, post } from '../api'
-import { assembleCookie as assembleCookieHeader, extractCookieValue, type CookieFieldDef } from '../cookies'
+import { assembleCookie as assembleCookieHeader, buildCookieItem, extractCookieValue, type CookieFieldDef } from '../cookies'
 import { openExternal } from '../externalLinks'
 import { useTheme, type ThemePreference } from '../themeContext'
 import type { KnowledgeCompareReport, KnowledgeCoverage } from '../../../shared/src/index.ts'
@@ -44,7 +44,7 @@ interface SettingsData {
   accounts: Array<{ platform: PlatformId; handle: string; last_sync_at: string | null; enabled: number }>
   adapterEnabled: Record<string, boolean>
   platforms: typeof PLATFORMS
-  cookies: Record<string, { configured: boolean; masked?: string }>
+  cookies: Record<string, { configured: boolean; masked?: string; hasUa?: boolean }>
   reminder: ReminderConfig
   contestReminder: ContestReminderConfig
   sync: { maxSubmissions: number }
@@ -81,6 +81,13 @@ const COOKIE_FORM: Partial<Record<PlatformId, CookieFieldDef[]>> = {
     { key: 's', cookieName: 's', label: '会话（必需）', placeholder: '粘贴 s 的值', password: true, raw: true },
     { key: 'jskuss', cookieName: 'JSKUSS', label: '登录会话（必需）', placeholder: '粘贴 JSKUSS 的值', password: true, raw: true },
   ],
+  // QOJ：登录会话 UOJSESSID 为必需；站点前置 Cloudflare 托管挑战，
+  // 非浏览器请求通常还需浏览器签发的 cf_clearance（值较长且含特殊字符，按整段粘贴处理）
+  qoj: [
+    { key: 'session', cookieName: 'UOJSESSID', label: '登录会话（必需）', placeholder: '粘贴 UOJSESSID 的值', password: true },
+    { key: 'clearance', cookieName: 'cf_clearance', label: 'Cloudflare 通行凭据（被拦截时必需）', placeholder: '粘贴 cf_clearance 的值（可整段粘贴）', password: true, raw: true },
+    { key: 'ua', cookieName: '__ua', label: '浏览器 User-Agent（配 cf_clearance 时必需）', placeholder: '粘贴浏览器 UA 全文（与 cf_clearance 同一浏览器）', configOnly: true },
+  ],
 }
 
 export default function Settings() {
@@ -90,6 +97,10 @@ export default function Settings() {
   const [aiForm] = Form.useForm()
   const [handleInputs, setHandleInputs] = useState<Record<string, string>>({})
   const [cookieInputs, setCookieInputs] = useState<Record<string, Record<string, string>>>({})
+  /** 本次会话中被用户实际改动过的凭据字段（platform → 字段 key 集合）。
+   *  只有这些字段会提交给保存接口，其余字段由服务端保留已保存值——
+   *  修复「只补填一项、另一项留空即被清空」的缺陷。 */
+  const [dirtyFields, setDirtyFields] = useState<Record<string, Set<string>>>({})
   const [cookieCheck, setCookieCheck] = useState<Record<string, { ok: boolean; message: string } | 'checking'>>({})
   const [reminderEnabled, setReminderEnabled] = useState(false)
   const [reminderTime, setReminderTime] = useState<Dayjs>(dayjs('20:00', 'HH:mm'))
@@ -226,43 +237,53 @@ export default function Settings() {
   }
 
   const saveCookie = async (platform: PlatformId) => {
-    // 用户只填各字段值，请求头格式由前端按平台定义拼装；
-    // csrf: '' 让后端清掉历史遗留的 csrf 记录——同步请求全是 GET，不需要 x-csrf-token
-    // Cookie 原文不会回传前端（输入框恒为空）：全空时提交空串会被后端理解为「清除」，
-    // 必须显式确认，防止打开面板随手点「保存 Cookie」误删已配置的登录凭据
-    const cookie = assembleCookie(platform, cookieInputs[platform])
-    if (!cookie) {
+    // 字段级合并：只提交本次被改动过的字段（dirtyFields），其余字段由服务端保留已保存值。
+    // 这样「A 已保存、只想补填 B」时不需要把 A 重新粘贴一遍，也不会把 A 清空
+    // （历史缺陷：整条 Cookie 头覆盖保存，空输入框 = 删除该项）。
+    const defs = COOKIE_FORM[platform] ?? []
+    const dirty = dirtyFields[platform] ?? new Set<string>()
+    const values = cookieInputs[platform] ?? {}
+    const cookieFields: Record<string, string> = {}
+    for (const f of defs) {
+      if (!dirty.has(f.key)) continue
+      const raw = (values[f.key] ?? '').trim()
+      if (f.configOnly) {
+        // 仅作配置保存的字段（QOJ 的浏览器 UA）：原样提交，空串表示清除该项
+        cookieFields[f.key] = raw
+        continue
+      }
+      if (f.raw) {
+        // raw 字段（会话名不固定 / 值含特殊字符）：原样提交，服务端按字段定义解析与补名前缀
+        // （历史缺陷：前端拼好后端再拼一次，会把 "Cookie: sid=x" 变成 "sid=Cookie: sid=x"）
+        cookieFields[f.key] = raw
+        continue
+      }
+      // 普通 Cookie 字段：只传裸值，`name=value` 由服务端按字段定义拼装（两端同一份字段表）
+      const item = buildCookieItem(f, raw)
+      cookieFields[f.key] = item ? item.slice(item.indexOf('=') + 1) : ''
+    }
+
+    if (Object.keys(cookieFields).length === 0) {
+      // 什么都没改：若该平台已配置，提示当前保存内容；未配置则提示先填写
       if (data?.cookies[platform]?.configured) {
         const name = PLATFORMS.find((p) => p.id === platform)?.name ?? platform
-        modal.confirm({
-          title: '输入框为空，已保存的 Cookie 保持不变',
-          content: '设置页不再回显 Cookie 原文：留空即保留现有登录凭据，粘贴新值则覆盖。如需彻底清除该平台 Cookie，请确认。',
-          okText: '清除 Cookie',
-          okButtonProps: { danger: true },
-          cancelText: '取消',
-          onOk: async () => {
-            try {
-              await post('/api/settings/cookies', { platform, cookie: '', csrf: '' })
-              message.warning(`${name} Cookie 已清除`)
-              setCookieCheck((s0) => {
-                const next = { ...s0 }
-                delete next[platform]
-                return next
-              })
-              load()
-            } catch (e) {
-              message.error((e as Error).message)
-            }
-          },
-        })
+        message.info(`${name} 凭据未改动，已保存的配置保持不变`)
       } else {
-        message.info('请先填写 Cookie 再保存')
+        message.info('请先填写凭据再保存')
       }
       return
     }
     try {
-      await post('/api/settings/cookies', { platform, cookie, csrf: '' })
-      message.success(`${PLATFORMS.find((p) => p.id === platform)?.name} Cookie 已保存`)
+      const r = await post<{ ok: boolean; fields?: string[]; hasUa?: boolean }>('/api/settings/cookies', {
+        platform,
+        cookieFields,
+      })
+      const name = PLATFORMS.find((p) => p.id === platform)?.name ?? platform
+      const desc = [...(r.fields ?? []), ...(r.hasUa ? ['User-Agent'] : [])].join(' + ')
+      message.success(`${name} 凭据已保存${desc ? `（${desc}）` : ''}；未填写的字段保持原值`)
+      // 清空已改动标记 + 清空输入框：避免遮蔽框残留旧值被再次误提交
+      setDirtyFields((s) => ({ ...s, [platform]: new Set<string>() }))
+      setCookieInputs((s) => ({ ...s, [platform]: {} }))
       // 清除旧检测结果：上方 data 变化驱动的 effect 会据此重新检测，刷新连接状态点
       setCookieCheck((s) => {
         const next = { ...s }
@@ -273,6 +294,34 @@ export default function Settings() {
     } catch (e) {
       message.error((e as Error).message)
     }
+  }
+
+  /** 显式清除该平台全部凭据（含浏览器 UA），需二次确认 */
+  const clearCookie = (platform: PlatformId) => {
+    const name = PLATFORMS.find((p) => p.id === platform)?.name ?? platform
+    modal.confirm({
+      title: `清除 ${name} 的全部凭据？`,
+      content: '将删除已保存的 Cookie（含浏览器 UA 配置）。清除后该平台无法自动同步，需要重新填写。',
+      okText: '清除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await post('/api/settings/cookies', { platform, cookie: '', csrf: '' })
+          message.warning(`${name} 凭据已清除`)
+          setDirtyFields((s) => ({ ...s, [platform]: new Set<string>() }))
+          setCookieInputs((s) => ({ ...s, [platform]: {} }))
+          setCookieCheck((s0) => {
+            const next = { ...s0 }
+            delete next[platform]
+            return next
+          })
+          load()
+        } catch (e) {
+          message.error((e as Error).message)
+        }
+      },
+    })
   }
 
   const checkCookie = async (platform: PlatformId) => {
@@ -517,39 +566,46 @@ export default function Settings() {
                         {(() => {
                           const configured = data?.cookies[p.id]?.configured === true
                           const maskedHeader = configured ? (data?.cookies[p.id]?.masked ?? '') : ''
+                          const hasUa = data?.cookies[p.id]?.hasUa === true
+                          /** 改动某字段：记入 dirty 集合（保存时只提交这些字段） */
+                          const setField = (key: string, value: string) => {
+                            setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [key]: value } }))
+                            setDirtyFields((s) => {
+                              const next = new Set(s[p.id] ?? [])
+                              next.add(key)
+                              return { ...s, [p.id]: next }
+                            })
+                          }
                           return (
                             <>
                               <Space wrap size={8}>
                                 {fields.map((f) => {
-                                  const maskedVal = extractCookieValue(maskedHeader, f.cookieName)
-                                  const ph = configured
+                                  const maskedVal = f.configOnly ? '' : extractCookieValue(maskedHeader, f.cookieName)
+                                  const fieldConfigured = f.configOnly ? hasUa : configured && maskedVal !== ''
+                                  const ph = fieldConfigured
                                     ? maskedVal
                                       ? `已配置 ${maskedVal} · 粘贴新值可覆盖`
-                                      : `已配置 · 粘贴新值可覆盖`
+                                      : '已配置 · 粘贴新值可覆盖'
                                     : f.placeholder
                                   const input = f.password ? (
                                     <Input.Password
                                       placeholder={ph}
                                       style={{ width: 240 }}
                                       value={c[f.key] ?? ''}
-                                      onChange={(e) =>
-                                        setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
-                                      }
+                                      onChange={(e) => setField(f.key, e.target.value)}
                                     />
                                   ) : (
                                     <Input
                                       placeholder={ph}
                                       style={{ width: 240 }}
                                       value={c[f.key] ?? ''}
-                                      onChange={(e) =>
-                                        setCookieInputs((s) => ({ ...s, [p.id]: { ...(s[p.id] ?? {}), [f.key]: e.target.value } }))
-                                      }
+                                      onChange={(e) => setField(f.key, e.target.value)}
                                     />
                                   )
                                   return (
                                     <div key={f.key}>
                                       <div style={{ fontSize: 12, color: '#8993a2', marginBottom: 2 }}>
-                                        <code style={{ fontSize: 12 }}>{f.cookieName}</code>
+                                        <code style={{ fontSize: 12 }}>{f.configOnly ? 'User-Agent' : f.cookieName}</code>
                                         {f.label ? ` · ${f.label}` : ''}
                                       </div>
                                       {input}
@@ -564,6 +620,11 @@ export default function Settings() {
                                     <Button size="small" loading={check === 'checking'} onClick={() => checkCookie(p.id)}>
                                       检测
                                     </Button>
+                                    {configured && (
+                                      <Button size="small" danger onClick={() => clearCookie(p.id)}>
+                                        清除
+                                      </Button>
+                                    )}
                                     <Tag color={configured ? 'success' : 'default'} style={{ marginRight: 0 }}>
                                       {configured ? '已配置' : '未配置'}
                                     </Tag>
@@ -573,6 +634,24 @@ export default function Settings() {
                               {p.id === 'jisuanke' && (
                                 <div style={{ fontSize: 12, color: '#8993a2', marginTop: 6 }}>
                                   登录 www.jisuanke.com 后，F12 → Application → Cookies 复制 s 与 JSKUSS 的值（acw_tc / XSRF-TOKEN 不需要）；未登录时的 s 是游客会话，校验不过。
+                                </div>
+                              )}
+                              {p.id === 'qoj' && (
+                                <div style={{ fontSize: 12, color: '#8993a2', marginTop: 6 }}>
+                                  两个框都必需（逐项实测：缺任一个都同步不了）：
+                                  <div style={{ marginTop: 2 }}>
+                                    ① <b>完整 Cookie</b>：浏览器登录 qoj.ac 后 F12 → Network → 刷新 → 点任意一个 qoj.ac 请求 →
+                                    Request Headers 里把 <code>Cookie</code> 的<b>整段值</b>复制过来。必须同时含
+                                    <code>cf_clearance</code>（Cloudflare 通行凭据）与 <code>UOJSESSID</code>（登录会话）；
+                                    其余展示项（<code>uoj_locale</code>、<code>OptanonConsent</code>、<code>uoj_remember_token</code> 等）实测无影响，复制了也无害。
+                                  </div>
+                                  <div style={{ marginTop: 2 }}>
+                                    ② <b>浏览器 User-Agent</b>：在该页 Console 输入 <code>navigator.userAgent</code> 回车，整行粘贴。
+                                    <code>cf_clearance</code> 与签发它的浏览器 UA 绑定，UA 不填或不一致会 100% 被 Cloudflare 拦截。
+                                  </div>
+                                  <div style={{ marginTop: 2 }}>
+                                    <code>cf_clearance</code> 约 30 分钟过期：过期后重新复制一次整段 Cookie 即可。
+                                  </div>
                                 </div>
                               )}
                             </>
@@ -595,7 +674,7 @@ export default function Settings() {
             })}
           />
           <p className="muted-note">
-            说明：每个 Cookie 单独一框，按输入框上方的名称到浏览器 F12 → Application → Cookies 复制对应值（框内整段粘贴亦可）。代码源仅需 sid；LeetCode 需 LEETCODE_SESSION 与 csrftoken；计蒜客需 s 与 JSKUSS 两项（未登录时站点的 s 是游客会话，校验不过）。
+            说明：每个 Cookie 单独一框，按输入框上方的名称到浏览器 F12 → Application → Cookies 复制对应值（框内整段粘贴亦可）。<b>保存只覆盖你本次填写过的字段</b>，留空的字段保持已保存值。代码源仅需 sid；LeetCode 需 LEETCODE_SESSION 与 csrftoken；计蒜客需 s 与 JSKUSS 两项（未登录时站点的 s 是游客会话，校验不过）；QOJ 需「完整 Cookie（含 cf_clearance 与 UOJSESSID）」+「浏览器 User-Agent」两项，缺一不可。
           </p>
           <div style={{ marginTop: 4 }}>
             <Space>

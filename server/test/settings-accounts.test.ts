@@ -243,3 +243,199 @@ test('GET / returns sync.maxSubmissions default; POST /sync saves and validates'
     assert.equal(badHigh.status, 400);
   });
 });
+
+test('cookies/check injects saved browser UA (QOJ cf_clearance 绑定 UA)', async () => {
+  await withServer(async (db, base) => {
+    db.prepare(
+      `INSERT INTO platform_accounts (user_id, platform, handle, enabled)
+       VALUES (?, 'qoj', 'hieZF123', 1)`,
+    ).run(DEFAULT_USER_ID);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('cookie.qoj', 'UOJSESSID=tok; cf_clearance=cf')").run();
+    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+    db.prepare("INSERT INTO settings (key, value) VALUES ('ua.qoj', ?)").run(ua);
+
+    const { register, getAdapter } = await import('../src/adapters/registry.ts');
+    const { initAdapters } = await import('../src/adapters/index.ts');
+    initAdapters();
+    const seen: Array<{ cookie?: string; handle?: string; ua?: string }> = [];
+    const real = getAdapter('qoj')!;
+    register({
+      ...real,
+      checkAuth: async (opts) => {
+        seen.push(opts);
+        return { ok: true, message: 'captured' };
+      },
+    });
+    try {
+      const res = await fetch(`${base}/cookies/check`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ platform: 'qoj' }),
+      });
+      const body = (await res.json()) as { ok: boolean };
+      assert.equal(body.ok, true);
+      // 检测与同步必须用同一个 UA 来源，否则 cf_clearance 校验必然失败
+      assert.deepEqual(seen, [{ cookie: 'UOJSESSID=tok; cf_clearance=cf', handle: 'hieZF123', ua }]);
+    } finally {
+      register(real);
+    }
+  });
+});
+
+// ---------- Cookie 字段级合并保存 ----------
+
+/** 提交单字段合并请求，返回响应体 */
+async function saveFields(
+  base: string,
+  platform: string,
+  cookieFields: Record<string, string>,
+): Promise<{ status: number; body: { ok?: boolean; fields?: string[]; hasUa?: boolean; configured?: boolean; error?: string } }> {
+  const res = await fetch(`${base}/cookies`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ platform, cookieFields }),
+  });
+  return { status: res.status, body: (await res.json()) as { ok?: boolean; fields?: string[]; hasUa?: boolean; configured?: boolean; error?: string } };
+}
+
+test('cookieFields: QOJ 两字段（完整 Cookie + 浏览器 UA）单字段增量保存', async () => {
+  await withServer(async (db, base) => {
+    // ① 先只粘整段 Cookie：UOJSESSID 与 cf_clearance 都在里面
+    const fullCookie = 'cf_clearance=cf-tok; UOJSESSID=sess-tok';
+    const r1 = await saveFields(base, 'qoj', { clearance: fullCookie });
+    assert.equal(r1.status, 200);
+    assert.deepEqual(r1.body.fields, ['cf_clearance', 'UOJSESSID']);
+    assert.equal(r1.body.hasUa, false);
+
+    // ② 再补 UA：整段 Cookie 必须原样保留（这是「只改一个字段」的核心回归）
+    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0';
+    const r2 = await saveFields(base, 'qoj', { ua });
+    assert.equal(r2.body.hasUa, true);
+    assert.equal(
+      (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value,
+      fullCookie,
+      'UA 不得写进 Cookie 头，且 Cookie 头不得被改动',
+    );
+    assert.equal((db.prepare("SELECT value FROM settings WHERE key='ua.qoj'").get() as { value: string }).value, ua);
+
+    // ③ 字段总数 = 2（不再单列 UOJSESSID 输入框）
+    const { cookieFieldsOf } = await import('../../shared/src/index.ts');
+    assert.deepEqual(cookieFieldsOf('qoj').map((f: { key: string }) => f.key), ['clearance', 'ua']);
+
+    // ④ 只提交 UOJSESSID（已移除的字段）应被拒绝，避免前端残留旧字段名时静默写坏数据
+    const bad = await saveFields(base, 'qoj', { session: 'sess-only' });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error ?? '', /未知 Cookie 字段/);
+  });
+});
+
+test('cookieFields: 只补填一项时另一项保留（不再被空值覆盖）', async () => {
+  await withServer(async (db, base) => {
+    // 用洛谷双字段（_uid + __client_id）做这条回归：QOJ 已简化为「整段 Cookie + UA」两字段，
+    // 其中整段 Cookie 本身就是 raw 透传，不适合验证「逐项合并」。
+    await saveFields(base, 'luogu', { clientId: 'abc-123' });
+    assert.equal(
+      (db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get() as { value: string }).value,
+      '__client_id=abc-123',
+    );
+    // 关键回归：只补填 _uid，已保存的 __client_id 必须保留
+    const r2 = await saveFields(base, 'luogu', { uid: '1892580' });
+    assert.equal(r2.status, 200);
+    const saved = (db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get() as { value: string }).value;
+    assert.equal(saved, '_uid=1892580; __client_id=abc-123');
+    assert.deepEqual(r2.body.fields, ['_uid', '__client_id']);
+
+    // 覆盖其中一项：另一项仍保留
+    const r3 = await saveFields(base, 'luogu', { clientId: 'xyz-999' });
+    const saved3 = (db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get() as { value: string }).value;
+    assert.equal(saved3, '_uid=1892580; __client_id=xyz-999');
+    assert.equal(r3.body.ok, true);
+  });
+});
+
+test('cookieFields: configOnly 字段（浏览器 UA）单独存储且不出现在 Cookie 头', async () => {
+  await withServer(async (db, base) => {
+    await saveFields(base, 'qoj', { clearance: 'cf_clearance=cf-tok; UOJSESSID=sess-token' });
+    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const r = await saveFields(base, 'qoj', { ua });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.hasUa, true);
+
+    const cookie = (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value;
+    assert.equal(cookie, 'cf_clearance=cf-tok; UOJSESSID=sess-token', 'UA 不得写进 Cookie 头');
+    const stored = (db.prepare("SELECT value FROM settings WHERE key='ua.qoj'").get() as { value: string }).value;
+    assert.equal(stored, ua);
+
+    // GET 必须告知前端 UA 已配置（否则表单会误判未配置）
+    const get1 = (await (await fetch(`${base}/`)).json()) as { cookies: Record<string, { configured: boolean; hasUa?: boolean }> };
+    assert.equal(get1.cookies.qoj?.configured, true);
+    assert.equal(get1.cookies.qoj?.hasUa, true);
+
+    // 显式清空 UA：只删 UA，Cookie 保留
+    const r2 = await saveFields(base, 'qoj', { ua: '' });
+    assert.equal(r2.body.hasUa, false);
+    const afterClear = db.prepare("SELECT value FROM settings WHERE key='ua.qoj'").get();
+    assert.equal(afterClear, undefined);
+    assert.equal(
+      (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value,
+      'cf_clearance=cf-tok; UOJSESSID=sess-token',
+    );
+  });
+});
+
+test('cookieFields: 显式空串清空单个 Cookie 项；未知字段被拒绝', async () => {
+  await withServer(async (db, base) => {
+    await saveFields(base, 'luogu', { uid: '1892580' });
+
+    // 空串 = 显式清空该项（其余保留）
+    const r = await saveFields(base, 'luogu', { clientId: '' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.fields, ['_uid'], '显式空串只清空该项，_uid 保留');
+
+    // 全部清空 → 记录被删除
+    const r2 = await saveFields(base, 'luogu', { uid: '' });
+    assert.equal(r2.body.configured, false);
+    assert.equal(db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get(), undefined);
+
+    // 未知字段名 → 400（两端字段表必须一致，防止前端改名后静默写错）
+    const bad = await saveFields(base, 'qoj', { nope: 'x' });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error ?? '', /未知 Cookie 字段/);
+
+    // 已移除的 UOJSESSID 独立字段 → 400（防止前端残留旧字段名写坏数据）
+    const legacy = await saveFields(base, 'qoj', { session: 'sess-only' });
+    assert.equal(legacy.status, 400);
+    assert.match(legacy.body.error ?? '', /未知 Cookie 字段/);
+
+    // 未定义字段表的平台 → 400 并提示改用整条提交
+    const noForm = await saveFields(base, 'codeforces', { session: 'x' });
+    assert.equal(noForm.status, 400);
+    assert.match(noForm.body.error ?? '', /未定义字段化 Cookie 表单/);
+  });
+});
+
+test('cookieFields: 洛谷/代码源字段同样支持单字段增量保存', async () => {
+  await withServer(async (db, base) => {
+    // 洛谷两项：先只填 clientId，再补 uid
+    await saveFields(base, 'luogu', { clientId: 'abc-123' });
+    const mid = (db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get() as { value: string }).value;
+    assert.equal(mid, '__client_id=abc-123');
+    await saveFields(base, 'luogu', { uid: '1892580' });
+    const final = (db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get() as { value: string }).value;
+    assert.equal(final, '_uid=1892580; __client_id=abc-123');
+
+    // 代码源 raw 字段：裸值与「Cookie: name=value」整段粘贴都能处理，
+    // 且前缀剥离必须发生在前端拼装之后（否则会得到 sid=Cookie: sid=x）
+    await saveFields(base, 'daimayuan', { sid: 'Cookie: sid=raw-sid-value' });
+    assert.equal(
+      (db.prepare("SELECT value FROM settings WHERE key='cookie.daimayuan'").get() as { value: string }).value,
+      'sid=raw-sid-value',
+    );
+    // 只传裸值（前端已剥前缀的正常路径）
+    await saveFields(base, 'daimayuan', { sid: 'raw-sid-2' });
+    assert.equal(
+      (db.prepare("SELECT value FROM settings WHERE key='cookie.daimayuan'").get() as { value: string }).value,
+      'sid=raw-sid-2',
+    );
+  });
+});

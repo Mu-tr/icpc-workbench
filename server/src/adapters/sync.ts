@@ -25,6 +25,8 @@ const SUGGESTED_SYNC_INTERVAL_MS: Partial<Record<PlatformId, number>> = {
   nowcoder: 12 * 3600_000,
   leetcode: 12 * 3600_000,
   daimayuan: 12 * 3600_000,
+  // QOJ：前置 Cloudflare，请求密度越低越安全；提交记录按页（10 条/页）拉取，不宜过于频繁
+  qoj: 12 * 3600_000,
 };
 const DEFAULT_SYNC_INTERVAL_MS = 12 * 3600_000;
 
@@ -168,6 +170,8 @@ export async function syncPlatform(
     };
     const cookie = readSetting(`cookie.${platform}`);
     const csrf = readSetting(`csrf.${platform}`);
+    // 复刻浏览器 UA（QOJ 等 cf_clearance 绑定 UA 的平台需要；缺省由适配器用内置 UA）
+    const ua = readSetting(`ua.${platform}`);
     const maxSubmissions = readMaxSubmissions(db);
     // 补全模式：上次同步被截断（仍有更早历史待拉），且非换账号全量重拉
     const backfill = !daysWindow && !handleChanged && account?.sync_truncated === 1;
@@ -181,6 +185,7 @@ export async function syncPlatform(
       ...(daysWindow && since ? { windowSince: since } : {}),
       ...(cookie ? { cookie } : {}),
       ...(csrf ? { csrf } : {}),
+      ...(ua ? { ua } : {}),
       ...(knownExternalIds ? { knownExternalIds } : {}),
       maxSubmissions,
       ...(backfill ? { backfill: true } : {}),

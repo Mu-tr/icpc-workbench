@@ -20,12 +20,14 @@ test('parseProblemList: URLs of all supported platforms', () => {
     'https://ac.nowcoder.com/acm/problem/51000',
     'https://www.jisuanke.com/problem/T1001',
     'https://www.jisuanke.com/contest/37176/problem/12345',
+    'https://qoj.ac/problem/9242',
+    'https://qoj.ac/contest/3588/problem/17753',
   ].join('\n');
   const rows = parseProblemListText(raw);
-  assert.equal(rows.length, 7);
+  assert.equal(rows.length, 9);
   assert.deepEqual(
     rows.map((r) => `${r.platform}:${r.problemKey}`),
-    ['luogu:P1001', 'codeforces:1234A', 'atcoder:abc300_a', 'daimayuan:7', 'nowcoder:51000', 'jisuanke:T1001', 'jisuanke:37176-12345'],
+    ['luogu:P1001', 'codeforces:1234A', 'atcoder:abc300_a', 'daimayuan:7', 'nowcoder:51000', 'jisuanke:T1001', 'jisuanke:37176-12345', 'qoj:9242', 'qoj:3588-17753'],
   );
 });
 
@@ -35,14 +37,14 @@ test('parseProblemList: VJudge 转发链接映射回原始平台', () => {
     'https://vjudge.net/problem/CF-1234A',
     'https://vjudge.net/problem/洛谷-P1001',
     'https://vjudge.net/problem/AtCoder-abc300_a',
-    'https://vjudge.net/problem/QOJ-9242', // 不支持的 OJ → 跳过
+    'https://vjudge.net/problem/QOJ-9242', // QOJ → qoj / 9242
     'https://vjudge.net/problem/SPOJ-TEST', // 不支持的 OJ → 跳过
   ].join('\n');
   const rows = parseProblemListText(raw);
-  assert.equal(rows.length, 4); // QOJ 和 SPOJ 被跳过
+  assert.equal(rows.length, 5); // SPOJ 被跳过
   assert.deepEqual(
     rows.map((r) => `${r.platform}:${r.problemKey}`),
-    ['codeforces:104821A', 'codeforces:1234A', 'luogu:P1001', 'atcoder:abc300_a'],
+    ['codeforces:104821A', 'codeforces:1234A', 'luogu:P1001', 'atcoder:abc300_a', 'qoj:9242'],
   );
   // 验证 URL 被正确还原
   assert.match(rows[0]!.url ?? '', /vjudge\.net\/problem\/Gym-104821A/);

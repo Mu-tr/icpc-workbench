@@ -71,6 +71,56 @@ async function makePptx(slides: string[][]): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+/** 构造最小可解析的 .epub（EPUB 2 结构：mimetype + container.xml + OPF + NCX + 章节） */
+async function makeEpub(title: string, chapters: string[]): Promise<Uint8Array> {
+  const zip = new JSZip();
+  // mimetype 必须是首个条目且不压缩，epub2 依赖它做 MIME 校验
+  zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
+  zip.file(
+    'META-INF/container.xml',
+    '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">' +
+      '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>' +
+      '</container>',
+  );
+  const manifestItems = chapters
+    .map((_, i) => `<item id="ch${i + 1}" href="chapter${i + 1}.xhtml" media-type="application/xhtml+xml"/>`)
+    .join('');
+  const spineItems = chapters.map((_, i) => `<itemref idref="ch${i + 1}"/>`).join('');
+  zip.file(
+    'OEBPS/content.opf',
+    '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">' +
+      '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">' +
+      `<dc:title>${title}</dc:title><dc:language>zh</dc:language><dc:identifier id="bookid">urn:uuid:test</dc:identifier>` +
+      '</metadata>' +
+      `<manifest>${manifestItems}<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>` +
+      `<spine toc="ncx">${spineItems}</spine>` +
+      '</package>',
+  );
+  zip.file(
+    'OEBPS/toc.ncx',
+    '<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">' +
+      `<docTitle><text>${title}</text></docTitle>` +
+      '<navMap>' +
+      chapters
+        .map((c, i) => `<navPoint id="np${i + 1}" playOrder="${i + 1}"><navLabel><text>${c}</text></navLabel><content src="chapter${i + 1}.xhtml"/></navPoint>`)
+        .join('') +
+      '</navMap></ncx>',
+  );
+  chapters.forEach((c, i) => {
+    zip.file(
+      `OEBPS/chapter${i + 1}.xhtml`,
+      '<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>' +
+        c +
+        '</title></head><body><h1>' +
+        c +
+        '</h1><p>这是第 ' +
+        (i + 1) +
+        ' 章的正文内容。</p></body></html>',
+    );
+  });
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
 function strToUint8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
@@ -219,6 +269,64 @@ test('docConverter: Excel xlsx 转表格', async () => {
   assert.ok(result.text.includes('| name | score |'));
   assert.ok(result.text.includes('| Alice | 95 |'));
   assert.ok(result.text.includes('| Bob | 87 |'));
+});
+
+// ==================== EPub (.epub) ====================
+
+test('docConverter: EPub 提取元数据标题和章节正文', async () => {
+  const data = await makeEpub('测试电子书', ['第一章 引言', '第二章 方法']);
+  const result = await convertDocument(data, 'book.epub');
+  // 元数据标题应作为一级标题
+  assert.ok(result.text.includes('# 测试电子书'), `缺少标题，实际输出：${result.text}`);
+  // 两章正文都应被提取并转为 Markdown
+  assert.ok(result.text.includes('第一章 引言'));
+  assert.ok(result.text.includes('这是第 1 章的正文内容。'));
+  assert.ok(result.text.includes('第二章 方法'));
+  assert.ok(result.text.includes('这是第 2 章的正文内容。'));
+  assert.equal(result.warning, undefined);
+});
+
+/**
+ * epub2/adm-zip 失败时会把文件内容拼进错误信息。其字节解码后既含控制字符，
+ * 也含 `. ]oa,` 这类 ASCII 可打印碎片；后者无法靠字符类识别，只能靠调用前的
+ * zip 魔数校验挡住（见 convertEpub），此处校验控制字符这一必要条件。
+ */
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+test('docConverter: 非 zip 内容伪装成 .epub 时给出可读错误', async () => {
+  await assert.rejects(
+    () => convertDocument(strToUint8('this is definitely not a zip archive'), 'book.epub'),
+    (err: Error) => {
+      assert.ok(err.message.startsWith('EPub 解析失败：'), `前缀不符：${err.message}`);
+      assert.ok(
+        !err.message.includes('zonk'),
+        `错误信息回显了文件内容：${JSON.stringify(err.message)}`,
+      );
+      assert.ok(
+        !CONTROL_CHARS.test(err.message),
+        `错误信息含控制字符：${JSON.stringify(err.message)}`,
+      );
+      return true;
+    },
+  );
+});
+
+test('docConverter: 截断的 .epub 不致错误信息泄漏控制字符', async () => {
+  // 截断文件保留 zip 魔数，会进入 epub2 并在失败信息里回显字节；
+  // 这些字节必须已被 sanitizeErrorMessage 过滤
+  const valid = await makeEpub('测试电子书', ['第一章']);
+  const truncated = valid.slice(0, 40);
+  await assert.rejects(
+    () => convertDocument(truncated, 'book.epub'),
+    (err: Error) => {
+      assert.ok(err.message.length > 0, '错误信息不应为空');
+      assert.ok(
+        !CONTROL_CHARS.test(err.message),
+        `错误信息含控制字符：${JSON.stringify(err.message)}`,
+      );
+      return true;
+    },
+  );
 });
 
 // ==================== 分发与错误 ====================

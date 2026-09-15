@@ -37,6 +37,15 @@ export interface FetchOptions {
   /** 平台 CSRF token（历史遗留；同步请求均为 GET，无需用户提供） */
   csrf?: string;
   /**
+   * 复刻浏览器 User-Agent（同步层按 settings 的 `ua.<platform>` 注入，缺省用适配器内置 UA）。
+   *
+   * 存在的理由：Cloudflare 的 cf_clearance 与「UA + IP + 浏览器指纹」绑定，
+   * 服务端用与签发时不同的 UA 请求会被直接判为无效（实测 QOJ 必现 403 挑战）。
+   * 因此这类平台需要用户把浏览器 UA 一并填入，适配器原样发送。
+   * 注：仅浏览器标识可复刻，TLS/HTTP2 指纹无法在 Node 侧复刻。
+   */
+  ua?: string;
+  /**
    * 库中已有的平台提交号集合（同步层注入）。
    * 拉取结果按新到旧排序的适配器可用它提前终止分页（整页已知 → 更旧的都在库中），
    * 并跳过已知条目，实现真实增量拉取。
@@ -120,10 +129,12 @@ export interface PlatformAdapter {
    * 校验登录凭据（需登录平台实现；公开 API 平台无需实现）。
    * 设置页「检测 Cookie」按钮调用，用于在同步前发现 Cookie 过期。
    * @param opts.handle 已绑定账号的用户名/uid（设置页注入）：检测需访问"自己的"数据页时使用
+   * @param opts.ua     复刻浏览器 User-Agent（设置页/同步层注入，见 FetchOptions.ua）
    */
   checkAuth?(opts: {
     cookie: string;
     csrf?: string;
     handle?: string;
+    ua?: string;
   }): Promise<{ ok: boolean; message: string }>;
 }

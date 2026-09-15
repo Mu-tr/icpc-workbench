@@ -15,6 +15,7 @@ export const PLATFORM_COLOR: Record<PlatformId, string> = {
   daimayuan: '#f2965c',
   leetcode: '#ffa116',
   jisuanke: '#7ee0a3', // 计蒜客品牌绿（暗色底可读版）
+  qoj: '#b18cff', // QOJ / Universal Cup：暗色底可读的紫罗兰
 }
 
 export function platformName(id: PlatformId): string {

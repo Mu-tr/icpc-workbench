@@ -1,7 +1,7 @@
 // 跨端共享类型与常量（server / client 通过相对路径 import）
 // 1.2 阶段会扩展 Submission / Problem / Plan 等数据结构。
 
-export type PlatformId = 'codeforces' | 'atcoder' | 'luogu' | 'nowcoder' | 'daimayuan' | 'leetcode' | 'jisuanke';
+export type PlatformId = 'codeforces' | 'atcoder' | 'luogu' | 'nowcoder' | 'daimayuan' | 'leetcode' | 'jisuanke' | 'qoj';
 
 export type PlatformSync = 'auto' | 'cookie' | 'manual';
 
@@ -28,6 +28,10 @@ export const PLATFORMS: PlatformMeta[] = [
   // 计蒜客（www.jisuanke.com，原 nanti.jisuanke.com 竞赛 OJ）：无公开 API；
   // 提交记录按「参加过的比赛」组织，需登录 Cookie 后逐赛拉取，题库非独立公开页。
   { id: 'jisuanke', name: '计蒜客', nameEn: 'Jisuanke', hasOfficialApi: false, homepage: 'https://www.jisuanke.com', sync: 'cookie' },
+  // QOJ（qoj.ac，UOJ 系评测系统，Universal Cup 等 ICPC 系列赛的官方 OJ）：
+  // 无公开提交 API（/api/* 恒返回 401），提交记录只有服务端渲染的 /submissions 分页 HTML 可用；
+  // 站点前置 Cloudflare 托管挑战，因此除登录会话 UOJSESSID 外通常还需浏览器签发的 cf_clearance。
+  { id: 'qoj', name: 'QOJ', nameEn: 'QOJ', hasOfficialApi: false, homepage: 'https://qoj.ac', sync: 'cookie' },
 ];
 
 export function platformMeta(id: PlatformId): PlatformMeta {
@@ -285,6 +289,20 @@ export {
   coarseCategoryNames,
   type TagSynonymGroup,
 } from './tags.ts';
+
+// ---------- 平台凭据表单字段（client 渲染 + server 单字段合并校验的共享真相） ----------
+
+export {
+  COOKIE_FIELDS,
+  CREDENTIAL_UA_FIELDS,
+  cookieFieldsOf,
+  cookieOnlyFieldsOf,
+  cookieFieldValue,
+  buildCookieItem,
+  mergeCookieFields,
+  splitCookieFields,
+  type CookieFieldDef,
+} from './credentials.ts';
 
 // ---------- 标签净化：过滤非算法能力维度的噪声标签 ----------
 

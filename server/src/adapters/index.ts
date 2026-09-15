@@ -5,8 +5,10 @@ import { createJisuankeAdapter } from './jisuanke.ts';
 import { createLeetcodeAdapter } from './leetcode.ts';
 import { createLuoguAdapter } from './luogu.ts';
 import { createNowcoderAdapter } from './nowcoder.ts';
+import { createQojAdapter } from './qoj.ts';
 import { register } from './registry.ts';
 import { createHttpClient, PROD_RETRY } from './http.ts';
+import { createHttp1Fetch } from './http1.ts';
 
 // 各平台适配器统一在此注册；平台级开关（enabled）由同步 API 按 settings 过滤。
 let initialized = false;
@@ -27,6 +29,8 @@ export function initAdapters(dataDir?: string): void {
   register(createDaimayuanAdapter(http));
   register(createLeetcodeAdapter(http));
   register(createJisuankeAdapter(http));
+  // QOJ 必须走 HTTP/1.1：Cloudflare 对 h2 请求恒定下发托管挑战（详见 http1.ts 与 qoj.ts 注释）
+  register(createQojAdapter(createHttpClient(createHttp1Fetch({ timeoutMs: 25_000 }), PROD_RETRY)));
 }
 export * from './registry.ts';
 export type { PlatformAdapter } from './types.ts';
