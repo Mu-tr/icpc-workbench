@@ -104,6 +104,11 @@ export interface SyncResult {
   truncated?: boolean;
   /** 截断等情况下给用户的可读提示（前端直接展示） */
   note?: string;
+  /**
+   * 本次截断后已注册的后台分批续拉（缺省 = 未注册：轮数上限为 0、days 窗口模式、
+   * 后台续拉自身触发，或未装配调度器）。前端同步中心据此显示「第 N/M 轮 · X 秒后继续」。
+   */
+  autoContinue?: { round: number; maxRounds: number; nextAt: string };
 }
 
 /** 同步任务历史一行（同步中心展示）。status: ok=成功 / failed=失败（含需手动导入引导）。 */

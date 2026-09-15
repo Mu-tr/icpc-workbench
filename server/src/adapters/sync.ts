@@ -8,13 +8,14 @@ import { insertNormalized } from '../import/importService.ts';
 import { getAdapter } from './registry.ts';
 import { createBackup } from '../backup.ts';
 import { ManualImportRequiredError, SyncError, type FetchOptions, type SyncErrorCode } from './types.ts';
+import { scheduleAutoContinue } from './syncScheduler.ts';
 
 export interface SyncOptions {
   userId?: number;
   /** 仅同步最近 N 天（补充拉取窗口）：不改 platform_accounts 状态，插入仍按唯一键去重 */
   days?: number;
-  /** 同步触发来源（写入 sync_runs.triggered_by，供同步中心展示） */
-  triggeredBy?: 'manual' | 'retry' | 'days' | 'all';
+  /** 同步触发来源（写入 sync_runs.triggered_by，供同步中心展示）；auto = 后台分批续拉 */
+  triggeredBy?: 'manual' | 'retry' | 'days' | 'all' | 'auto';
 }
 
 /** 每个平台建议的同步间隔（毫秒）：按平台风控强度选定，同步中心据此展示「下次推荐同步时间」 */
@@ -257,6 +258,14 @@ export async function syncPlatform(
       result.note =
         `提交记录较多，已分批同步 ${r.imported} 条以防触发平台风控；再次点击同步可继续补全更早的历史记录。` +
         `（单次上限可在「设置 → 平台账号与适配器」中调整）`;
+    }
+    // 截断后按平台节奏注册后台续拉：把「多次点击同步」变成自动分批。
+    // days 窗口模式是补充拉取（不改账号状态）、auto 是续拉自身再截断——两者都不注册，避免无限续拉。
+    if (truncated && opts.triggeredBy !== 'auto' && opts.triggeredBy !== 'days') {
+      const state = scheduleAutoContinue(db, platform, handle);
+      if (state) {
+        result.autoContinue = { round: state.round, maxRounds: state.maxRounds, nextAt: state.nextAt };
+      }
     }
     recordSyncRun(db, userId, platform, handle, startedAt, startedTick, {
       mode, status: 'ok', imported: r.imported, skipped: r.skipped, truncated, waitedMs,
