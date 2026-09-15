@@ -27,7 +27,10 @@ const l1 = runRulePass(db, {
   rerun: args.includes('--rerun'),
   ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
 });
-console.log(`[knowledge] L1: 扫描 ${l1.scanned} 题，命中落库 ${l1.annotated}，规则未命中（词表缺口）${l1.ruleMissed}，manual 跳过 ${l1.skippedManual}`);
+// ruleMissed 是「规则口径」的未命中数，与下面 getCoverage 的「未覆盖」/ gapReport 的
+// 「词表缺口」不是同一个集合：规则没打中的题仍可能被题源标签完整标注（source='tag'），
+// 因而不计入缺口。此处括注与 client/src/pages/Problems.tsx 的 toast 保持同一用词。
+console.log(`[knowledge] L1: 扫描 ${l1.scanned} 题，命中落库 ${l1.annotated}，规则未命中（口径≠词表缺口）${l1.ruleMissed}，manual 跳过 ${l1.skippedManual}`);
 
 const concepts = recomputeConceptStats(db);
 console.log(`[knowledge] 概念统计：已重算 ${concepts} 条 (code × bucket) 信息量`);

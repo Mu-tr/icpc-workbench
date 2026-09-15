@@ -90,16 +90,24 @@ test('规则未命中题计入 ruleMissed，命中题不计入；manual 永不�
   try {
     insertProblem(db, 'codeforces', '3A', 'A. 神奇的题');
     insertProblem(db, 'codeforces', '3B', '【模板】并查集');
+    insertProblem(db, 'codeforces', '3C', 'A. 又一道没信息量的题');
     const r = annotateProblemsL1(db, [
       { platform: 'codeforces', problemKey: '3A', title: 'A. 神奇的题' },
       { platform: 'codeforces', problemKey: '3B', title: '【模板】并查集' },
+      { platform: 'codeforces', problemKey: '3C', title: 'A. 又一道没信息量的题' },
     ]);
-    // 未命名题规则未命中 → 计数；合并不查集命中 → 不计数（两题的差别正是被断言的对象）
-    assert.equal(r.ruleMissed, 1);
+    // 计数身份：本 fixture 恰为 1 命中（3B）+ 2 未命中（3A/3C）。
+    // 之所以要 2:1 而不是 1:1 —— 单命中单未命中时 ruleMissed 无论挂在「未命中」还是「命中」
+    // 分支都得 1，那条断言钉不住计数的归属。扩到 2:1 后，把 `ruleMissed += 1` 挪到命中分支
+    // 会让它读到 1，本断言立即失败（实测 actual 1 / expected 2；旧的 1:1 fixture 下同一处
+    // 变体会输出 1 并被放过）。注意 annotated 不受该变体影响，仍是 1，故钉住归属的是这一条。
+    assert.equal(r.ruleMissed, 2);
     assert.equal(r.annotated, 1);
-    // ruleMissed 的总量断言无法指出「哪一题」被计入，故按题校验落库结果：
-    // 未命中题无任何 rule 标注，命中题有 rule 标注
+    // 上面的总量断言只说得出「计数是几」，说不出「算在哪一题」，故再按题校验落库结果：
+    // 两题未命中（3A/3C）一条 rule 标注都不该有，命中题 3B 必须有 rule 标注。
+    // （3A/3C 两行都未带 tags 字段，tag 并联不涉及它们，故「无标注」在此 fixture 中即「无 rule 标注」）
     assert.deepEqual(keypointsOfProblem(db, 'codeforces', '3A'), []);
+    assert.deepEqual(keypointsOfProblem(db, 'codeforces', '3C'), []);
     assert.ok(keypointsOfProblem(db, 'codeforces', '3B').some((k) => k.source === 'rule'));
 
     // 人工校正 3A：之后管线重跑不得覆盖

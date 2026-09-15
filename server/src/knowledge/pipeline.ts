@@ -50,7 +50,10 @@ export interface L1RunResult {
   /** tag 来源映射落库的题数（与 rule 并列的独立来源） */
   tagAnnotated: number;
   /**
-   * 本轮规则未命中的题数（词表缺口规模的即时读数）。
+   * 本轮**规则**未命中的题数（规则未命中的即时读数）。
+   * 注意它**不是** gapReport 的「词表缺口」：规则未命中只说明规则没打中，同一题仍可能
+   * 由题源标签完整标注（source = 'tag'，见 tagAnnotate.ts），这种题**不出现在
+   * gapReport 的 gaps / uncovered 里**（后者只统计 tag/rule/manual 三来源皆无标注的题）。
    * 它曾同时是入队数，但该 AI 标注队列已随 AI 退出而退役、无写入方也无读取方，
    * 现在只作为运维可见的计数保留；缺口本身由 gapReport 按需从 problems 现算。
    */
@@ -104,8 +107,10 @@ export function annotateProblemsL1(
       scanned += 1;
       const hits = classifyTitle(row.title);
       if (opts.force && hits.length === 0) {
-        // 差量重跑且不再命中：清除该题过期的 rule 标注（manual 不受影响）；
-        // JSONL 补清除快照，防止重放复活。该题仍无任何标注，下面会计入本轮 ruleMissed。
+        // 差量重跑且不再命中：清除该题**规则来源**的过期标注 —— 下面的 DELETE 只删
+        // source = 'rule'，同题由题源标签落下的 source = 'tag' 标注不受影响、照旧保留；
+        // manual 也不会被清，但带 manual 的题在上面 hasManual 处已跳过，走不到这里。
+        // JSONL 补清除快照，防止重放复活。本题下面会计入本轮 ruleMissed（规则口径）。
         db.prepare(
           "DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND source = 'rule'",
         ).run(row.platform, row.problemKey);
@@ -122,7 +127,7 @@ export function annotateProblemsL1(
         });
         // 规则命中：只落 rule 标注，不再有任何队列需要出队
       } else {
-        // 规则未命中：计入本轮 ruleMissed（词表缺口规模的即时读数）。
+        // 规则未命中：计入本轮 ruleMissed（规则未命中的即时读数，≠ gapReport 的词表缺口）。
         // 缺口本身由 gapReport 按需从 problems 现算，不落表。
         ruleMissed += 1;
       }

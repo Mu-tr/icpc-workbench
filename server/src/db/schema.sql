@@ -95,6 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_problem_keypoints_code ON problem_keypoints(code,
 -- 历史遗留：AI 知识点标注队列。AI 已退出清洗模块，标注方与读取方均随之删除，
 -- 本表现在**没有任何写入方、也没有任何读取方**（gapReport 缺口报告读的是 problems，与本表无关）。
 -- 有意不 DROP：老库中原样保留这张冻结的空转表，行为不变；新库照建同构空表。
+-- status 列的历史取值（仅遗留，现行代码既不写也不读）：pending / done / uncertain / failed。
 CREATE TABLE IF NOT EXISTS knowledge_queue (
   platform    TEXT NOT NULL,
   problem_key TEXT NOT NULL,
