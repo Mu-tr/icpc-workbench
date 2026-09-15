@@ -35,6 +35,19 @@ import { asHttpClient, sleep, type HttpInit } from './http.ts';
  * 分批模型：与页码型平台不同，本适配器的「页」=「一场比赛」（比赛内提交数少，
  * 无内部分页）。增量模式遇「整场提交全部已知」即早停；补全模式（backfill）以
  * backfillReachedPage（比赛序号）为游标跳过已知场次继续向更早补全。
+ *
+ * 练习（题库）提交（默认开启，settings['jisuanke.practiceSync']=false 可关）：
+ * 1. 预筛 GET /api/problems?page=N&status=passed|attempted（**服务端按登录用户过滤**，
+ *    实测 statuses[] / status=accepted 均不过滤，只有这两值有效；每页 20 条）；
+ * 2. 逐题 GET /api/problem/submissions?problemId=X&page=N → {submissions, total}
+ *    （该接口**不需要 studentUuid**，省掉一次 /api/user/info 查询）。
+ * 练习行的 problemKey 用 problemIdentifier（如 T1001），与题库入库键一致，
+ * 故提交与题库行自动合并、难度与标签直接复用；externalId = hashId；
+ * verdict 复用 mapJisuankeVerdict；time 是 "YYYY-MM-DD HH:MM:SS" 北京时间字符串。
+ *
+ * 续拉游标（platform_accounts.backfill_page，单一整数字段）承载两个序号空间：
+ * **负数 = 练习题目序号（取绝对值）；正数 = 比赛序号**；0/缺省 = 从头开始。
+ * 练习段先于比赛段执行，任一来源截断都不会覆盖另一个的游标。
  */
 
 const BASE = 'https://www.jisuanke.com';
@@ -43,6 +56,15 @@ const MAX_CONTEST_LIST_PAGES = 50; // 参赛列表分页保护上限
 // 每次同步最多处理的比赛数（每场至多 2 个请求：题目表 + 提交表）：
 // 30 场 × 2 请求 × 400ms ≈ 24 秒，与代码源的保守页数预算同级
 const PER_SYNC_MAX_CONTESTS = 30;
+// 题库列表每页条数（实测 /api/problems 分页固定 20 条）
+const PAGE_SIZE_PROBLEMS = 20;
+// 练习预筛翻页保护上限（实际页数 ≈ 做题数 / 20，此处只防接口异常时无限翻页）
+const MAX_PRACTICE_SCAN_PAGES = 60;
+// 每次同步最多处理的练习题目数（每题至少 1 个请求）：
+// 40 题 × 400ms ≈ 16 秒，与比赛段的请求预算同级；超出部分由 backfill_page 游标续拉
+const PER_SYNC_MAX_PRACTICE_PROBLEMS = 40;
+// 单题提交翻页保护上限（防 total 异常导致无限翻页）
+const MAX_PRACTICE_SUBMISSION_PAGES = 20;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
 
 /**
@@ -156,6 +178,43 @@ export interface JisuankeContestRow {
   startTime?: string;
 }
 
+/** /api/problems?status=passed|attempted 的单行（练习预筛用；字段实测结构） */
+export interface JisuankeListProblemRow {
+  problemId?: number;
+  problemIdentifier?: string;
+  title?: string;
+  /** 难度档位（level1…levelN），未知时不产出 difficulty */
+  difficultyType?: string | null;
+  /** [{ tagName, type }]：type=difficulty 为难度档位名，其余为知识点标签 */
+  problemTags?: unknown;
+  passingRate?: number;
+  /** 登录用户在该题的状态（服务端按 status 过滤时返回） */
+  status?: string;
+}
+
+/** 练习题目（预筛结果，供逐题拉提交用） */
+export interface JisuankePracticeProblem {
+  problemId: number;
+  problemIdentifier: string;
+  title: string;
+  difficultyType: string | null;
+  /** 知识点标签（type !== 'difficulty'） */
+  tags: string[];
+}
+
+/** /api/problem/submissions 的单行（字段实测结构） */
+export interface JisuankePracticeSubmissionRow {
+  hashId?: string;
+  status?: string | number;
+  /** "2026-09-13 12:37:47"（北京时间字符串，与比赛路径的 unix 秒不同） */
+  time?: string;
+  language?: string;
+  usedTime?: number;
+  usedMemory?: number;
+  passedCases?: number;
+  totalCases?: number;
+}
+
 /** "2026-09-05 10:00:00"（北京时间）→ epoch 毫秒；解析失败返回 0 排到最后 */
 export function parseJisuankeTime(s: string | undefined): number {
   if (!s) return 0;
@@ -242,6 +301,83 @@ export async function fetchParticipatedContests(
   return out;
 }
 
+/**
+ * 练习预筛：题库列表按登录用户的 status 服务端过滤（实测 status=passed|attempted 生效，
+ * statuses/statuses[]/status=accepted 均不过滤，故只用这两值），两趟结果按 problemId 去重合并。
+ * 每页 20 条（PAGE_SIZE_PROBLEMS），翻到空页 / 已覆盖 total / 触及 MAX_PRACTICE_SCAN_PAGES 为止。
+ * 首页未登录（302/401）→ ManualImportRequiredError（过期 Cookie 不能被误报成「没有练习题」）。
+ */
+export async function fetchJisuankePracticeProblems(
+  fetchFn: HttpInit,
+  cookie: string,
+  opts: { pageDelayMs?: number } = {},
+): Promise<{ problems: JisuankePracticeProblem[]; pagesScanned: number }> {
+  const out: JisuankePracticeProblem[] = [];
+  const seen = new Set<number>();
+  let pagesScanned = 0;
+  for (const status of ['passed', 'attempted'] as const) {
+    for (let page = 1; page <= MAX_PRACTICE_SCAN_PAGES; page += 1) {
+      const r = await fetchJson(fetchFn, `${BASE}/api/problems?page=${page}&status=${status}`, cookie);
+      if (!r.ok) {
+        if (r.unauthorized) {
+          throw new ManualImportRequiredError(
+            'jisuanke',
+            '登录态已失效（题库状态接口跳转登录），请重新登录 www.jisuanke.com 并更新 Cookie',
+          );
+        }
+        break; // 非鉴权异常（403/404 等）不阻断：已拿到的题目继续处理
+      }
+      const body = r.body as { problems?: JisuankeListProblemRow[]; total?: number };
+      const rows = Array.isArray(body?.problems) ? body.problems : [];
+      pagesScanned += 1;
+      for (const p of rows) {
+        if (typeof p?.problemId !== 'number' || seen.has(p.problemId)) continue;
+        const identifier = typeof p.problemIdentifier === 'string' ? p.problemIdentifier.trim() : '';
+        if (!identifier) continue;
+        seen.add(p.problemId);
+        const { knowledge } = parseJisuankeProblemTags(p.problemTags);
+        out.push({
+          problemId: p.problemId,
+          problemIdentifier: identifier,
+          title: p.title?.trim() || identifier,
+          difficultyType: typeof p.difficultyType === 'string' ? p.difficultyType : null,
+          tags: knowledge,
+        });
+      }
+      const total = typeof body?.total === 'number' ? body.total : rows.length;
+      if (rows.length === 0 || page * PAGE_SIZE_PROBLEMS >= total) break;
+      if (opts.pageDelayMs !== 0) await sleep(opts.pageDelayMs ?? PAGE_DELAY_MS);
+    }
+  }
+  return { problems: out, pagesScanned };
+}
+
+/**
+ * 单题提交（练习路径）：`/api/problem/submissions?problemId=X&page=N` → `{submissions, total}`。
+ * 实测该接口**无需 studentUuid**（登录 Cookie 即可），故不再先查 /api/user/info。
+ * 单题 401/302 → ManualImportRequiredError；403/404 → 空结果（该题不可见，跳过）。
+ */
+export async function fetchJisuankeProblemSubmissions(
+  fetchFn: HttpInit,
+  cookie: string,
+  problemId: number,
+  page: number,
+): Promise<{ rows: JisuankePracticeSubmissionRow[]; total: number }> {
+  const r = await fetchJson(fetchFn, `${BASE}/api/problem/submissions?problemId=${problemId}&page=${page}`, cookie);
+  if (!r.ok) {
+    if (r.unauthorized) {
+      throw new ManualImportRequiredError(
+        'jisuanke',
+        '登录态已失效（练习提交接口跳转登录），请重新登录 www.jisuanke.com 并更新 Cookie',
+      );
+    }
+    return { rows: [], total: 0 };
+  }
+  const body = r.body as { submissions?: JisuankePracticeSubmissionRow[]; total?: number };
+  const rows = Array.isArray(body?.submissions) ? body.submissions : [];
+  return { rows, total: typeof body?.total === 'number' ? body.total : rows.length };
+}
+
 export function createJisuankeAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
   const http = asHttpClient(fetchFn);
   const requireCookie = (opts?: FetchOptions): string => {
@@ -264,20 +400,9 @@ export function createJisuankeAdapter(fetchFn: HttpInit = fetch): PlatformAdapte
       opts,
     ): Promise<NormalizedSubmission[]> {
       const cookie = requireCookie(opts);
-      const contests = await fetchParticipatedContests(fetchFn, cookie, opts?.pageDelayMs ?? PAGE_DELAY_MS);
-      if (contests.length === 0) {
-        throw new ManualImportRequiredError(
-          'jisuanke',
-          '参赛列表为空：请确认 Cookie 有效且该账号在 www.jisuanke.com 上参加过至少一场比赛（作业/练习题不在同步范围）',
-        );
-      }
-
-      const startIndex = opts?.backfill && opts?.backfillFromPage ? Math.max(1, opts.backfillFromPage) : 1;
       const maxSubmissions = opts?.maxSubmissions;
       const out: NormalizedSubmission[] = [];
-      let processed = 0;
-      let rowCapped = false;
-      let caughtUp = false; // 增量模式：整场提交全部已知 → 更早的比赛都在库中
+      let rowCapped = false; // 触及单次新增上限（练习段与比赛段共用 out 计数）
       // 限速等待累计到 opts.waitedMs（同步层写入 sync_runs.waited_ms 供同步中心展示）
       const sleepTracked = async (ms: number): Promise<void> => {
         if (ms > 0) {
@@ -285,6 +410,105 @@ export function createJisuankeAdapter(fetchFn: HttpInit = fetch): PlatformAdapte
           await sleep(ms);
         }
       };
+      // 请求间隔：pageDelayMs=0 仅测试用（跳过限速），缺省 PAGE_DELAY_MS
+      const delayMs = opts?.pageDelayMs ?? PAGE_DELAY_MS;
+
+      // 续拉游标解码：负数 = 练习题目序号，正数 = 比赛序号（见文件头「续拉游标」说明）
+      const cursor = opts?.backfill && opts?.backfillFromPage ? opts.backfillFromPage : 0;
+      const practiceStartIndex = cursor < 0 ? Math.max(1, -cursor) : 1;
+      const contestStartIndex = cursor > 0 ? Math.max(1, cursor) : 1;
+
+      // ---------- 练习（题库）提交：默认开启，见 settings['jisuanke.practiceSync'] ----------
+      // days 窗口模式（windowSince 仅该模式注入）不跑练习段：窗口模式不注入 knownExternalIds，
+      // 也没有可持久化的游标（同步层不改 platform_accounts），逐题全量翻页代价过大且会导入
+      // 窗口外的历史提交；同时它是补充拉取，不应挤掉比赛段的请求预算。窗口模式维持旧行为（仅比赛段）。
+      let hasPracticeSource = false;
+      if (opts?.practiceSync !== false && !opts?.windowSince) {
+        const scan = await fetchJisuankePracticeProblems(fetchFn, cookie, {
+          pageDelayMs: opts?.pageDelayMs ?? PAGE_DELAY_MS,
+        });
+        hasPracticeSource = scan.problems.length > 0;
+        let processed = 0;
+        let budgetExhausted = false;
+        for (let i = practiceStartIndex - 1; i < scan.problems.length; i += 1) {
+          if (processed >= PER_SYNC_MAX_PRACTICE_PROBLEMS) {
+            budgetExhausted = true; // 题目预算耗尽：余下题目由游标续拉
+            break;
+          }
+          const p = scan.problems[i];
+          processed += 1;
+
+          // 增量判据（每题先取第 1 页）：该页提交全部已知且 total ≤ 已返回条数 → 该题无新增，
+          // 1 次请求即跳过；否则继续翻页直到 total 覆盖（全新提交的题才付多次请求的成本）
+          const first = await fetchJisuankeProblemSubmissions(fetchFn, cookie, p.problemId, 1);
+          const rows = [...first.rows];
+          let total = first.total;
+          for (let page = 2; rows.length < total && page <= MAX_PRACTICE_SUBMISSION_PAGES; page += 1) {
+            const next = await fetchJisuankeProblemSubmissions(fetchFn, cookie, p.problemId, page);
+            if (next.rows.length === 0) break; // 空页：total 与实际不符时不要空转
+            total = Math.max(total, next.total);
+            rows.push(...next.rows);
+            if (rows.length < total) await sleepTracked(delayMs);
+          }
+
+          const known = opts?.knownExternalIds;
+          const allKnown = rows.length > 0 && rows.every((r) => known?.has(String(r.hashId ?? '')));
+          if (!(allKnown && rows.length >= total)) {
+            for (const row of rows) {
+              const externalId = String(row.hashId ?? '');
+              if (externalId === '' || known?.has(externalId)) continue;
+              const verdict = mapJisuankeVerdict(row.status);
+              if (verdict === null) continue; // 评测中/系统态不落库
+              out.push({
+                problem: {
+                  platform: 'jisuanke' as PlatformId,
+                  // 练习键用 problemIdentifier（如 T1001）：与题库入库键一致，自动合并且难度/标签复用题库行
+                  problemKey: p.problemIdentifier,
+                  title: p.title,
+                  ...difficultyFields('jisuanke', p.difficultyType),
+                  url: `${BASE}/problem/${encodeURIComponent(p.problemIdentifier)}`,
+                  tags: p.tags,
+                },
+                verdict,
+                ...(row.language ? { language: row.language } : {}),
+                submittedAt: new Date(parseJisuankeTime(row.time)).toISOString(),
+                externalId,
+              });
+              if (maxSubmissions && out.length >= maxSubmissions) {
+                rowCapped = true;
+                break;
+              }
+            }
+          }
+          if (rowCapped) break;
+          await sleepTracked(delayMs);
+        }
+
+        // 练习段被截断（题目预算耗尽 / 触及新增上限）：本轮到此为止，回写「练习题目序号」游标
+        // （负数，与比赛序号区分）；比赛段留到后续轮次，避免一次同步叠加两段请求预算
+        if (budgetExhausted || rowCapped) {
+          if (opts) {
+            opts.truncated = true;
+            opts.backfillReachedPage = -(practiceStartIndex - 1 + processed);
+          }
+          return out;
+        }
+      }
+
+      const contests = await fetchParticipatedContests(fetchFn, cookie, opts?.pageDelayMs ?? PAGE_DELAY_MS);
+      if (contests.length === 0) {
+        // 只有练习（从不参赛）的账号：练习段已同步完成，参赛列表为空不是错误
+        if (hasPracticeSource) return out;
+        throw new ManualImportRequiredError(
+          'jisuanke',
+          '参赛列表为空：请确认 Cookie 有效且该账号在 www.jisuanke.com 上有练习题（题库）或参加过至少一场比赛',
+        );
+      }
+
+      const startIndex = contestStartIndex;
+      let processed = 0;
+      let caughtUp = false; // 增量模式：整场提交全部已知 → 更早的比赛都在库中
+      const outBeforeContests = out.length; // 截断判定只看比赛段新增（练习段行数不算在内）
 
       for (let i = startIndex - 1; i < contests.length; i += 1) {
         if (processed >= PER_SYNC_MAX_CONTESTS) break;
@@ -382,18 +606,20 @@ export function createJisuankeAdapter(fetchFn: HttpInit = fetch): PlatformAdapte
         await sleepTracked(PAGE_DELAY_MS);
       }
 
-      // 截断判定：触及新增上限，或比赛数预算耗尽（未自然扫完/未增量早停）且有新增
+      // 截断判定：触及新增上限，或比赛数预算耗尽（未自然扫完/未增量早停）且比赛段有新增
       const exhausted = processed >= PER_SYNC_MAX_CONTESTS;
-      const truncated = rowCapped || (!caughtUp && exhausted && out.length > 0);
+      const truncated = rowCapped || (!caughtUp && exhausted && out.length > outBeforeContests);
       if (truncated && opts) {
         opts.truncated = true;
-        opts.backfillReachedPage = startIndex - 1 + processed; // 本次处理到的比赛序号，下次续拉
+        opts.backfillReachedPage = startIndex - 1 + processed; // 本次处理到的比赛序号（正数），下次续拉
       }
       return out;
     },
 
     problemUrl({ problemKey }) {
-      return jisuankeProblemUrl(String(problemKey));
+      const key = String(problemKey);
+      // 练习键是 problemIdentifier（T1001），比赛键是 `{contestId}-{problemId}`：前者走题库题面链接
+      return /^\d+-/.test(key) ? jisuankeProblemUrl(key) : `${BASE}/problem/${encodeURIComponent(key)}`;
     },
 
     /** 校验登录态：/api/user/info 登录后响应含 uuid/name 等用户字段（未登录仅返回 websocket 配置）。

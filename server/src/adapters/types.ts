@@ -95,6 +95,11 @@ export interface FetchOptions {
    * 常规增量必须依赖 knownExternalIds 判重，绝不能做时间截断（会漏提交）。
    */
   windowSince?: string;
+  /**
+   * 计蒜客练习（题库）提交同步开关（同步层按 settings['jisuanke.practiceSync'] 注入）。
+   * 缺省 = 开启（只有字面量 'false' 关闭）；关闭后仅同步比赛内提交（旧行为）。
+   */
+  practiceSync?: boolean;
 }
 
 /**

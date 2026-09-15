@@ -173,6 +173,10 @@ export async function syncPlatform(
     // 复刻浏览器 UA（QOJ 等 cf_clearance 绑定 UA 的平台需要；缺省由适配器用内置 UA）
     const ua = readSetting(`ua.${platform}`);
     const maxSubmissions = readMaxSubmissions(db);
+    // 计蒜客练习（题库）提交开关：缺省开启，仅字面量 'false' 关闭
+    const practiceSync = platform === 'jisuanke'
+      ? readSetting('jisuanke.practiceSync') !== 'false'
+      : undefined;
     // 补全模式：上次同步被截断（仍有更早历史待拉），且非换账号全量重拉
     const backfill = !daysWindow && !handleChanged && account?.sync_truncated === 1;
     mode = daysWindow ? 'days' : handleChanged ? 'full' : backfill ? 'backfill' : 'incremental';
@@ -188,6 +192,7 @@ export async function syncPlatform(
       ...(ua ? { ua } : {}),
       ...(knownExternalIds ? { knownExternalIds } : {}),
       maxSubmissions,
+      ...(practiceSync !== undefined ? { practiceSync } : {}),
       ...(backfill ? { backfill: true } : {}),
       ...(backfill && account?.backfill_page ? { backfillFromPage: account.backfill_page } : {}),
     };
