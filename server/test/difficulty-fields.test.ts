@@ -62,6 +62,58 @@ test('写库：同步来源写入原生难度；题库来源不覆盖已落定�
   db.close();
 });
 
+test('写库：原生难度/标度与难度同一条优先级决策（不得落成「手动难度 + 上游档位」的不同源组合）', () => {
+  const db = freshDb();
+  const read = (key: string) =>
+    db
+      .prepare(
+        "SELECT difficulty, difficulty_source, native_difficulty, difficulty_scale FROM problems WHERE platform = 'luogu' AND problem_key = ?",
+      )
+      .get(key) as any;
+
+  // (a) 手动标定难度、原生值为空 → 低优先级题库写入（bank(1) < manual(4)）不得补上上游档位
+  //     （修复前 native_difficulty 走「库里为空就填」的旧判据 → 落成 2400 + '5'/luogu-2026-06：
+  //      API 由原生值派生的档位名「提高」= 2200，与难度 2400 自相矛盾）
+  db.prepare(problemUpsertSql('manual')).run('luogu', 'P2400', '题', 2400, null, '[]', 'manual', null, null);
+  db.prepare(problemUpsertSql('bank')).run('luogu', 'P2400', '题', 2200, null, '[]', 'bank', '5', 'luogu-2026-06');
+  assert.deepEqual({ ...read('P2400') }, {
+    difficulty: 2400,
+    difficulty_source: 'manual',
+    native_difficulty: null,
+    difficulty_scale: null,
+  });
+
+  // (b) 平级/更高优先级写入真的采纳了难度 → 原生值/标度一并更新（三元组同源）
+  db.prepare(problemUpsertSql('sync')).run('luogu', 'P1800', '题', 1500, null, '[]', 'sync', '3', 'luogu-2026-06');
+  db.prepare(problemUpsertSql('sync')).run('luogu', 'P1800', '题', 1800, null, '[]', 'sync', '4', 'luogu-2026-06');
+  assert.deepEqual({ ...read('P1800') }, {
+    difficulty: 1800,
+    difficulty_source: 'sync',
+    native_difficulty: '4',
+    difficulty_scale: 'luogu-2026-06',
+  });
+
+  // (b2) 低优先级写入不得改动三元组（难度不动，原生值/标度也不动）
+  db.prepare(problemUpsertSql('bank')).run('luogu', 'P1800', '题', 1200, null, '[]', 'bank', '2', 'luogu-2026-06');
+  assert.deepEqual({ ...read('P1800') }, {
+    difficulty: 1800,
+    difficulty_source: 'sync',
+    native_difficulty: '4',
+    difficulty_scale: 'luogu-2026-06',
+  });
+
+  // (c) 难度为空的行照常接收原生值与标度（补全/首入库路径）
+  db.prepare(problemUpsertSql('bank')).run('luogu', 'P0000', '题', null, null, '[]', 'bank', null, null);
+  db.prepare(problemUpsertSql('bank')).run('luogu', 'P0000', '题', 1500, null, '[]', 'bank', '3', 'luogu-2026-06');
+  assert.deepEqual({ ...read('P0000') }, {
+    difficulty: 1500,
+    difficulty_source: 'bank',
+    native_difficulty: '3',
+    difficulty_scale: 'luogu-2026-06',
+  });
+  db.close();
+});
+
 test('题库入库写入原生难度与标度', () => {
   const db = freshDb();
   const r = upsertBankProblems(db, [{

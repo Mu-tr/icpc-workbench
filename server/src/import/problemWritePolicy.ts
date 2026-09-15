@@ -37,7 +37,13 @@ const EXISTING_PRIORITY_SQL =
  * - url：COALESCE 保留已有
  * - tags：**写入即净化**；非空才覆盖
  * - difficulty / difficulty_source：按来源优先级决定是否覆盖
- * - native_difficulty / difficulty_scale：与 difficulty 同一优先级 CASE（原生值不覆盖非空既有值）
+ * - native_difficulty / difficulty_scale：与 difficulty **同一条决策**（同一组 WHEN 条件），
+ *   即「本次写入是否被允许拥有这道题的难度」决定它是否连带更新原生值/标度。
+ *   历史缺陷：这两列曾用 `problems.<col> IS NULL`（有则保留、空则填）判据，于是
+ *   「手动标定难度 2400（原生值为空）+ 低优先级题库写入档位 5」会落成
+ *   `difficulty=2400 / difficulty_source=manual / native_difficulty='5' / scale=luogu-2026-06`
+ *   —— 难度与原生值不同源，API 由原生值派生的档位名（提高 = 2200）与难度自相矛盾。
+ *   analysis/difficultyBackfill.ts 的写入明确拒绝这种组合，两个写入方现在遵循同一规则。
  */
 export function problemUpsertSql(source: DifficultySource): string {
   const prio = DIFFICULTY_PRIORITY[source];
@@ -63,13 +69,13 @@ export function problemUpsertSql(source: DifficultySource): string {
       END,
       native_difficulty = CASE
         WHEN excluded.native_difficulty IS NULL THEN problems.native_difficulty
-        WHEN problems.native_difficulty IS NULL THEN excluded.native_difficulty
+        WHEN problems.difficulty IS NULL THEN excluded.native_difficulty
         WHEN ${prio} >= ${EXISTING_PRIORITY_SQL} THEN excluded.native_difficulty
         ELSE problems.native_difficulty
       END,
       difficulty_scale = CASE
         WHEN excluded.difficulty_scale IS NULL THEN problems.difficulty_scale
-        WHEN problems.difficulty_scale IS NULL THEN excluded.difficulty_scale
+        WHEN problems.difficulty IS NULL THEN excluded.difficulty_scale
         WHEN ${prio} >= ${EXISTING_PRIORITY_SQL} THEN excluded.difficulty_scale
         ELSE problems.difficulty_scale
       END`;

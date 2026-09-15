@@ -8,10 +8,15 @@
  * - 洛谷公开题库：difficulty>=3（普及/提高- 及以上），限量 --luogu-max（默认 3000）
  *   洛谷按页限速爬取（约 1-2 分钟/千题），失败不阻断——降级为 CF-only 并提示重跑。
  * 产物带版本号（生成日期），运行时 seedBuiltinBank 按版本比对幂等入库。
+ *
+ * 每条记录必须同时带上 difficulty / nativeDifficulty / difficultyScale
+ * （取自题库拉取器的统一难度结构）：只写 difficulty 会让 native_difficulty 在库里恒为空，
+ * 于是首轮「一键回填」把整份内置题库都当成待补目标，逐题向上游重查一遍。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fetchCodeforcesBank, fetchLuoguBank } from '../src/adapters/problemBank.ts';
+import type { DifficultyScale } from '../../shared/src/difficulty.ts';
 
 const args = process.argv.slice(2);
 const cfOnly = args.includes('--cf-only');
@@ -25,6 +30,10 @@ interface BuiltinProblem {
   problemKey: string;
   title: string;
   difficulty: number | null;
+  /** 平台原生难度原文（必须随难度一并落库） */
+  nativeDifficulty: string | null;
+  /** 原生难度所属标度（见 shared/src/difficulty.ts） */
+  difficultyScale: DifficultyScale | null;
   url: string;
   tags: string[];
 }
@@ -41,6 +50,8 @@ problems.push(
     problemKey: p.problemKey,
     title: p.title,
     difficulty: p.difficulty,
+    nativeDifficulty: p.nativeDifficulty,
+    difficultyScale: p.difficultyScale,
     url: p.url,
     tags: p.tags,
   })),
@@ -59,6 +70,8 @@ if (!cfOnly) {
         problemKey: p.problemKey,
         title: p.title,
         difficulty: p.difficulty,
+        nativeDifficulty: p.nativeDifficulty,
+        difficultyScale: p.difficultyScale,
         url: p.url,
         tags: p.tags,
       })),
@@ -81,6 +94,12 @@ const payload = {
   count: problems.length,
   problems,
 };
+// 自检：产物必须带上原生难度（缺了会让首轮回填把每道题都当成目标逐题重查）
+for (const platform of [...new Set(problems.map((p) => p.platform))]) {
+  const rows = problems.filter((p) => p.platform === platform);
+  const noNative = rows.filter((p) => p.nativeDifficulty === null).length;
+  console.log(`      自检 ${platform}: ${rows.length} 题，其中 nativeDifficulty 为空 ${noNative} 题`);
+}
 fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
 fs.writeFileSync(OUT_PATH, JSON.stringify(payload));
 const sizeMb = (fs.statSync(OUT_PATH).size / 1024 / 1024).toFixed(2);
