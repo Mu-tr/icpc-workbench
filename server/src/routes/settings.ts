@@ -80,15 +80,24 @@ const MIN_SYNC_AUTO_CONTINUE_ROUNDS = 0;
 const MAX_SYNC_AUTO_CONTINUE_ROUNDS = 50;
 
 /**
- * 读取分批同步设置：单次同步新增上限（防封号）+ 后台续拉轮数上限。
+ * 读取分批同步设置：单次同步新增上限（防封号）+ 后台续拉轮数上限 + 计蒜客自由练题开关。
  * - maxSubmissions 越界回退默认值；
  * - autoContinueRounds 直接复用调度器的 `getAutoContinueRounds`（同一个 key、同一套
- *   0–50 校验、同一个默认 6）—— 读侧与真正执行续拉的调度器不可能给出不同答案。
+ *   0–50 校验、同一个默认 6）—— 读侧与真正执行续拉的调度器不可能给出不同答案；
+ * - jisuankePracticeSync：`settings['jisuanke.practiceSync']` 非 'false' 即开启（键缺失 = 默认开启，
+ *   口径与适配器 `readSetting('jisuanke.practiceSync') !== 'false'` 完全一致）。
  */
-export function readSyncSettings(db: Db): { maxSubmissions: number; autoContinueRounds: number } {
+export function readSyncSettings(db: Db): {
+  maxSubmissions: number;
+  autoContinueRounds: number;
+  jisuankePracticeSync: boolean;
+} {
   const row = db
     .prepare('SELECT value FROM settings WHERE key = ?')
     .get('sync.maxSubmissions') as { value: string } | undefined;
+  const practice = db
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .get('jisuanke.practiceSync') as { value: string } | undefined;
   const n = Number(row?.value);
   return {
     maxSubmissions:
@@ -96,6 +105,7 @@ export function readSyncSettings(db: Db): { maxSubmissions: number; autoContinue
         ? n
         : DEFAULT_SYNC_MAX_SUBMISSIONS,
     autoContinueRounds: getAutoContinueRounds(db),
+    jisuankePracticeSync: practice?.value !== 'false',
   };
 }
 
@@ -435,12 +445,14 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
     res.json({ ok: true });
   });
 
-  // POST /api/settings/sync  body: { maxSubmissions, autoContinueRounds? }
+  // POST /api/settings/sync  body: { maxSubmissions, autoContinueRounds?, jisuankePracticeSync? }
   // maxSubmissions：100–1500（MIN/MAX_SYNC_MAX_SUBMISSIONS），单次同步新增上限，防封号。
   // autoContinueRounds：0–50，后台续拉轮数上限（0 = 关闭）；**省略即保留已存值**（前端只改一项时
-  // 不会把另一项重置成默认）。两项都先校验后写入：任一非法则整次请求不落库。
+  // 不会把另一项重置成默认）。jisuankePracticeSync：布尔，计蒜客「同步自由练题提交」开关
+  // （落库为 settings['jisuanke.practiceSync'] 的 'true'/'false'；同样省略即保留已存值）。
+  // 各项都先校验后写入：任一非法则整次请求不落库。
   r.post('/sync', (req, res) => {
-    const { maxSubmissions, autoContinueRounds } = req.body ?? {};
+    const { maxSubmissions, autoContinueRounds, jisuankePracticeSync } = req.body ?? {};
     const n = Number(maxSubmissions);
     if (!Number.isInteger(n) || n < MIN_SYNC_MAX_SUBMISSIONS || n > MAX_SYNC_MAX_SUBMISSIONS) {
       return res
@@ -461,11 +473,17 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
       }
       rounds = v;
     }
+    if (jisuankePracticeSync !== undefined && typeof jisuankePracticeSync !== 'boolean') {
+      return res.status(400).json({ error: 'jisuankePracticeSync 需为布尔值' });
+    }
     const upsert = db.prepare(
       'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
     );
     upsert.run('sync.maxSubmissions', String(n));
     if (rounds !== undefined) upsert.run('sync.autoContinueRounds', String(rounds));
+    if (typeof jisuankePracticeSync === 'boolean') {
+      upsert.run('jisuanke.practiceSync', String(jisuankePracticeSync));
+    }
     res.json(readSyncSettings(db));
   });
 

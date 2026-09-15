@@ -318,14 +318,15 @@ function settingsApp(db: Db): express.Express {
   return app;
 }
 
-test('GET /api/settings: sync 给出 autoContinueRounds（默认 6）', async () => {
+test('GET /api/settings: sync 给出 autoContinueRounds（默认 6）与 jisuankePracticeSync（默认开启）', async () => {
   const db = createDb(':memory:');
   await withApp(settingsApp(db), async (base) => {
     const body = (await (await fetch(`${base}/api/settings`)).json()) as {
-      sync: { maxSubmissions: number; autoContinueRounds: number };
+      sync: { maxSubmissions: number; autoContinueRounds: number; jisuankePracticeSync: boolean };
     };
     assert.equal(body.sync.maxSubmissions, 500);
     assert.equal(body.sync.autoContinueRounds, 6);
+    assert.equal(body.sync.jisuankePracticeSync, true, '键缺失 = 默认开启（与适配器口径一致）');
   });
   db.close();
 });
@@ -335,15 +336,47 @@ test('POST /api/settings/sync: autoContinueRounds 可选（省略则保留已存
   await withApp(settingsApp(db), async (base) => {
     const first = await postJson(base, '/api/settings/sync', { maxSubmissions: 1000, autoContinueRounds: 3 });
     assert.equal(first.status, 200);
-    assert.deepEqual(await first.json(), { maxSubmissions: 1000, autoContinueRounds: 3 });
+    assert.deepEqual(await first.json(), { maxSubmissions: 1000, autoContinueRounds: 3, jisuankePracticeSync: true });
 
     // 只改上限：轮数保持上一次写入的值
     const second = await postJson(base, '/api/settings/sync', { maxSubmissions: 1500 });
-    assert.deepEqual(await second.json(), { maxSubmissions: 1500, autoContinueRounds: 3 });
+    assert.deepEqual(await second.json(), { maxSubmissions: 1500, autoContinueRounds: 3, jisuankePracticeSync: true });
 
     // 0 = 关闭续拉，属合法值
     const off = await postJson(base, '/api/settings/sync', { maxSubmissions: 1500, autoContinueRounds: 0 });
-    assert.deepEqual(await off.json(), { maxSubmissions: 1500, autoContinueRounds: 0 });
+    assert.deepEqual(await off.json(), { maxSubmissions: 1500, autoContinueRounds: 0, jisuankePracticeSync: true });
+  });
+  db.close();
+});
+
+test('POST /api/settings/sync: jisuankePracticeSync 落库为 true/false 字符串，非法类型 400 且不落库', async () => {
+  const db = createDb(':memory:');
+  await withApp(settingsApp(db), async (base) => {
+    const read = () =>
+      db.prepare("SELECT value FROM settings WHERE key = 'jisuanke.practiceSync'").get() as
+        | { value: string }
+        | undefined;
+
+    const off = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, jisuankePracticeSync: false });
+    assert.equal(off.status, 200);
+    assert.equal(read()?.value, 'false');
+    assert.equal(readSyncSettings(db).jisuankePracticeSync, false);
+
+    // 只改上限：练习同步开关保持上次写入的 false（省略即保留）
+    const keep = await postJson(base, '/api/settings/sync', { maxSubmissions: 500 });
+    assert.deepEqual(await keep.json(), { maxSubmissions: 500, autoContinueRounds: 6, jisuankePracticeSync: false });
+
+    const on = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, jisuankePracticeSync: true });
+    assert.equal(read()?.value, 'true');
+    assert.deepEqual(await on.json(), { maxSubmissions: 500, autoContinueRounds: 6, jisuankePracticeSync: true });
+
+    // 非布尔（含字符串 'false'）：拒绝且不改动已存值
+    for (const bad of ['false', 0, 1, null]) {
+      const res = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, jisuankePracticeSync: bad });
+      assert.equal(res.status, 400, `jisuankePracticeSync=${String(bad)} 应被拒`);
+      assert.match(((await res.json()) as { error: string }).error, /jisuankePracticeSync/);
+    }
+    assert.equal(read()?.value, 'true');
   });
   db.close();
 });

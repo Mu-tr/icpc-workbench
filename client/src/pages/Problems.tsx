@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Alert,
   Button,
   Checkbox,
   Form,
@@ -25,7 +26,7 @@ import { PLATFORMS } from '../../../shared/src/index.ts'
 import IntentPopover from '../components/IntentPopover'
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
-import { difficultyColor, PLATFORM_COLOR, tagColor } from '../ui'
+import { difficultyColor, formatDifficulty, PLATFORM_COLOR, platformName, tagColor } from '../ui'
 import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
 import { codeOptionsFromTags } from '../intentOptions'
 import { get, post, put } from '../api'
@@ -69,6 +70,12 @@ interface ProblemRow {
   problem_key: string
   title: string
   difficulty: number | null
+  /** 平台原生难度原文（服务端下发的 nativeDifficulty；未知为 null） */
+  nativeDifficulty?: string | null
+  /** 原生难度所属标度（服务端下发的 difficultyScale） */
+  difficultyScale?: string | null
+  /** 服务端按标度派生的原生档位名（如洛谷「提高」/ 力扣「中等」；原生难度未知时为 null） */
+  difficultyLabel?: string | null
   url: string | null
   tags: string[]
   attempts: number
@@ -557,10 +564,17 @@ export default function Problems() {
       dataIndex: 'difficulty',
       width: 88,
       align: 'right',
-      render: (v: number | null) =>
-        v == null ? <span style={{ color: '#4e5a68' }}>-</span> : (
-          <span className="rating-pill mono" style={{ color: difficultyColor(v) }}>{v}</span>
-        ),
+      // 单元格只放 CF 标尺数值（列宽有限）；悬停给出「数值 · 平台 原生档位」双标度，
+      // 原生档位名直接用服务端下发的 difficultyLabel（前端不重算档位映射表）
+      render: (v: number | null, r) => (
+        <Tooltip title={formatDifficulty(v, r.difficultyLabel, r.difficultyScale)}>
+          {v == null ? (
+            <span style={{ color: '#4e5a68' }}>-</span>
+          ) : (
+            <span className="rating-pill mono" style={{ color: difficultyColor(v) }}>{v}</span>
+          )}
+        </Tooltip>
+      ),
     },
     {
       title: '标签',
@@ -1061,12 +1075,53 @@ export default function Problems() {
   )
 }
 
+/** GET /api/sync/status 的平台条目（Task 8 起含 autoContinue：该平台待执行的后台续拉） */
+interface SyncPlatformStatus {
+  platform: PlatformId
+  platformName: string
+  handle: string
+  enabled: boolean
+  lastSyncAt: string | null
+  status: string
+  latestRun: unknown
+  /** 后台续拉排期；无排期（未截断 / 已跑完 / 已取消 / 轮数设为 0）时为 null */
+  autoContinue: {
+    platform: PlatformId
+    handle: string
+    round: number
+    maxRounds: number
+    /** 下一轮预计开始时间（ISO 字符串） */
+    nextAt: string
+    running: boolean
+  } | null
+}
+
+/** 续拉排期时间 → 界面用的 HH:MM（无法解析时原样回显，不显示 Invalid Date） */
+function formatNextRunAt(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 function SyncTab({ onDone }: { onDone: () => void }) {
   const { message } = AntdApp.useApp()
   const [platform, setPlatform] = useState<PlatformId>('codeforces')
   const [handle, setHandle] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string>()
+  // 各平台后台续拉状态（GET /api/sync/status）：截断后服务端会自行分批续拉，这里给出进度与手动停止
+  const [statuses, setStatuses] = useState<SyncPlatformStatus[]>([])
+  const [cancelling, setCancelling] = useState<string>()
+
+  const loadStatus = useCallback(() => {
+    get<{ statuses: SyncPlatformStatus[] }>('/api/sync/status')
+      .then((r) => setStatuses(r.statuses ?? []))
+      .catch(() => { /* 服务端未升级时静默：仅影响续拉提示 */ })
+  }, [])
+
+  useEffect(() => {
+    loadStatus()
+  }, [loadStatus])
 
   const run = async () => {
     if (!handle.trim()) return
@@ -1078,12 +1133,29 @@ function SyncTab({ onDone }: { onDone: () => void }) {
       if (r.truncated && r.note) parts.push(r.note)
       setResult(parts.join('，'))
       if (r.imported > 0) onDone()
+      // 本次若被分批上限截断，服务端已排下一次续拉：立刻刷新续拉提示
+      loadStatus()
     } catch (e) {
       message.error((e as Error).message)
     } finally {
       setBusy(false)
     }
   }
+
+  const cancelAutoContinue = async (p: PlatformId) => {
+    setCancelling(p)
+    try {
+      const r = await post<{ ok: boolean; cancelled: boolean }>('/api/sync/auto-continue/cancel', { platform: p })
+      message.success(r.cancelled ? `${platformName(p)}后台续拉已停止` : `${platformName(p)}当前没有待执行的续拉`)
+      loadStatus()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setCancelling(undefined)
+    }
+  }
+
+  const pending = statuses.filter((s) => s.autoContinue)
 
   return (
     <div>
@@ -1093,6 +1165,28 @@ function SyncTab({ onDone }: { onDone: () => void }) {
         <Button type="primary" loading={busy} onClick={run}>同步</Button>
       </Space>
       {result && <p style={{ marginTop: 12 }}>{result}</p>}
+      {pending.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {pending.map((s) => {
+            const ac = s.autoContinue!
+            return (
+              <Alert
+                key={s.platform}
+                type="info"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={`后台续拉中：第 ${ac.round}/${ac.maxRounds} 轮，预计 ${formatNextRunAt(ac.nextAt)} 继续`}
+                description={`${s.platformName}（${ac.handle}）：单次同步受分批上限截断后由后台自动续拉，可随时停止；停止不影响已导入的数据。`}
+                action={
+                  <Button size="small" loading={cancelling === s.platform} onClick={() => void cancelAutoContinue(s.platform)}>
+                    停止续拉
+                  </Button>
+                }
+              />
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -1105,30 +1199,25 @@ const LUOGU_DIFFICULTY_OPTIONS = [
   { value: 6, label: '省选/NOI- 及以上' },
 ]
 
+/** 平台默认拉取条数：CF / AtCoder 单次 API 调用即可拿全量，LeetCode 全量约 3300 题、代码源约 500 题 */
+function defaultBankMax(p: PlatformId): number {
+  return p === 'codeforces' ? 10000 : p === 'leetcode' ? 3500 : p === 'atcoder' ? 5000 : 1000
+}
+
 /** 「拉取题库」页签：从公开题库批量入库，扩充训练计划待选题池（无需账号）。 */
 function BankTab({ onDone }: { onDone: () => void }) {
   const { message } = AntdApp.useApp()
-  const [platform, setPlatform] = useState<'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke'>('luogu')
-  const [max, setMax] = useState(1000)
+  // 平台列表来自共享定义的题库能力（PLATFORMS.hasBank），不硬编码：QOJ 无公开题库接口，故不在此提供
+  const bankPlatforms = useMemo(() => PLATFORMS.filter((p) => p.hasBank), [])
+  const [platform, setPlatform] = useState<PlatformId>('luogu')
+  const [max, setMax] = useState(() => defaultBankMax('luogu'))
   const [luoguMin, setLuoguMin] = useState(3)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string>()
 
-  const BANK_PLATFORM_NAMES: Record<typeof platform, string> = {
-    luogu: '洛谷',
-    nowcoder: '牛客',
-    codeforces: 'Codeforces',
-    leetcode: 'LeetCode',
-    atcoder: 'AtCoder',
-    daimayuan: '代码源',
-    jisuanke: '计蒜客',
-  }
-
-  const switchPlatform = (v: 'luogu' | 'nowcoder' | 'codeforces' | 'leetcode' | 'atcoder' | 'daimayuan' | 'jisuanke') => {
+  const switchPlatform = (v: PlatformId) => {
     setPlatform(v)
-    // Codeforces / AtCoder 单次 API 调用即可拿全量，默认直接全拉
-    // LeetCode 全量约 3300+ 题（按页拉取，约 1 分钟）；代码源约 500 题
-    setMax(v === 'codeforces' ? 10000 : v === 'leetcode' ? 3500 : v === 'atcoder' ? 5000 : 1000)
+    setMax(defaultBankMax(v))
   }
 
   const run = async () => {
@@ -1144,7 +1233,7 @@ function BankTab({ onDone }: { onDone: () => void }) {
       })
       const totalPart = r.total ? `（题库共 ${r.total} 题）` : ''
       setResult(`拉取 ${r.fetched} 题${totalPart}：新增 ${r.inserted}，更新 ${r.updated}`)
-      message.success(`${BANK_PLATFORM_NAMES[platform]}题库已入库，训练计划选题池已扩充`)
+      message.success(`${platformName(platform)}题库已入库，训练计划选题池已扩充`)
       onDone()
     } catch (e) {
       message.error((e as Error).message)
@@ -1158,21 +1247,14 @@ function BankTab({ onDone }: { onDone: () => void }) {
       <p style={{ color: '#8993a2' }}>
         软件已内置 Codeforces 等题库，开箱即可供训练计划/题单选题；需要更多题目时从这里扩充（无需账号/Cookie，不影响刷题统计）。
         Codeforces / AtCoder 一次调用秒级完成；洛谷/牛客/LeetCode/代码源按页拉取，拉取量越大耗时越长（约 1-2 分钟/千题）。
+        列表只列有公开题库的平台（QOJ 无题库接口，故不提供拉取）。
       </p>
       <Space wrap>
         <Select
           style={{ width: 140 }}
           value={platform}
           onChange={switchPlatform}
-          options={[
-            { value: 'luogu' as const, label: '洛谷' },
-            { value: 'nowcoder' as const, label: '牛客' },
-            { value: 'codeforces' as const, label: 'Codeforces' },
-            { value: 'atcoder' as const, label: 'AtCoder' },
-            { value: 'leetcode' as const, label: 'LeetCode' },
-            { value: 'daimayuan' as const, label: '代码源' },
-            { value: 'jisuanke' as const, label: '计蒜客' },
-          ]}
+          options={bankPlatforms.map((p) => ({ value: p.id, label: p.name }))}
         />
         <InputNumber
           min={50}

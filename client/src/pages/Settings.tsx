@@ -47,7 +47,7 @@ interface SettingsData {
   cookies: Record<string, { configured: boolean; masked?: string; hasUa?: boolean }>
   reminder: ReminderConfig
   contestReminder: ContestReminderConfig
-  sync: { maxSubmissions: number }
+  sync: { maxSubmissions: number; autoContinueRounds?: number; jisuankePracticeSync?: boolean }
 }
 
 const SYNC_NOTE_COLOR: Record<string, string> = {
@@ -112,6 +112,10 @@ export default function Settings() {
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelOptions, setModelOptions] = useState<{ value: string }[]>([])
   const [syncMax, setSyncMax] = useState(500)
+  /** 后台续拉轮数上限（0 = 关闭；服务端默认 6）；字段可能来自旧版服务端，故可空 */
+  const [syncRounds, setSyncRounds] = useState(6)
+  /** 计蒜客「同步自由练题提交」开关（键缺失 = 默认开启） */
+  const [practiceSync, setPracticeSync] = useState(true)
 
   const load = () => {
     get<SettingsData>('/api/settings')
@@ -128,6 +132,8 @@ export default function Settings() {
         setReminderTime(dayjs(d.reminder.time, 'HH:mm'))
         setContestReminder(d.contestReminder)
         setSyncMax(d.sync?.maxSubmissions ?? 500)
+        setSyncRounds(d.sync?.autoContinueRounds ?? 6)
+        setPracticeSync(d.sync?.jisuankePracticeSync !== false)
       })
       .catch((e: Error) => message.error(e.message))
   }
@@ -233,6 +239,36 @@ export default function Settings() {
       setSyncMax(r.maxSubmissions)
     } catch (e) {
       message.error((e as Error).message)
+    }
+  }
+
+  /** 保存后台续拉轮数（0 = 关闭）。POST /api/settings/sync 要求 maxSubmissions 必填，故一并带上当前值 */
+  const saveSyncRounds = async (v: number | null) => {
+    if (v == null) return // 清空输入框不落库，保留原值（避免误把轮数写成 0 = 关闭）
+    try {
+      const r = await post<{ autoContinueRounds: number }>('/api/settings/sync', {
+        maxSubmissions: syncMax,
+        autoContinueRounds: v,
+      })
+      setSyncRounds(r.autoContinueRounds ?? v)
+      message.success(v === 0 ? '后台续拉已关闭' : `后台续拉轮数已保存：最多 ${r.autoContinueRounds ?? v} 轮`)
+    } catch (e) {
+      message.error((e as Error).message)
+    }
+  }
+
+  /** 计蒜客「同步自由练题提交」开关：落库 settings['jisuanke.practiceSync']（'true'/'false'） */
+  const savePracticeSync = async (v: boolean) => {
+    try {
+      const r = await post<{ jisuankePracticeSync: boolean }>('/api/settings/sync', {
+        maxSubmissions: syncMax,
+        jisuankePracticeSync: v,
+      })
+      setPracticeSync(r.jisuankePracticeSync !== false)
+      message.success(v ? '计蒜客自由练题提交将随同步一起导入' : '计蒜客自由练题提交已跳过（只同步比赛提交）')
+    } catch (e) {
+      message.error((e as Error).message)
+      load() // 回滚到服务端实际值
     }
   }
 
@@ -689,6 +725,33 @@ export default function Settings() {
                 style={{ width: 140 }}
               />
               <span className="muted-note">提交记录过多时分批拉取，防触发平台风控封号（默认 500，保守为主）</span>
+            </Space>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <Space wrap>
+              <span>后台续拉轮数</span>
+              <InputNumber
+                min={0}
+                max={50}
+                step={1}
+                value={syncRounds}
+                onChange={(v) => void saveSyncRounds(v)}
+                addonAfter="轮"
+                style={{ width: 140 }}
+              />
+              <span className="muted-note">
+                单次同步达到上限被截断后，后台按平台节奏自动续拉的最大轮数（0 = 关闭，默认 6）。
+                续拉进度与「停止续拉」在「题目管理 → 导入 → 平台同步」中显示。
+              </span>
+            </Space>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <Space wrap>
+              <span>计蒜客「同步自由练题提交」</span>
+              <Switch size="small" checked={practiceSync} onChange={(v) => void savePracticeSync(v)} />
+              <span className="muted-note">
+                开启后同步计蒜客题库（自由练）的提交记录，关闭则只同步比赛提交（默认开启，与旧行为一致）
+              </span>
             </Space>
           </div>
         </Card>

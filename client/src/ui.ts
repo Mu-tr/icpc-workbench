@@ -34,6 +34,36 @@ export function difficultyColor(d: number | null | undefined): string {
   return '#ff5d70' // grandmaster+
 }
 
+/** 平台难度标度 → 展示用的平台名（标度名只在 shared/src/difficulty.ts 定义，这里只做中文名映射） */
+const SCALE_PLATFORM_NAME: Record<string, string> = {
+  'luogu-2026-06': '洛谷',
+  'jisuanke-level-8': '计蒜客',
+  'leetcode-tier': '力扣',
+  'hydro-1-10': '代码源',
+  'atcoder-kenkoooo-irt': 'AtCoder',
+  'nowcoder-score': '牛客',
+}
+
+/**
+ * 难度展示：CF 统一标尺数值 + 平台原生档位（题库未入库难度时给空态文案）。
+ *
+ * `difficulty` 是服务端映射到 CF rating 标尺后的值；`nativeLabel` 传服务端下发的
+ * `difficultyLabel`（映射表只在 shared/src/difficulty.ts 一份，前端不再自行换算档位名）。
+ * - 数值为空 → `emptyText`（默认「难度未知」），有原生档位也不显示；
+ * - 有原生档位且标度有对应平台名 → `1800 · 洛谷 提高`；
+ * - 其余（无原生档位、标度未知、cf-rating 的原生标签就是数值本身）→ 只给数值。
+ */
+export function formatDifficulty(
+  difficulty: number | null | undefined,
+  nativeLabel?: string | null,
+  scale?: string | null,
+  emptyText = '难度未知',
+): string {
+  if (difficulty == null) return emptyText
+  const platformName = scale ? SCALE_PLATFORM_NAME[scale] : undefined
+  return nativeLabel && platformName ? `${difficulty} · ${platformName} ${nativeLabel}` : String(difficulty)
+}
+
 /** AC 率文本配色（表格 / 统计用） */
 export function rateColor(rate: number): string {
   if (rate >= 55) return '#69d7a5'
