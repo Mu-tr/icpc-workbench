@@ -63,6 +63,8 @@ export function insertNormalized(
         s.problem.url ?? null,
         JSON.stringify(purifyTags(s.problem.tags)),
         source,
+        s.problem.nativeDifficulty ?? null,
+        s.problem.difficultyScale ?? null,
       );
       const problem = findProblem.get(s.problem.platform, s.problem.problemKey) as {
         id: number;

@@ -28,6 +28,10 @@ export function upsertBankProblems(
     problemKey: string;
     title: string;
     difficulty: number | null;
+    /** 平台原生难度原文（未知为 null/省略；不覆盖已落定的非空值） */
+    nativeDifficulty?: string | null;
+    /** 原生难度所属标度（见 shared/src/difficulty.ts 的 DifficultyScale） */
+    difficultyScale?: string | null;
     url: string | null;
     tags: string[];
   }>,
@@ -66,6 +70,8 @@ export function upsertBankProblems(
         r.url,
         JSON.stringify(purifyTags(r.tags ?? [])),
         'bank',
+        r.nativeDifficulty ?? null,
+        r.difficultyScale ?? null,
       );
       // tags 取**库内落定值**（写入即净化；非空才覆盖，故可能与本次入参不同）——
       // tag 来源标注必须按实际落库的标签做映射
