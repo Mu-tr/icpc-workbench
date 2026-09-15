@@ -49,8 +49,12 @@ export interface L1RunResult {
   annotated: number;
   /** tag 来源映射落库的题数（与 rule 并列的独立来源） */
   tagAnnotated: number;
-  /** 规则未命中、进入词表缺口队列的题数 */
-  enqueued: number;
+  /**
+   * 本轮规则未命中的题数（词表缺口规模的即时读数）。
+   * 它曾同时是入队数，但该 AI 标注队列已随 AI 退出而退役、无写入方也无读取方，
+   * 现在只作为运维可见的计数保留；缺口本身由 gapReport 按需从 problems 现算。
+   */
+  ruleMissed: number;
   /** 有人工校正标注而跳过的题数 */
   skippedManual: number;
 }
@@ -67,7 +71,7 @@ interface ProblemRow {
  * 对给定题目集合跑 L1（导入/拉题库钩子与全量批跑共用）。
  * - 已有 manual 标注的题跳过（人工校正置顶）
  * - 已有任意标注的题跳过（增量语义），force 时重跑（覆盖 rule 来源旧标注）
- * - 命中落库 source=rule；未命中进入词表缺口队列（幂等）
+ * - 命中落库 source=rule；未命中只计数（ruleMissed），不再写入任何队列
  * - 同时并联 tag 来源（题源标签 → 知识点 code，落库 source=tag，见 tagAnnotate.ts），
  *   两者同处一个事务窗口，JSONL 在本函数内统一追加
  */
@@ -82,14 +86,10 @@ export function annotateProblemsL1(
   const hasAny = db.prepare(
     'SELECT 1 FROM problem_keypoints WHERE platform = ? AND problem_key = ? LIMIT 1',
   );
-  const enqueue = db.prepare(
-    `INSERT INTO knowledge_queue (platform, problem_key, status) VALUES (?, ?, 'pending')
-     ON CONFLICT(platform, problem_key) DO NOTHING`,
-  );
 
   const writes: AnnotationWrite[] = [];
   const tombstones: JsonlLine[] = [];
-  let enqueued = 0;
+  let ruleMissed = 0;
   let skippedManual = 0;
   let scanned = 0;
 
@@ -104,8 +104,8 @@ export function annotateProblemsL1(
       scanned += 1;
       const hits = classifyTitle(row.title);
       if (opts.force && hits.length === 0) {
-        // 差量重跑且不再命中：清除该题过期的 rule 标注（manual 不受影响），重新进入词表缺口队列；
-        // JSONL 补清除快照，防止重放复活
+        // 差量重跑且不再命中：清除该题过期的 rule 标注（manual 不受影响）；
+        // JSONL 补清除快照，防止重放复活。该题仍无任何标注，下面会计入本轮 ruleMissed。
         db.prepare(
           "DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ? AND source = 'rule'",
         ).run(row.platform, row.problemKey);
@@ -120,13 +120,11 @@ export function annotateProblemsL1(
           // 标题指纹：记录标注当时的标题，标题被修复后据此判定标注陈旧并触发重跑
           title: row.title,
         });
-        // 规则命中后若此前在词表缺口队列里，标记出队
-        db.prepare(
-          "UPDATE knowledge_queue SET status = 'done', updated_at = datetime('now') WHERE platform = ? AND problem_key = ? AND status = 'pending'",
-        ).run(row.platform, row.problemKey);
+        // 规则命中：只落 rule 标注，不再有任何队列需要出队
       } else {
-        enqueue.run(row.platform, row.problemKey);
-        enqueued += 1;
+        // 规则未命中：计入本轮 ruleMissed（词表缺口规模的即时读数）。
+        // 缺口本身由 gapReport 按需从 problems 现算，不落表。
+        ruleMissed += 1;
       }
     }
     const result = writeAnnotationsToDb(db, writes);
@@ -150,7 +148,7 @@ export function annotateProblemsL1(
       scanned,
       annotated: result.written,
       tagAnnotated: tagResult.annotated,
-      enqueued,
+      ruleMissed,
       skippedManual,
     };
   } catch (e) {

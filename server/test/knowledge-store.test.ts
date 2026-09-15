@@ -83,7 +83,7 @@ test('幂等重跑：二次 L1 不产生重复标注，结果一致', () => {
   }
 });
 
-test('未命中题入词表缺口队列；命中后自动出队；manual 永不覆盖', () => {
+test('规则未命中题计入 ruleMissed，命中题不计入；manual 永不覆盖', () => {
   const dataDir = tempDataDir();
   initKnowledgeStore(dataDir);
   const db = createDb(':memory:');
@@ -94,12 +94,13 @@ test('未命中题入词表缺口队列；命中后自动出队；manual 永不�
       { platform: 'codeforces', problemKey: '3A', title: 'A. 神奇的题' },
       { platform: 'codeforces', problemKey: '3B', title: '【模板】并查集' },
     ]);
-    assert.equal(r.enqueued, 1);
-    // pendingAiCount 随 AI 批次逻辑一起移除；直接断言 knowledge_queue 行保留原意
-    assert.equal(
-      (db.prepare("SELECT COUNT(*) AS c FROM knowledge_queue WHERE status = 'pending'").get() as { c: number }).c,
-      1,
-    );
+    // 未命名题规则未命中 → 计数；合并不查集命中 → 不计数（两题的差别正是被断言的对象）
+    assert.equal(r.ruleMissed, 1);
+    assert.equal(r.annotated, 1);
+    // ruleMissed 的总量断言无法指出「哪一题」被计入，故按题校验落库结果：
+    // 未命中题无任何 rule 标注，命中题有 rule 标注
+    assert.deepEqual(keypointsOfProblem(db, 'codeforces', '3A'), []);
+    assert.ok(keypointsOfProblem(db, 'codeforces', '3B').some((k) => k.source === 'rule'));
 
     // 人工校正 3A：之后管线重跑不得覆盖
     setManualKeypoints(db, 'codeforces', '3A', ['dp.general']);
