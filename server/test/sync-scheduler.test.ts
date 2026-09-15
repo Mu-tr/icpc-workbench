@@ -305,6 +305,116 @@ test('sync 层：非 auto 触发的同步抢占（取消）待续拉；auto 自�
   __resetSyncSchedulerForTest();
 });
 
+test('sync 层：days 窗口同步不抢占待续拉队列（剩余轮次不得被静默丢弃）', async () => {
+  __resetSyncSchedulerForTest();
+  const db = createDb(':memory:');
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const cancelled: unknown[] = [];
+  configureSyncScheduler({
+    db,
+    now: () => Date.parse('2026-09-15T00:00:00.000Z'),
+    schedule: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    cancelTimer: (id) => { cancelled.push(id); },
+    run: async (platform, handle) => ({ platform, handle, imported: 0, skipped: 0, errors: [], truncated: false }),
+  });
+  register({
+    platform: 'luogu',
+    knownIdsFilter: true,
+    async fetchUserSubmissions(_handle, opts) {
+      if (opts) {
+        opts.truncated = true;
+        opts.backfillReachedPage = 5;
+      }
+      return [];
+    },
+    problemUrl: ({ problemKey }) => `https://www.luogu.com.cn/problem/${problemKey}`,
+  });
+  const account = () =>
+    db.prepare("SELECT sync_truncated, backfill_page FROM platform_accounts WHERE platform='luogu'").get() as
+      { sync_truncated: number; backfill_page: number | null };
+
+  // 前置：手动同步被截断 → 注册第 1 轮续拉，DB 标 sync_truncated=1 / backfill_page=5
+  const manual = await syncPlatform(db, 'luogu', 'u', { triggeredBy: 'manual' });
+  assert.equal(manual.autoContinue?.round, 1);
+  assert.equal(listAutoContinue().length, 1);
+  assert.equal(account().sync_truncated, 1);
+  assert.equal(account().backfill_page, 5);
+  const timersBefore = timers.length;
+  cancelled.length = 0;
+
+  // days 是补充拉取：不改 platform_accounts、末尾也不重新注册 → 更不能取消待续拉，
+  // 否则 DB 仍宣称 sync_truncated=1 而队列已空，剩余轮次无人接续（静默丢失）
+  const days = await syncPlatform(db, 'luogu', 'u', { days: 7, triggeredBy: 'days' });
+  assert.equal(days.autoContinue, undefined);
+  assert.deepEqual(cancelled, []); // 定时器未被取消
+  assert.equal(listAutoContinue().length, 1); // 队列里的任务原样保留
+  assert.equal(listAutoContinue()[0].round, 1);
+  assert.equal(timers.length, timersBefore); // 既未取消也未新增
+  assert.equal(account().sync_truncated, 1); // DB 状态未被 days 改动
+  assert.equal(account().backfill_page, 5);
+
+  // 未声明来源的调用方（如模板页「例题一键同步」）同样不抢占
+  await syncPlatform(db, 'luogu', 'u');
+  assert.deepEqual(cancelled, []);
+  assert.equal(listAutoContinue().length, 1);
+  db.close();
+  __resetSyncSchedulerForTest();
+});
+
+test('sync 层：被互斥锁拒绝的重复触发不抢占待续拉队列（链不得被杀死）', async () => {
+  __resetSyncSchedulerForTest();
+  const db = createDb(':memory:');
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const cancelled: unknown[] = [];
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered = 0;
+  register({
+    platform: 'codeforces',
+    knownIdsFilter: true,
+    async fetchUserSubmissions(_handle, opts) {
+      entered += 1;
+      if (entered === 1) await gate; // 第一轮（后台续拉）卡在适配器里 → 锁被持有
+      if (opts) {
+        opts.truncated = true;
+        opts.backfillReachedPage = 3;
+      }
+      return [];
+    },
+    problemUrl: () => 'https://codeforces.com/',
+  });
+  configureSyncScheduler({
+    db,
+    now: () => Date.parse('2026-09-15T00:00:00.000Z'),
+    schedule: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    cancelTimer: (id) => { cancelled.push(id); },
+    // 真执行器：续拉轮次真的走 syncPlatform（triggeredBy='auto'），锁是真锁
+    run: (platform, handle) => syncPlatform(db, platform, handle, { triggeredBy: 'auto' }),
+  });
+
+  const st = scheduleAutoContinue(db, 'codeforces', 'u');
+  assert.equal(listAutoContinue().length, 1);
+  timers[0].fn(); // 第 1 轮开跑（内部持锁并卡在适配器；排期回调本身不返回 Promise）
+  assert.equal(entered, 1);
+
+  // 此刻用户手动点同步：被锁拒绝（没有发出任何请求），不得取消待续拉
+  const rejected = await syncPlatform(db, 'codeforces', 'u', { triggeredBy: 'manual' });
+  assert.match(rejected.errors[0], /正在同步中/);
+  assert.deepEqual(cancelled, []); // 定时器未被取消
+  assert.equal(listAutoContinue().length, 1);
+  assert.equal(listAutoContinue()[0], st); // 还是原来那个任务
+
+  // 让第 1 轮跑完：settle 时必须仍能续排第 2 轮（旧实现会因队列被清空而静默断链）
+  release();
+  await new Promise((resolve) => setImmediate(resolve)); // 排空微任务，等这一轮 settle
+  assert.equal(timers.length, 2);
+  assert.equal(listAutoContinue().length, 1);
+  assert.equal(listAutoContinue()[0].round, 2);
+  assert.equal(timers[1].ms, 20_000); // CF 节奏
+  db.close();
+  __resetSyncSchedulerForTest();
+});
+
 test('sync 层：同平台并发触发被内存锁拒绝（不产生请求、不写 sync_runs、锁会释放）', async () => {
   __resetSyncSchedulerForTest();
   const db = createDb(':memory:');

@@ -93,8 +93,24 @@ function isAscendingPlatform(platform: PlatformId): boolean {
 const SYNC_IN_FLIGHT = new Set<PlatformId>();
 
 /**
+ * 会抢占后台续拉队列的触发来源：**用户主动发起的完整同步**（manual 手动点同步 / all 一键全同步 /
+ * retry 失败重试）。只有它们接管队列——它们会完整走一遍「拉取 → 写 platform_accounts →
+ * 若仍被截断则在末尾重新注册第 1 轮」，队列语义因此被新任务接续。
+ *
+ * 明确排除：
+ * - `days`：补充拉取窗口，不改 platform_accounts、末尾也不重新注册（见 runSyncPlatform）。
+ *   若在此取消待续拉，DB 里仍标着 sync_truncated=1 / backfill_page=N，但剩余轮次已被静默丢弃。
+ * - `auto`：后台续拉自身，当然不清自己的队列。
+ * - `undefined`（未声明来源的调用方，如模板页「例题一键同步」）：不是「完整同步」语义，
+ *   不清队列；本次若被截断，末尾的注册逻辑会复用/接续既有队列。
+ */
+function preemptsAutoContinue(triggeredBy: SyncOptions['triggeredBy']): boolean {
+  return triggeredBy === 'manual' || triggeredBy === 'all' || triggeredBy === 'retry';
+}
+
+/**
  * 同步某个平台账号的刷题记录（分批防封号）：
- * 1. 同平台互斥 + 抢占续拉队列（非 auto 触发时先取消该平台待执行的续拉）
+ * 1. 同平台互斥 + 抢占续拉队列（仅用户主动发起的完整同步会取消该平台待执行的续拉）
  * 2. 检查平台开关（settings.adapter.<platform>.enabled，缺省启用）
  * 3. 读取 platform_accounts.last_sync_at / sync_truncated 做增量或补全
  * 4. 适配器按 maxSubmissions 上限分批拉取 → insertNormalized 事务入库
@@ -112,10 +128,14 @@ export async function syncPlatform(
   handle: string,
   opts: SyncOptions = {},
 ): Promise<SyncResult> {
-  // 用户主动触发的同步（manual / all / retry / days）抢占后台续拉队列：先取消该平台待执行的续拉，
+  // 用户主动触发的完整同步（manual / all / retry）抢占后台续拉队列：先取消该平台待执行的续拉，
   // 本次若仍被截断会在末尾重新注册一个第 1 轮任务——用户的一次同步即接管队列，
-  // 不会与后台续拉交错请求同一平台。auto（续拉自身）不清自己的队列。
-  if (opts.triggeredBy !== 'auto') cancelAutoContinue(platform);
+  // 不会与后台续拉交错请求同一平台。days（补充拉取，末尾不重新注册）与 auto（续拉自身）
+  // 都不抢占；triggeredBy 缺省同样不抢占（未见声明即不假设是完整同步）。
+  //
+  // 位置：必须在内存互斥锁**之后**。被锁拒绝的重复触发没有发出任何平台请求、也没写
+  // platform_accounts，若在锁前取消，则「正在同步中：已跳过本次重复触发」会顺带杀掉待续拉队列
+  // （调度器 settle 时 jobs.get(platform) !== job → 不再排期），用户不点第二次就永远不续拉。
   if (SYNC_IN_FLIGHT.has(platform)) {
     return {
       platform,
@@ -127,6 +147,7 @@ export async function syncPlatform(
   }
   SYNC_IN_FLIGHT.add(platform);
   try {
+    if (preemptsAutoContinue(opts.triggeredBy)) cancelAutoContinue(platform);
     return await runSyncPlatform(db, platform, handle, opts);
   } finally {
     SYNC_IN_FLIGHT.delete(platform);
