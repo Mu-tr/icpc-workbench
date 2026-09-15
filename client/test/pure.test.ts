@@ -331,34 +331,53 @@ describe('cookies.ts 计蒜客双框拼装（s + JSKUSS）', () => {
 })
 
 describe('cookies.ts 单字段合并（只改一个字段不清空另一个）', () => {
-  // 与生产字段表一致：QOJ = 整段 Cookie（raw 透传）+ 浏览器 UA（configOnly）
+  // 与生产字段表一致：QOJ = 两项 Cookie 按名分框（UOJSESSID / cf_clearance）+ 浏览器 UA（configOnly）
   const qojDefs: CookieFieldDef[] = [
-    { key: 'clearance', cookieName: 'cf_clearance', raw: true },
+    { key: 'uojsessid', cookieName: 'UOJSESSID' },
+    { key: 'clearance', cookieName: 'cf_clearance' },
     { key: 'ua', cookieName: '__ua', configOnly: true },
   ]
-  const FULL = 'cf_clearance=cf-tok; UOJSESSID=sess-tok'
+  const FULL = 'UOJSESSID=sess-tok; cf_clearance=cf-tok'
 
-  it('补填 UA 时整段 Cookie 原样保留（历史缺陷回归：raw 项曾被截断成只有 cf_clearance）', () => {
+  it('补填 UA 时两项 Cookie 原样保留（历史缺陷回归：只改一项曾把另一项截断/清空）', () => {
     const out = mergeCookieFields(FULL, qojDefs, { ua: 'Mozilla/5.0 (Windows NT 10.0) Chrome/153' })
     assert.equal(out, FULL)
   })
 
-  it('覆盖整段 Cookie 时 UA 不写进 Cookie 头', () => {
-    const out = mergeCookieFields(FULL, qojDefs, { clearance: 'cf_clearance=new; UOJSESSID=new-sess' })
-    assert.equal(out, 'cf_clearance=new; UOJSESSID=new-sess')
+  it('只覆盖 cf_clearance 时 UOJSESSID 保留、UA 不写进 Cookie 头', () => {
+    const out = mergeCookieFields(FULL, qojDefs, { clearance: 'new-cf', ua: 'Mozilla/5.0 Chrome/153' })
+    assert.equal(out, 'UOJSESSID=sess-tok; cf_clearance=new-cf')
+  })
+
+  it('整段 Cookie 粘进任一框：后端按名字分派到各字段', () => {
+    // 用户把 F12 里的整段 Cookie 粘到「UOJSESSID」框，cf_clearance 也应自动落位
+    const out = mergeCookieFields('', qojDefs, { uojsessid: 'Cookie: cf_clearance=cf-tok; UOJSESSID=sess-tok' })
+    assert.equal(out, 'UOJSESSID=sess-tok; cf_clearance=cf-tok')
+    // 反向：粘到 cf_clearance 框同样分派
+    assert.equal(
+      mergeCookieFields('', qojDefs, { clearance: 'cf_clearance=cf-2; UOJSESSID=sess-2' }),
+      'UOJSESSID=sess-2; cf_clearance=cf-2',
+    )
+    // 显式填写的字段优先于分派结果
+    assert.equal(
+      mergeCookieFields('', qojDefs, { clearance: 'cf_clearance=cf-3; UOJSESSID=ignored', uojsessid: 'mine' }),
+      'UOJSESSID=mine; cf_clearance=cf-3',
+    )
   })
 
   it('未做任何改动时原样保留已保存的头', () => {
     assert.equal(mergeCookieFields(FULL, qojDefs, {}), FULL)
   })
 
-  it('显式空串清空整段 Cookie', () => {
-    assert.equal(mergeCookieFields(FULL, qojDefs, { clearance: '' }), '')
+  it('显式空串清空单个 Cookie 项，其余保留', () => {
+    assert.equal(mergeCookieFields(FULL, qojDefs, { clearance: '' }), 'UOJSESSID=sess-tok')
+    assert.equal(mergeCookieFields(FULL, qojDefs, { uojsessid: '', clearance: '' }), '')
   })
 
-  it('cf_clearance 整段粘贴（Cookie: 前缀）剥掉前缀', () => {
-    const out = mergeCookieFields('', qojDefs, { clearance: 'Cookie: cf_clearance=cf-tok; UOJSESSID=sess-tok' })
-    assert.equal(out, 'cf_clearance=cf-tok; UOJSESSID=sess-tok')
+  it('raw 框（整段透传语义）单独使用时原样保留已存头', () => {
+    const rawDefs: CookieFieldDef[] = [{ key: 'sid', cookieName: 'sid', raw: true }]
+    assert.equal(mergeCookieFields('sid=abc', rawDefs, {}), 'sid=abc')
+    assert.equal(mergeCookieFields('', rawDefs, { sid: 'Cookie: sid=abc' }), 'sid=abc')
   })
 
   it('逐项字段（洛谷 _uid + __client_id）按顺序合并且互不覆盖', () => {
@@ -388,10 +407,10 @@ describe('cookies.ts 单字段合并（只改一个字段不清空另一个）',
     const stored = 'UOJSESSID=sess-1; cf_clearance=cf-2'
     assert.deepEqual(
       splitCookieFields(stored, [
-        { key: 'session', cookieName: 'UOJSESSID' },
+        { key: 'uojsessid', cookieName: 'UOJSESSID' },
         { key: 'clearance', cookieName: 'cf_clearance' },
       ]),
-      { session: 'sess-1', clearance: 'cf-2' },
+      { uojsessid: 'sess-1', clearance: 'cf-2' },
     )
     assert.deepEqual(splitCookieFields('', qojDefs), {})
   })

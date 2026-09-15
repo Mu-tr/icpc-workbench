@@ -653,19 +653,22 @@ export default function Settings() {
                               )}
                               {p.id === 'qoj' && (
                                 <div style={{ fontSize: 12, color: '#8993a2', marginTop: 6 }}>
-                                  两个框都必需（逐项实测：缺任一个都同步不了）：
+                                  两项 Cookie 按名分框填写（保存时由后端合并成 Cookie 头，不必手工拼串）：
                                   <div style={{ marginTop: 2 }}>
-                                    ① <b>完整 Cookie</b>：浏览器登录 qoj.ac 后 F12 → Network → 刷新 → 点任意一个 qoj.ac 请求 →
-                                    Request Headers 里把 <code>Cookie</code> 的<b>整段值</b>复制过来。必须同时含
-                                    <code>cf_clearance</code>（Cloudflare 通行凭据）与 <code>UOJSESSID</code>（登录会话）；
-                                    其余展示项（<code>uoj_locale</code>、<code>OptanonConsent</code>、<code>uoj_remember_token</code> 等）实测无影响，复制了也无害。
+                                    ① <b>UOJSESSID</b>（登录会话，必需）：浏览器登录 qoj.ac 后 F12 → Application → Cookies，
+                                    找 <code>UOJSESSID</code> 复制它的值。
                                   </div>
                                   <div style={{ marginTop: 2 }}>
-                                    ② <b>浏览器 User-Agent</b>：在该页 Console 输入 <code>navigator.userAgent</code> 回车，整行粘贴。
+                                    ② <b>cf_clearance</b>（Cloudflare 通行凭据，必需）：同页 <code>cf_clearance</code> 的值（较长）。
+                                    两项都在同一个站点的 Domain 下；也可把 Network 里 Request Headers 的整段 <code>Cookie</code>
+                                    粘进任一框，后端会自动把各名字分派到对应字段（其余展示项 uoj_locale / OptanonConsent 等无影响）。
+                                  </div>
+                                  <div style={{ marginTop: 2 }}>
+                                    ③ <b>浏览器 User-Agent</b>（必需）：在该页 Console 输入 <code>navigator.userAgent</code> 回车，整行粘贴。
                                     <code>cf_clearance</code> 与签发它的浏览器 UA 绑定，UA 不填或不一致会 100% 被 Cloudflare 拦截。
                                   </div>
                                   <div style={{ marginTop: 2 }}>
-                                    <code>cf_clearance</code> 约 30 分钟过期：过期后重新复制一次整段 Cookie 即可。
+                                    <code>cf_clearance</code> 约 30 分钟过期：过期后重新复制该项保存即可，另一项保持不变。
                                   </div>
                                 </div>
                               )}
@@ -689,7 +692,7 @@ export default function Settings() {
             })}
           />
           <p className="muted-note">
-            说明：每个 Cookie 单独一框，按输入框上方的名称到浏览器 F12 → Application → Cookies 复制对应值（框内整段粘贴亦可）。<b>保存只覆盖你本次填写过的字段</b>，留空的字段保持已保存值。代码源仅需 sid；LeetCode 需 LEETCODE_SESSION 与 csrftoken；计蒜客需 s 与 JSKUSS 两项（未登录时站点的 s 是游客会话，校验不过）；QOJ 需「完整 Cookie（含 cf_clearance 与 UOJSESSID）」+「浏览器 User-Agent」两项，缺一不可。
+            说明：每个 Cookie 单独一框，按输入框上方的名称到浏览器 F12 → Application → Cookies 复制对应值（框内整段粘贴亦可，后端自动分派到各字段）。<b>保存只覆盖你本次填写过的字段</b>，留空的字段保持已保存值。代码源仅需 sid；LeetCode 需 LEETCODE_SESSION 与 csrftoken；计蒜客需 s 与 JSKUSS 两项（未登录时站点的 s 是游客会话，校验不过）；QOJ 需 UOJSESSID 与 cf_clearance 两项 Cookie，外加同浏览器的 User-Agent，三项缺一不可。
           </p>
           <div style={{ marginTop: 4 }}>
             <Space>

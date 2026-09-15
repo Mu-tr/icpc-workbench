@@ -300,31 +300,36 @@ async function saveFields(
   return { status: res.status, body: (await res.json()) as { ok?: boolean; fields?: string[]; hasUa?: boolean; configured?: boolean; error?: string } };
 }
 
-test('cookieFields: QOJ 两字段（完整 Cookie + 浏览器 UA）单字段增量保存', async () => {
+test('cookieFields: QOJ 两个 Cookie 按名分框（UOJSESSID / cf_clearance）+ 浏览器 UA 单字段增量保存', async () => {
   await withServer(async (db, base) => {
-    // ① 先只粘整段 Cookie：UOJSESSID 与 cf_clearance 都在里面
+    // ① 只把整段 Cookie 粘进 cf_clearance 框：后端按名字分派，UOJSESSID 也自动落位
     const fullCookie = 'cf_clearance=cf-tok; UOJSESSID=sess-tok';
     const r1 = await saveFields(base, 'qoj', { clearance: fullCookie });
     assert.equal(r1.status, 200);
-    assert.deepEqual(r1.body.fields, ['cf_clearance', 'UOJSESSID']);
+    assert.deepEqual(r1.body.fields, ['UOJSESSID', 'cf_clearance']);
     assert.equal(r1.body.hasUa, false);
+    assert.equal(
+      (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value,
+      'UOJSESSID=sess-tok; cf_clearance=cf-tok',
+      '整段粘贴应被分派成两个按名 Cookie 项',
+    );
 
-    // ② 再补 UA：整段 Cookie 必须原样保留（这是「只改一个字段」的核心回归）
+    // ② 再补 UA：两项 Cookie 必须原样保留（这是「只改一个字段」的核心回归）
     const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0';
     const r2 = await saveFields(base, 'qoj', { ua });
     assert.equal(r2.body.hasUa, true);
     assert.equal(
       (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value,
-      fullCookie,
+      'UOJSESSID=sess-tok; cf_clearance=cf-tok',
       'UA 不得写进 Cookie 头，且 Cookie 头不得被改动',
     );
     assert.equal((db.prepare("SELECT value FROM settings WHERE key='ua.qoj'").get() as { value: string }).value, ua);
 
-    // ③ 字段总数 = 2（不再单列 UOJSESSID 输入框）
+    // ③ 字段总数 = 3（两个 Cookie 按名分框 + 一个 configOnly 的 UA）
     const { cookieFieldsOf } = await import('../../shared/src/index.ts');
-    assert.deepEqual(cookieFieldsOf('qoj').map((f: { key: string }) => f.key), ['clearance', 'ua']);
+    assert.deepEqual(cookieFieldsOf('qoj').map((f: { key: string }) => f.key), ['uojsessid', 'clearance', 'ua']);
 
-    // ④ 只提交 UOJSESSID（已移除的字段）应被拒绝，避免前端残留旧字段名时静默写坏数据
+    // ④ 只提交旧键名 `session`（历史残留，已改名 uojsessid）应被拒绝，避免前端残留旧字段名时静默写坏数据
     const bad = await saveFields(base, 'qoj', { session: 'sess-only' });
     assert.equal(bad.status, 400);
     assert.match(bad.body.error ?? '', /未知 Cookie 字段/);
@@ -333,8 +338,8 @@ test('cookieFields: QOJ 两字段（完整 Cookie + 浏览器 UA）单字段增�
 
 test('cookieFields: 只补填一项时另一项保留（不再被空值覆盖）', async () => {
   await withServer(async (db, base) => {
-    // 用洛谷双字段（_uid + __client_id）做这条回归：QOJ 已简化为「整段 Cookie + UA」两字段，
-    // 其中整段 Cookie 本身就是 raw 透传，不适合验证「逐项合并」。
+    // 用洛谷双字段（_uid + __client_id）做这条回归：QOJ 的两项分别由独立输入框提交，
+    // 逐项合并语义与洛谷一致，这里用洛谷即可覆盖同一段服务端逻辑。
     await saveFields(base, 'luogu', { clientId: 'abc-123' });
     assert.equal(
       (db.prepare("SELECT value FROM settings WHERE key='cookie.luogu'").get() as { value: string }).value,
@@ -364,7 +369,7 @@ test('cookieFields: configOnly 字段（浏览器 UA）单独存储且不出现�
     assert.equal(r.body.hasUa, true);
 
     const cookie = (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value;
-    assert.equal(cookie, 'cf_clearance=cf-tok; UOJSESSID=sess-token', 'UA 不得写进 Cookie 头');
+    assert.equal(cookie, 'UOJSESSID=sess-token; cf_clearance=cf-tok', 'UA 不得写进 Cookie 头');
     const stored = (db.prepare("SELECT value FROM settings WHERE key='ua.qoj'").get() as { value: string }).value;
     assert.equal(stored, ua);
 
@@ -380,7 +385,7 @@ test('cookieFields: configOnly 字段（浏览器 UA）单独存储且不出现�
     assert.equal(afterClear, undefined);
     assert.equal(
       (db.prepare("SELECT value FROM settings WHERE key='cookie.qoj'").get() as { value: string }).value,
-      'cf_clearance=cf-tok; UOJSESSID=sess-token',
+      'UOJSESSID=sess-token; cf_clearance=cf-tok',
     );
   });
 });
@@ -404,7 +409,7 @@ test('cookieFields: 显式空串清空单个 Cookie 项；未知字段被拒绝'
     assert.equal(bad.status, 400);
     assert.match(bad.body.error ?? '', /未知 Cookie 字段/);
 
-    // 已移除的 UOJSESSID 独立字段 → 400（防止前端残留旧字段名写坏数据）
+    // 旧键名 `session`（UOJSESSID 已改名为 uojsessid）→ 400（防止前端残留旧字段名写坏数据）
     const legacy = await saveFields(base, 'qoj', { session: 'sess-only' });
     assert.equal(legacy.status, 400);
     assert.match(legacy.body.error ?? '', /未知 Cookie 字段/);

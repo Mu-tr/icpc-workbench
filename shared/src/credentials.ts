@@ -54,22 +54,21 @@ export const COOKIE_FIELDS: Partial<Record<PlatformId, CookieFieldDef[]>> = {
     { key: 'csrftoken', cookieName: 'csrftoken', label: 'CSRF 令牌', placeholder: '粘贴 csrftoken 的值' },
   ],
   // 计蒜客：登录态分散在 s 与 JSKUSS 两项会话 Cookie（实测站点共 4 项：acw_tc 为 CDN 项、
-  // XSRF-TOKEN 供 POST 使用，均不需要）；两项都建议填写，校验不过通常是缺 JSKUSS
+  // XSRF-TOKEN 供 POST 使用，均不需要）；两项都建议填写，校验不过通常是缺 JSKUSS。
+  // 保持原有的 raw 口径（用户已在使用的工作流，本次不动）。
   jisuanke: [
     { key: 's', cookieName: 's', label: '会话（必需）', placeholder: '粘贴 s 的值', password: true, raw: true },
     { key: 'jskuss', cookieName: 'JSKUSS', label: '登录会话（必需）', placeholder: '粘贴 JSKUSS 的值', password: true, raw: true },
   ],
-  // QOJ：登录会话 UOJSESSID 为必需；站点前置 Cloudflare 托管挑战，
-  // cf_clearance 为浏览器签发的通行凭据（约 30 分钟有效且与浏览器 UA/IP 绑定），
-  // 值较长且含特殊字符，按整段粘贴处理；被挑战时还必须配套填写同一浏览器的 UA。
-  // QOJ：**两个字段即够，且都不可省**（2026-09 逐项实测）：
-  //  ① 整段 Cookie —— 必须含 cf_clearance（Cloudflare 通行凭据，逐字节与签发浏览器绑定），
-  //     同时含 UOJSESSID（登录会话）。缺 cf_clearance → 被挑战；缺 UOJSESSID → 302 跳登录。
-  //     OptanonConsent / uoj_locale / uoj_remember_token / uoj_username 等展示项实测无影响，不必复制。
-  //  ② 浏览器 User-Agent —— 缺它时 cf_clearance 必然失效（实测：不带 UA 100% 被 Cloudflare 拦截）。
-  // 因此不再单列 UOJSESSID 输入框：整段粘贴已包含它，单列只会造成「到底要不要都填」的困惑。
+  // QOJ：两项 Cookie 按名分框 + 浏览器 UA，服务端合并（用户不必手工拼 Cookie 串）。
+  //  ① UOJSESSID —— 登录会话；缺它 → 站点 302 跳登录页。
+  //  ② cf_clearance —— Cloudflare 通行凭据（逐字节与签发浏览器绑定、约 30 分钟有效）；缺它 → 被挑战。
+  //  ③ 浏览器 User-Agent —— configOnly（不进 Cookie 头，由适配器按 ua.qoj 单独注入）；
+  //     实测不带 UA 时 cf_clearance 必然失效。
+  //  值较长且含 . _ - 等字符但**不含 ; 与空格**，按名分框即可；整段粘贴亦容忍（自动分派名字）。
   qoj: [
-    { key: 'clearance', cookieName: 'cf_clearance', label: 'qoj.ac 完整 Cookie（必需）', placeholder: 'F12 → Network → 任意 qoj.ac 请求 → Request Headers 里 Cookie 的整段值（含 cf_clearance 与 UOJSESSID）', password: true, raw: true },
+    { key: 'uojsessid', cookieName: 'UOJSESSID', label: '登录会话（必需）', placeholder: '粘贴 UOJSESSID 的值（整段 Cookie 亦可，会自动分派）', password: true },
+    { key: 'clearance', cookieName: 'cf_clearance', label: 'Cloudflare 通行凭据（必需）', placeholder: '粘贴 cf_clearance 的值（整段 Cookie 亦可，会自动分派）', password: true },
     { key: 'ua', cookieName: '__ua', label: '浏览器 User-Agent（必需）', placeholder: '在 qoj.ac 页 Console 输入 navigator.userAgent 回车，整行粘贴', configOnly: true },
   ],
 };
@@ -142,11 +141,28 @@ export function mergeCookieFields(
   defs: readonly CookieFieldDef[],
   patches: Record<string, string>,
 ): string {
+  // 先做「整段粘贴分派」：某个框里贴进了整段 Cookie 串（含其它字段的 name=value）时，
+  // 把里面属于别的字段的值分派过去——这样用户只需把 F12 里的整段 Cookie 粘到任意一框，
+  // 各字段自动落位（显式填写的字段优先，不被分派覆盖；空串仍表示显式清空该项）。
+  const effective: Record<string, string> = { ...patches };
+  for (const value of Object.values(patches)) {
+    const blob = String(value ?? '').trim().replace(/^cookie:\s*/i, '');
+    if (!blob.includes(';')) continue; // 单项值不可能是「整段」，无需分派
+    for (const def of defs) {
+      // 只分派给「按名分框」的普通字段：raw 框（整段透传语义）不参与分派——
+      // 否则 raw 框的整段内容会被当成其它字段的值注入，与它的透传语义冲突（出现重复项）。
+      if (def.configOnly || def.raw || effective[def.key] !== undefined) continue;
+      if (!blob.includes(`${def.cookieName}=`)) continue;
+      const v = cookieFieldValue(blob, def.cookieName);
+      if (v) effective[def.key] = v;
+    }
+  }
+
   const out: string[] = [];
   for (const def of defs) {
     // configOnly 字段（浏览器 UA）不属于 Cookie 头，由适配器单独注入；跳过以免被拼进来
     if (def.configOnly) continue;
-    const patch = patches[def.key];
+    const patch = effective[def.key];
     if (patch !== undefined) {
       const item = buildCookieItem(def, patch);
       if (item) out.push(item);
@@ -154,9 +170,10 @@ export function mergeCookieFields(
     }
     // 未修改：保留已保存的值。
     // raw 字段保存的就是**整段 Cookie 头**（含多项），必须原样透传——
-    // 若走 buildCookieItem 会把它按 `name=value` 重新解析，丢掉第二项起的内容
-    // （历史缺陷：只补填 UA 时 "cf_clearance=X; UOJSESSID=Y" 被截断成 "cf_clearance=X"，
-    //  登录态随之失效，平台显示未连接）。
+    // 若走 buildCookieItem 会把它按 `name=value` 重新解析，丢掉第二项起的内容。
+    // ⚠️ 该分支只在「每个平台至多一个 raw 框」时成立：两个 raw 框时未修改的那项会把整段已存头
+    // 重复推入（历史缺陷：计蒜客 s/JSKUSS 双 raw 时只改 s → "s=NEW; s=OLD; JSKUSS=OLD"）；
+    // 因此两 Cookie 的平台一律按名分框（见 COOKIE_FIELDS 注释），本分支当前无平台字段命中。
     if (def.raw) {
       const kept = storedHeader.trim();
       if (kept) out.push(kept);

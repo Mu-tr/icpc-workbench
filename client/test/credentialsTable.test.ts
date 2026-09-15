@@ -41,13 +41,19 @@ test('客户端不得再定义 Cookie 字段表（唯一真相在 shared/src/cre
   )
 })
 
-test('QOJ 字段口径：整段 Cookie + 浏览器 UA 两项，不得再出现已移除的 session 字段', () => {
-  const keys = cookieFieldsOf('qoj').map((d) => d.key)
-  assert.deepEqual(keys, ['clearance', 'ua'])
-  assert.ok(!keys.includes('session'), 'session（单列 UOJSESSID）已在共享表中移除，客户端不得再提交')
-  // 整段 Cookie 必须按 raw 透传（含 cf_clearance 与 UOJSESSID 多项），UA 为仅配置项不进 Cookie 头
-  assert.equal(cookieFieldsOf('qoj')[0]!.raw, true)
-  assert.deepEqual(cookieOnlyFieldsOf('qoj').map((d) => d.key), ['clearance'])
+test('QOJ 字段口径：两项 Cookie 按名分框（UOJSESSID / cf_clearance）+ 浏览器 UA', () => {
+  const defs = cookieFieldsOf('qoj')
+  assert.deepEqual(defs.map((d) => d.key), ['uojsessid', 'clearance', 'ua'])
+  // 两个 Cookie 都是「按名分框」的普通字段——不使用 raw 透传（raw 的整段保留语义假定每平台只有一个 raw 框）
+  assert.ok(!defs.some((d) => d.raw === true), 'QOJ 两项 Cookie 不得用 raw：双 raw 会让未修改项把整段已存头重复推入')
+  assert.deepEqual(cookieOnlyFieldsOf('qoj').map((d) => d.key), ['uojsessid', 'clearance'])
+  // 已移除的旧键名不得复活（服务端会以「未知 Cookie 字段」拒绝）
+  assert.ok(!defs.some((d) => d.key === 'session'))
+})
+
+test('计蒜客两个 Cookie 也按名分框（本次不改其 raw 口径）', () => {
+  assert.deepEqual(cookieFieldsOf('jisuanke').map((d) => d.key), ['s', 'jskuss'])
+  assert.deepEqual(cookieOnlyFieldsOf('jisuanke').map((d) => d.cookieName), ['s', 'JSKUSS'])
 })
 
 test('各平台字段定义自洽：key 唯一、cookieName 非空', () => {
