@@ -246,11 +246,12 @@ export default function Problems() {
       const r = await post<BuildResp>('/api/knowledge/build', body)
       if (r.l1) {
         // 口径：ruleMissed 只数「规则未命中」，与 gapReport 的词表缺口不是同一集合
-        // （规则没打中的题仍可能被题源标签完整标注），故括注与 gen-knowledge.ts 同词。
+        // （规则没打中的题仍可能被题源标签完整标注）。这条口径只留在代码注释里，
+        // 用户可见文案保持简洁；与 gen-knowledge.ts 的同名计数用词一致。
         // ?? 0：新版前端可能连到旧版 SEA 服务端，该字段尚不存在，直接插值会显示 undefined。
         message.success(
           `L1 扫描 ${r.l1.scanned} 题：规则命中落库 ${r.l1.annotated}，题源标签映射 ${r.l1.tagAnnotated}，` +
-            `规则未命中（口径≠词表缺口）${r.l1.ruleMissed ?? 0}` +
+            `规则未命中 ${r.l1.ruleMissed ?? 0}` +
             (r.l1.skippedManual ? `，跳过人工标注 ${r.l1.skippedManual}` : ''),
         )
       }
