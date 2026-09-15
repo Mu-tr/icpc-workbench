@@ -6,6 +6,7 @@ import {
   difficultyFields,
   nativeDifficultyLabel,
   parseNativeDifficulty,
+  parseNowcoderScore,
   toCfRating,
 } from '../../shared/src/difficulty.ts';
 
@@ -73,6 +74,18 @@ test('difficulty: difficultyFields 同时产出映射值与原生原文', () => 
   // 未知难度：只有标度，没有值（保持既有"缺 difficulty 键"的语义）
   assert.deepEqual(difficultyFields('atcoder', null), { difficultyScale: 'atcoder-kenkoooo-irt' });
   assert.equal('difficulty' in difficultyFields('atcoder', null), false);
+});
+
+test('difficulty: 牛客难度分原文校验（两个读取方共用的唯一规则）', () => {
+  assert.equal(parseNowcoderScore('1500'), 1500);
+  assert.equal(parseNowcoderScore(700), 700);
+  assert.equal(parseNowcoderScore(' 1200 '), 1200);
+  assert.equal(parseNowcoderScore('1049'), null); // 离网值（通过数列）
+  assert.equal(parseNowcoderScore('100'), null); // 低于域下界（通过数 100）
+  assert.equal(parseNowcoderScore('5000'), null); // 越界
+  assert.equal(parseNowcoderScore(''), null);
+  assert.equal(parseNowcoderScore('abc'), null);
+  assert.equal(parseNowcoderScore(null), null);
 });
 
 test('difficulty: cfRatingTitle 边界', () => {

@@ -104,6 +104,29 @@ export function nowcoderScoreToRating(raw: number): number | null {
   return clampRating(raw);
 }
 
+/** 牛客难度分取值域：实测恒为 100 的倍数，落在 200..4000（CF 风格分值网格） */
+export const NOWCODER_SCORE_MIN = 200;
+export const NOWCODER_SCORE_MAX = 4000;
+
+/**
+ * 牛客难度分**原文校验**（题库列表页与搜索结果页是同一列，两个读取方必须共用这一条规则，
+ * 否则同一行会对一方「未知」、对另一方「有效」）。
+ * 只接受 200..4000 内、100 的倍数的纯数字整数；空值、非数字、离网值（如通过数列的 1049）、
+ * 越界值一律 → null（未知一律 null，不猜）。离网难度被丢成未知是可接受代价：宁可未知，不可臆造。
+ */
+export function parseNowcoderScore(raw: unknown): number | null {
+  const text =
+    typeof raw === 'number' && Number.isFinite(raw)
+      ? String(raw)
+      : typeof raw === 'string'
+        ? raw.trim()
+        : '';
+  if (!/^\d+$/.test(text)) return null;
+  const n = Number(text);
+  if (n < NOWCODER_SCORE_MIN || n > NOWCODER_SCORE_MAX || n % 100 !== 0) return null;
+  return n;
+}
+
 function toNumber(raw: unknown): number | null {
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
   if (typeof raw === 'string') {

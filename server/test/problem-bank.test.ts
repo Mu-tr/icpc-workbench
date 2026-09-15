@@ -437,6 +437,48 @@ test('牛客：无标签行不产生标签，脏难度（非 100 倍数）视作
   assert.deepEqual(rows[0].tags, []);
 });
 
+test('牛客：难度单元格为空时取未知，绝不顺延到相邻列（通过数不得被伪造成难度）', () => {
+  // 通过数恰为 100 的倍数（100/200 都常见）：若扫描顺延到相邻列就会凭空造出难度
+  const html = `<tr data-problemId="2"><td><a href="/acm/problem/2">NC2</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/2">空难度题</a></td>
+    <td></td><td>100</td><td></td></tr>
+    <tr data-problemId="3"><td><a href="/acm/problem/3">NC3</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/3">空难度题二</a></td>
+    <td> </td><td>200</td><td></td></tr>`;
+  const rows = parseNcBankRows(html);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].difficulty, null);
+  assert.equal(rows[0].nativeScore, null);
+  assert.equal(rows[1].difficulty, null);
+  assert.equal(rows[1].nativeScore, null);
+});
+
+test('牛客：没有标题单元格时不猜难度（数字题号列不得被当作难度）', () => {
+  // 行内无 class="title" 锚点 → 位置关系无从判断 → 难度未知（不得从 tds[0] 起顺延：
+  // 修复前 tds[0] 的数字题号 400 会被当成难度分 → difficulty 800）。
+  // 该行带一个算法标签，避免被「标题与标签皆空 → 跳过」规则吞掉，从而能断言难度为 null。
+  const html = `<tr data-problemId="400"><td>400</td><td class="fn-right" colspan="2">无标题锚点
+    <a class="tag-label js-tag">模拟</a></td><td>1500</td><td>245</td><td></td></tr>`;
+  const rows = parseNcBankRows(html);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].title, '');
+  assert.equal(rows[0].difficulty, null);
+  assert.equal(rows[0].nativeScore, null);
+  assert.deepEqual(rows[0].tags, ['模拟']);
+});
+
+test('牛客：离网难度（1049）与越界值一律未知（与回填路径共用同一校验器）', () => {
+  const row = (diff: string): string => `<tr data-problemId="9"><td><a href="/acm/problem/9">NC9</a></td>
+    <td class="fn-right" colspan="2"><a class="title" href="/acm/problem/9">离网题</a></td>
+    <td> ${diff} </td><td>245</td><td></td></tr>`;
+  for (const diff of ['1049', '100', '5000']) {
+    const rows = parseNcBankRows(row(diff));
+    assert.equal(rows[0].difficulty, null, `难度分 ${diff} 应为未知`);
+    assert.equal(rows[0].nativeScore, null);
+  }
+  assert.equal(parseNcBankRows(row('1500'))[0].difficulty, 1500); // 网格值正常解析
+});
+
 test('luogu bank: luoguTypes 多类型依次拉取（默认仅 P）', async () => {
   const seen: string[] = [];
   const fetchFn = router({

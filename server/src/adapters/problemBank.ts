@@ -1,5 +1,5 @@
 import type { PlatformId } from '../../../shared/src/index.ts';
-import { difficultyFields, toCfRating, type DifficultyScale } from '../../../shared/src/difficulty.ts';
+import { difficultyFields, parseNowcoderScore, toCfRating, type DifficultyScale } from '../../../shared/src/difficulty.ts';
 import { fetchWithChallenge } from './luogu.ts';
 import { parseJisuankeProblemTags } from './jisuanke.ts';
 import { asHttpClient, sleep, type HttpInit } from './http.ts';
@@ -258,10 +258,11 @@ export async function fetchNowcoderBank(
  * 解析牛客题库页表格行。三个必须遵守的坑：
  * 1. **先收标签、再取标题**：标签是 `class="tag-label"` 的 `<a>`，标题是 `class="title"` 的 `<a>`；
  *    若把整行文本抠一遍再 trim，标签文本会并进标题（本项目已踩过一次）。
- * 2. **不按绝对列下标取难度**：标题单元格带 `colspan="2"`，行内单元格数量不固定；
- *    行本身用 `data-problemId` 定位，难度取「标题单元格之后的第一个纯数字单元格」。
- * 3. **难度必须是 100 的倍数**（牛客难度分是 CF 风格分值）：不满足即视为脏数据/缺失 → null，
- *    并且**不继续向后找**——否则难度为空的行会误取到后面的通过数。
+ * 2. **难度只认「标题单元格的下一个单元格」**：标题单元格带 `colspan="2"`，行内单元格数量不固定，
+ *    但难度列恒紧跟在标题单元格之后。没有标题单元格 → 难度未知（不得从 `tds[0]` 之类的位置顺延）；
+ *    绝**不**向后继续扫描找数字——否则难度为空的行会取到通过数（伪造成难度）。
+ * 3. **取值规则由 `parseNowcoderScore` 统一裁决**（200..4000、100 的倍数；详见 shared/src/difficulty.ts）：
+ *    空值 / 非纯数字 / 离网值（通过数列）/ 越界值 → 未知，不猜。
  */
 export function parseNcBankRows(html: string): NcBankRow[] {
   const rows: NcBankRow[] = [];
@@ -278,9 +279,8 @@ export function parseNcBankRows(html: string): NcBankRow[] {
       .filter(Boolean);
     const title = strip(/class="title"[^>]*>([\s\S]*?)<\/a>/.exec(cell)?.[1] ?? '');
     const titleIdx = tds.findIndex((t) => /class="title"/.test(t));
-    const diffCell = tds.slice(titleIdx + 1).find((t) => /^\d+$/.test(strip(t)));
-    const diffNum = diffCell === undefined ? null : Number(strip(diffCell));
-    const nativeScore = diffNum !== null && diffNum % 100 === 0 ? diffNum : null;
+    const diffCell = titleIdx >= 0 ? tds[titleIdx + 1] : undefined;
+    const nativeScore = parseNowcoderScore(diffCell === undefined ? null : strip(diffCell));
     // 题号行里标题与标签都为空时跳过（分页尾部可能夹带空行/模板行）
     if (title === '' && tags.length === 0) continue;
     rows.push({

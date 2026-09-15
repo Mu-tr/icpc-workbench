@@ -248,23 +248,35 @@ const NC_ROW_HTML = `
     <a href="javascript:void(0);" class="tag-label js-tag" data-id="1">构造</a>
     <a href="javascript:void(0);" class="tag-label js-tag" data-id="2">贪心</a>
   </td>
-  <td> 1049 </td><td>100</td><td></td>
+  <td> 1500 </td><td>100</td><td></td>
 </tr>`;
 
 test('parseNcSearchRow: separates title/tags/difficulty', () => {
   const info = parseNcSearchRow(NC_ROW_HTML, '16640');
   assert.ok(info);
-  assert.equal(info!.difficulty, 1049);
+  assert.equal(info!.difficulty, 1500); // 站点难度分网格值（200..4000、100 的倍数）
+  assert.equal(info!.nativeDifficulty, '1500');
   assert.equal(info!.title, '[NOIP2007]纪念品分组');
   assert.deepEqual(info!.tags, ['构造', '贪心']);
 });
 
 test('parseNcSearchRow: no hit returns null; no-difficulty row returns null difficulty', () => {
   assert.equal(parseNcSearchRow('<html></html>', '99999'), null);
-  const noDiff = NC_ROW_HTML.replace('<td> 1049 </td>', '<td> </td>');
+  const noDiff = NC_ROW_HTML.replace('<td> 1500 </td>', '<td> </td>');
   const info = parseNcSearchRow(noDiff, '16640');
   assert.ok(info);
   assert.equal(info!.difficulty, null);
+});
+
+test('parseNcSearchRow: 离网/越界难度分一律未知（与题库读取方共用同一校验器）', () => {
+  // 通过数列的 1049 这类离网值过去会被本读取方当成有效难度（题库读取方却当未知），
+  // 而 backfill(3) 又会覆盖 bank(1) → 同一行两套结论。统一校验器后两边一致为「未知」。
+  for (const diff of ['1049', '100', '5000']) {
+    const info = parseNcSearchRow(NC_ROW_HTML.replace('<td> 1500 </td>', `<td> ${diff} </td>`), '16640');
+    assert.ok(info);
+    assert.equal(info!.difficulty, null, `难度分 ${diff} 应为未知`);
+    assert.equal(info!.nativeDifficulty, null);
+  }
 });
 
 // ---------- 标题清洗 ----------
@@ -321,7 +333,7 @@ test('backfill: fills nowcoder difficulty + repairs polluted title/empty tags', 
   insertProblem('codeforces', '1662A', 'A', null, []);
 
   const fetchFn = router({
-    'keyword=16640': () => ncListPage({ id: '16640', title: '纪念品分组', diff: '1049', tags: ['构造', '排序', '贪心'] }),
+    'keyword=16640': () => ncListPage({ id: '16640', title: '纪念品分组', diff: '1500', tags: ['构造', '排序', '贪心'] }),
     'keyword=50039': () => ncListPage({ id: '50039', title: 'kotori和气球', diff: '800', tags: ['数学'] }),
     'keyword=280771': () => ncListPage({ id: '280771', title: '小红的好数组', diff: '700', tags: ['暴力'] }),
   });
@@ -334,7 +346,7 @@ test('backfill: fills nowcoder difficulty + repairs polluted title/empty tags', 
   assert.equal(nc.failed, 0);
 
   const row = db.prepare("SELECT difficulty, title, tags FROM problems WHERE platform='nowcoder' AND problem_key='16640'").get() as any;
-  assert.equal(row.difficulty, 1049);
+  assert.equal(row.difficulty, 1500);
   assert.equal(row.title, '纪念品分组');
   assert.deepEqual(JSON.parse(row.tags), ['构造', '排序', '贪心']);
   // CF 不动

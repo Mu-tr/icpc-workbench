@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PlatformId } from '../../../shared/src/index.ts';
-import { difficultyFields, type DifficultyScale } from '../../../shared/src/difficulty.ts';
+import { difficultyFields, parseNowcoderScore, type DifficultyScale } from '../../../shared/src/difficulty.ts';
 import type { Db } from '../db/index.ts';
 import { fetchWithChallenge } from '../adapters/luogu.ts';
 import { parseJisuankeProblemTags } from '../adapters/jisuanke.ts';
@@ -156,8 +156,9 @@ export function parseNcSearchRow(html: string, problemKey: string): BackfillInfo
     .filter(Boolean);
   const tds = [...m[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((x) => x[1]);
   const diffText = (tds[2] ?? '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-  // 难度分为 CF 风格分值（约 200-3800）；过小值（演示题脏数据）视为无效
-  const nativeScore = /^\d+$/.test(diffText) && Number(diffText) >= 100 ? Number(diffText) : null;
+  // 难度分取值规则与题库路径**共用同一个校验器**（200..4000、100 的倍数；离网/越界/空值 → 未知），
+  // 否则同一行会对一方「未知」、对另一方「有效」，而 backfill(3) 的优先级会盖掉 bank(1) 的结果
+  const nativeScore = parseNowcoderScore(diffText);
   const mapped = difficultyFields('nowcoder', nativeScore);
   return {
     problemKey,
