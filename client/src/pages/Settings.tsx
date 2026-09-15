@@ -34,6 +34,7 @@ import { saveUrlAsFile } from '../download'
 import PlatformTag from '../components/PlatformTag'
 import { get, post } from '../api'
 import { assembleCookie as assembleCookieHeader, buildCookieItem, extractCookieValue, type CookieFieldDef } from '../cookies'
+import { pct } from '../ui'
 import { openExternal } from '../externalLinks'
 import { useTheme, type ThemePreference } from '../themeContext'
 import type { KnowledgeCompareReport, KnowledgeCoverage } from '../../../shared/src/index.ts'
@@ -1002,7 +1003,7 @@ function KnowledgePipelineCard() {
         <List.Item>
           <span style={{ flex: 1 }}>{it.tag}</span>
           <span className="mono" style={{ color: '#8993a2' }}>
-            {it.attempts} 提交 · AC {(it.acRate * 100).toFixed(0)}% · 差 {(it.gap * 100).toFixed(0)}%
+            {it.attempts} 提交 · AC {pct(it.acRate)} · 差 {pct(it.gap)}
           </span>
         </List.Item>
       )}
@@ -1061,7 +1062,7 @@ function KnowledgePipelineCard() {
                   style={{ marginTop: 12 }}
                   type="info"
                   showIcon
-                  message={`未覆盖桶：${compare.uncovered.attempts} 次提交所属题目无达标知识点标注（统计端回退题源 tag），AC 率 ${(compare.uncovered.acRate * 100).toFixed(1)}%。跑管线可提高覆盖率。`}
+                  message={`未覆盖桶：${compare.uncovered.attempts} 次提交所属题目无达标知识点标注（统计端回退题源 tag），AC 率 ${pct(compare.uncovered.acRate)}。跑管线可提高覆盖率。`}
                 />
               )}
             </>

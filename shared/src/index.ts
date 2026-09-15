@@ -182,9 +182,15 @@ export interface WeaknessItem {
   tag: string;
   attempts: number;
   ac: number;
+  /**
+   * 百分数（14.3 表示 14.3%），与后端 `analysis/stats.rate()` 同量纲。
+   * **不是** 0–1 比例：消费方请用 `client/src/ui.ts` 的 `pct()` 格式化，
+   * 不要再乘 100（历史缺陷：设置页双口径对比弹窗乘了第二次，显示成 1430%）。
+   */
   acRate: number;
+  /** 同上：百分数（45.6 表示 45.6%） */
   avgAcRate: number;
-  /** avg - self，正值表示弱于总体平均 */
+  /** avg - self，正值表示弱于总体平均；单位为**百分点**（31.3 = 高 31.3 个百分点） */
   gap: number;
   /**
    * 排序得分 = gap × 概念信息量权重（见 knowledge/conceptStats.ts）。
@@ -199,7 +205,9 @@ export interface DifficultyWeakness {
   bucket: string;
   attempts: number;
   ac: number;
+  /** 百分数（14.3 = 14.3%），非 0–1 比例 */
   acRate: number;
+  /** 百分点差值（31.3 = 高 31.3 个百分点） */
   gap: number;
 }
 
@@ -476,7 +484,7 @@ export interface KnowledgeCompareReport {
   threshold: number;
   tagCaliber: WeaknessItem[];
   knowledgeCaliber: WeaknessItem[];
-  /** 知识点口径中因无标注回退 tag 的「未覆盖」桶统计（null = 全部有标注） */
+  /** 知识点口径中因无标注回退 tag 的「未覆盖」桶统计（null = 全部有标注）；acRate 为百分数（43.3 = 43.3%） */
   uncovered: { attempts: number; ac: number; acRate: number } | null;
 }
 

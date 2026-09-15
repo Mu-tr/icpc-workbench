@@ -64,6 +64,19 @@ export function formatDifficulty(
   return nativeLabel && platformName ? `${difficulty} · ${platformName} ${nativeLabel}` : String(difficulty)
 }
 
+/**
+ * 百分数展示的唯一格式化入口。
+ *
+ * 约定：后端 `server/src/analysis/stats.ts` 的 `rate()` 以及由它派生的
+ * `acRate` / `avgAcRate` / `gap`（`analysis/weakness.ts`）单位都是**百分数**
+ * ——`14.3` 表示 14.3%，`gap` 是百分点差值。因此本函数**只补 '%'、不做比例换算**；
+ * 曾出现的缺陷正是消费者误当 0–1 比例再乘 100（显示成 1430% / 4330.0%）。
+ * 使用方一律走这里，避免再次各写一份。
+ */
+export function pct(v: number): string {
+  return `${Math.round(v * 10) / 10}%`
+}
+
 /** AC 率文本配色（表格 / 统计用） */
 export function rateColor(rate: number): string {
   if (rate >= 55) return '#69d7a5'

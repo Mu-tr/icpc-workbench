@@ -19,6 +19,7 @@ import {
 import { StarOutlined, SearchOutlined, TrophyOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import PageHeader from '../components/PageHeader'
+import { pct } from '../ui'
 import { get } from '../api'
 import { MASTERY_LEVEL_LABELS } from '../types'
 import type { MasteryPoint, MasteryReport } from '../types'
@@ -69,10 +70,9 @@ const PREV_LEVELS_KEY = 'mastery-levels-prev'
 /** localStorage：用户已点开看过的「新达成」知识点 */
 const NEWLY_SEEN_KEY = 'mastery-newly-seen'
 
-/** acRate / gap 与后端 rate() 同量纲：百分数（45.3 = 45.3%） */
-function pct(v: number): string {
-  return `${Math.round(v * 10) / 10}%`
-}
+// acRate / gap 的单位约定（百分数，非比例，与后端 rate() 同量纲）与格式化统一在
+// client/src/ui.ts 的 pct()：这里不再各留一份实现——历史上正是"各写一份"让设置页把
+// 已经是百分数的 acRate/gap 又乘了一次 100，显示成 1430% / 4330.0%。
 
 /** 读取 localStorage 中的 JSON（不可用时返回 null，调用方静默降级） */
 function readJson<T>(key: string): T | null {
