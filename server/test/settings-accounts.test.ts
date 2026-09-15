@@ -220,7 +220,8 @@ test('GET / returns sync.maxSubmissions default; POST /sync saves and validates'
       body: JSON.stringify({ maxSubmissions: 300 }),
     });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { maxSubmissions: 300 });
+    // 响应带完整的 sync 设置（Task 8 起含 autoContinueRounds，未传时保持默认 6）
+    assert.deepEqual(await res.json(), { maxSubmissions: 300, autoContinueRounds: 6 });
     // 持久化到 settings 表
     const row = db.prepare("SELECT value FROM settings WHERE key = 'sync.maxSubmissions'").get() as { value: string };
     assert.equal(row.value, '300');

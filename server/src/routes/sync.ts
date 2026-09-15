@@ -5,6 +5,7 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { syncPlatform } from '../adapters/sync.ts';
+import { cancelAutoContinue, listAutoContinue } from '../adapters/syncScheduler.ts';
 
 interface SyncRunRow {
   id: number;
@@ -74,7 +75,8 @@ export function syncRoutes(db: Db): Router {
     res.json(rows.map(toSyncRun));
   });
 
-  // GET /api/sync/status → 每个绑定平台的健康状态与最近一次同步摘要
+  // GET /api/sync/status → 每个绑定平台的健康状态、最近一次同步摘要与后台续拉状态
+  // autoContinue：该平台的待执行续拉（round/maxRounds/nextAt/running），无排期时为 null
   r.get('/status', (_req, res) => {
     const accounts = db
       .prepare(
@@ -84,18 +86,23 @@ export function syncRoutes(db: Db): Router {
     const latestStmt = db.prepare(
       'SELECT * FROM sync_runs WHERE user_id = ? AND platform = ? ORDER BY started_at DESC, id DESC LIMIT 1',
     );
+    const autoContinues = listAutoContinue();
     const statuses = PLATFORMS
       .filter((p) => accounts.some((a) => a.platform === p.id))
       .map((p) => {
-        const latest = toSyncRun(latestStmt.get(DEFAULT_USER_ID, p.id) as unknown as SyncRunRow);
+        // 从未同步过的平台没有 sync_runs 行：`get()` 返回 undefined，必须先判空再转换，
+        // 否则 toSyncRun(undefined) 直接抛异常 → 整个 /status 变成 500（前端同步中心白屏）
+        const latestRow = latestStmt.get(DEFAULT_USER_ID, p.id) as unknown as SyncRunRow | undefined;
+        const latest = latestRow === undefined ? null : toSyncRun(latestRow);
         return {
           platform: p.id,
           platformName: p.name,
           enabled: accounts.find((a) => a.platform === p.id)?.enabled === 1,
           handle: accounts.find((a) => a.platform === p.id)?.handle ?? '',
           lastSyncAt: accounts.find((a) => a.platform === p.id)?.last_sync_at ?? null,
-          status: deriveStatus(latest),
+          status: deriveStatus(latest ?? undefined),
           latestRun: latest,
+          autoContinue: autoContinues.find((s) => s.platform === p.id) ?? null,
         };
       });
     res.json({ statuses });
@@ -153,6 +160,17 @@ export function syncRoutes(db: Db): Router {
     }
     res.json({ results });
   }));
+
+  // POST /api/sync/auto-continue/cancel  body: { platform }
+  // 取消该平台的后台续拉（用户手动同步抢占、或明确不想再等），幂等：无排期时 cancelled=false。
+  // 必须注册在 POST /:platform 之前（否则会被当成 platform='auto-continue' 的单段路径处理）。
+  r.post('/auto-continue/cancel', (req, res) => {
+    const { platform } = req.body ?? {};
+    if (!PLATFORMS.some((p) => p.id === platform)) {
+      return res.status(400).json({ error: `platform 非法: ${String(platform)}` });
+    }
+    res.json({ ok: true, cancelled: cancelAutoContinue(platform as PlatformId) });
+  });
 
   // POST /api/sync/:platform  body: { handle, days? }
   // days 为正整数时走「仅同步最近 N 天」窗口模式：补充拉取漏掉的历史，不改账号同步状态。

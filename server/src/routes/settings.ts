@@ -16,6 +16,7 @@ import {
   MIN_SYNC_MAX_SUBMISSIONS,
   MAX_SYNC_MAX_SUBMISSIONS,
 } from '../adapters/sync.ts';
+import { getAutoContinueRounds } from '../adapters/syncScheduler.ts';
 import { chatUrl } from '../ai/provider.ts';
 
 const DEFAULT_REMINDER_TIME = '20:00';
@@ -74,9 +75,17 @@ export function readContestReminder(db: Db): { enabled: boolean; minutesBefore: 
 }
 
 const DEFAULT_SYNC_MAX_SUBMISSIONS = 500;
+/** 续拉轮数上限取值域（0 = 关闭后台续拉）；读侧校验与写入校验共用这两个边界 */
+const MIN_SYNC_AUTO_CONTINUE_ROUNDS = 0;
+const MAX_SYNC_AUTO_CONTINUE_ROUNDS = 50;
 
-/** 读取分批同步设置：单次同步新增上限（防封号），越界回退默认值 */
-export function readSyncSettings(db: Db): { maxSubmissions: number } {
+/**
+ * 读取分批同步设置：单次同步新增上限（防封号）+ 后台续拉轮数上限。
+ * - maxSubmissions 越界回退默认值；
+ * - autoContinueRounds 直接复用调度器的 `getAutoContinueRounds`（同一个 key、同一套
+ *   0–50 校验、同一个默认 6）—— 读侧与真正执行续拉的调度器不可能给出不同答案。
+ */
+export function readSyncSettings(db: Db): { maxSubmissions: number; autoContinueRounds: number } {
   const row = db
     .prepare('SELECT value FROM settings WHERE key = ?')
     .get('sync.maxSubmissions') as { value: string } | undefined;
@@ -86,6 +95,7 @@ export function readSyncSettings(db: Db): { maxSubmissions: number } {
       Number.isInteger(n) && n >= MIN_SYNC_MAX_SUBMISSIONS && n <= MAX_SYNC_MAX_SUBMISSIONS
         ? n
         : DEFAULT_SYNC_MAX_SUBMISSIONS,
+    autoContinueRounds: getAutoContinueRounds(db),
   };
 }
 
@@ -425,18 +435,37 @@ export function settingsRoutes(db: Db, config: AppConfig): Router {
     res.json({ ok: true });
   });
 
-  // POST /api/settings/sync  body: { maxSubmissions }（100–10000，单次同步新增上限，防封号）
+  // POST /api/settings/sync  body: { maxSubmissions, autoContinueRounds? }
+  // maxSubmissions：100–1500（MIN/MAX_SYNC_MAX_SUBMISSIONS），单次同步新增上限，防封号。
+  // autoContinueRounds：0–50，后台续拉轮数上限（0 = 关闭）；**省略即保留已存值**（前端只改一项时
+  // 不会把另一项重置成默认）。两项都先校验后写入：任一非法则整次请求不落库。
   r.post('/sync', (req, res) => {
-    const { maxSubmissions } = req.body ?? {};
+    const { maxSubmissions, autoContinueRounds } = req.body ?? {};
     const n = Number(maxSubmissions);
     if (!Number.isInteger(n) || n < MIN_SYNC_MAX_SUBMISSIONS || n > MAX_SYNC_MAX_SUBMISSIONS) {
       return res
         .status(400)
         .json({ error: `maxSubmissions 需为 ${MIN_SYNC_MAX_SUBMISSIONS}–${MAX_SYNC_MAX_SUBMISSIONS} 的整数` });
     }
-    db.prepare(
+    let rounds: number | undefined;
+    if (autoContinueRounds !== undefined) {
+      const v = Number(autoContinueRounds);
+      if (
+        !Number.isInteger(v) ||
+        v < MIN_SYNC_AUTO_CONTINUE_ROUNDS ||
+        v > MAX_SYNC_AUTO_CONTINUE_ROUNDS
+      ) {
+        return res.status(400).json({
+          error: `autoContinueRounds 需为 ${MIN_SYNC_AUTO_CONTINUE_ROUNDS}–${MAX_SYNC_AUTO_CONTINUE_ROUNDS} 的整数（0 = 关闭后台续拉）`,
+        });
+      }
+      rounds = v;
+    }
+    const upsert = db.prepare(
       'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-    ).run('sync.maxSubmissions', String(n));
+    );
+    upsert.run('sync.maxSubmissions', String(n));
+    if (rounds !== undefined) upsert.run('sync.autoContinueRounds', String(rounds));
     res.json(readSyncSettings(db));
   });
 
