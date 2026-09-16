@@ -86,7 +86,10 @@ async function withServer(
   const db = createDb(':memory:');
   const app = express();
   app.use(express.json());
-  app.use('/api/ai', aiRoutes(db, () => cfg));
+  app.use('/api/ai', aiRoutes(db, () => cfg, {
+    // 同上：/chat 的赛事日历一律打桩，单测不碰外网
+    fetchContests: async () => ({ contests: [], failures: {} }),
+  }));
   const srv = app.listen(0);
   await new Promise<void>((resolve) => srv.once('listening', resolve));
   const root = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
@@ -201,6 +204,8 @@ async function withChatCapture(
   app.use(
     '/api/ai',
     aiRoutes(db, () => cfg, {
+      // 赛事日历桩：/chat 默认会实时访问 5 个外部站点，单测必须打桩（否则离线/受限网络下必抖）
+      fetchContests: async () => ({ contests: [], failures: {} }),
       createProvider: () => ({
         enabled: true,
         chat: async () => '',

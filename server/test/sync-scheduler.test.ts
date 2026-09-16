@@ -30,7 +30,7 @@ function setup(runResults: boolean[]) {
   return { db, timers, runs };
 }
 
-test('续拉：默认 6 轮上限，按平台节奏排期，轮次耗尽后不再排期', async () => {
+test('续拉：默认 3 轮上限，按平台节奏排期，轮次耗尽后不再排期', async () => {
   __resetSyncSchedulerForTest();
   // runResults 按「每次实际执行的一轮」依次出队：第 1 轮仍截断 → 再排期；第 2 轮自然结束 → 清空。
   // （brief 原稿此处写 [true, true, false]，但原稿自身注释要求第 2 轮「自然结束」——第二轮取到的
@@ -38,9 +38,9 @@ test('续拉：默认 6 轮上限，按平台节奏排期，轮次耗尽后不�
   const { db, timers, runs } = setup([true, false]);
   const st = scheduleAutoContinue(db, 'luogu', '1892580');
   assert.ok(st);
-  assert.equal(st.maxRounds, 6);
+  assert.equal(st.maxRounds, 3);
   assert.equal(timers.length, 1);
-  assert.equal(timers[0].ms, 45_000); // 洛谷节奏
+  assert.equal(timers[0].ms, 90_000); // 洛谷节奏
   // 第 1 轮：仍截断 → 再排期
   await timers[0].fn();
   assert.equal(runs.length, 1);
@@ -76,11 +76,11 @@ test('续拉：轮次耗尽（一直截断）后不再排期，共执行 maxRoun
   __resetSyncSchedulerForTest();
   const { db, timers, runs } = setup([true, true, true, true, true, true, true, true]);
   const st = scheduleAutoContinue(db, 'codeforces', 'tourist');
-  assert.equal(st?.maxRounds, 6);
-  assert.equal(timers[0].ms, 20_000); // CF 节奏
+  assert.equal(st?.maxRounds, 3);
+  assert.equal(timers[0].ms, 40_000); // CF 节奏
   for (let i = 0; i < timers.length; i += 1) await timers[i].fn();
-  assert.equal(runs.length, 6); // 第 6 轮后 round=7 > 6 → 停止
-  assert.equal(timers.length, 6);
+  assert.equal(runs.length, 3); // 第 3 轮后 round=4 > 3 → 停止
+  assert.equal(timers.length, 3);
   assert.equal(listAutoContinue().length, 0);
   db.close();
 });
@@ -101,7 +101,7 @@ test('续拉：任一轮报错（鉴权/限流）立即停止，不再排期', a
     },
   });
   scheduleAutoContinue(db, 'jisuanke', 'u');
-  assert.equal(timers[0].ms, 90_000); // 计蒜客节奏
+  assert.equal(timers[0].ms, 180_000); // 计蒜客节奏
   await timers[0].fn();
   assert.equal(calls, 1);
   assert.equal(timers.length, 1); // 失败 → 不再排期
@@ -138,7 +138,7 @@ test('续拉：同平台串行——重复注册被忽略（不叠加定时器�
   const other = scheduleAutoContinue(db, 'leetcode', 'u');
   assert.equal(other?.platform, 'leetcode');
   assert.equal(timers.length, 2);
-  assert.equal(timers[1].ms, 60_000);
+  assert.equal(timers[1].ms, 120_000);
   db.close();
 });
 
@@ -155,7 +155,7 @@ test('续拉：取消会清掉已排期的定时器，且状态带 pending 时�
     run: async (platform, handle) => ({ platform, handle, imported: 0, skipped: 0, errors: [], truncated: false }),
   });
   const st = scheduleAutoContinue(db, 'daimayuan', 'u');
-  assert.equal(st?.nextAt, '2026-09-15T00:01:00.000Z'); // 60s 后
+  assert.equal(st?.nextAt, '2026-09-15T00:02:00.000Z'); // 120s 后
   assert.equal(st?.running, false);
   assert.equal(st?.round, 1);
   assert.equal(cancelAutoContinue('daimayuan'), true);
@@ -200,10 +200,10 @@ test('sync 层：截断且 manual 触发注册续拉；days 窗口与 auto 触�
   const manual = await syncPlatform(db, 'jisuanke', 'hieZF123', { triggeredBy: 'manual' });
   assert.equal(manual.truncated, true);
   assert.equal(manual.autoContinue?.round, 1);
-  assert.equal(manual.autoContinue?.maxRounds, 6);
-  assert.equal(manual.autoContinue?.nextAt, '2026-09-15T00:01:30.000Z'); // 计蒜客 90s 后
+  assert.equal(manual.autoContinue?.maxRounds, 3);
+  assert.equal(manual.autoContinue?.nextAt, '2026-09-15T00:03:00.000Z'); // 计蒜客 180s 后
   assert.equal(timers.length, 1);
-  assert.equal(timers[0].ms, 90_000);
+  assert.equal(timers[0].ms, 180_000);
   assert.equal(listAutoContinue().length, 1);
   const run = db.prepare("SELECT triggered_by FROM sync_runs ORDER BY id DESC LIMIT 1").get() as { triggered_by: string };
   assert.equal(run.triggered_by, 'manual');
@@ -410,7 +410,7 @@ test('sync 层：被互斥锁拒绝的重复触发不抢占待续拉队列（链
   assert.equal(timers.length, 2);
   assert.equal(listAutoContinue().length, 1);
   assert.equal(listAutoContinue()[0].round, 2);
-  assert.equal(timers[1].ms, 20_000); // CF 节奏
+  assert.equal(timers[1].ms, 40_000); // CF 节奏
   db.close();
   __resetSyncSchedulerForTest();
 });

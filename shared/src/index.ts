@@ -137,6 +137,75 @@ export interface SyncRun {
   nextSuggestedSyncAt: string | null;
 }
 
+/**
+ * 进行中的同步（GET /api/sync/progress 的一项）。
+ *
+ * 为什么需要：单次同步现在按平台节奏限速（几十秒到几分钟），而 POST /api/sync/:platform
+ * 是一发到底的长请求，中途没有任何响应。前端据此显示「已用时 + 该站点请求数 + 最后请求距今」，
+ * 让用户看见它确实在动，不会误以为卡住而退出。
+ *
+ * 数据来源都是**真实发生的请求**（节流层计数），不是估值百分比 —— 适配器内部的页数/条数
+ * 知识不下放到前端，宁可不给百分比也不给假进度。
+ */
+export interface SyncProgressJob {
+  platform: PlatformId;
+  handle: string;
+  /** full=换账号全量 / incremental=增量 / backfill=补全 / days=仅最近 N 天 */
+  mode: SyncRun['mode'];
+  /** 仅 mode='days' 时有值：窗口天数 */
+  days?: number;
+  /** 单次同步新增上限（前端文案「最多 N 条」用） */
+  maxSubmissions?: number;
+  /** fetching=正在拉取提交 / saving=正在写入数据库 */
+  phase: 'fetching' | 'saving';
+  /** ISO8601 UTC */
+  startedAt: string;
+  /** 已进行时长（服务端算好，避免客户端时钟偏差） */
+  elapsedMs: number;
+  /**
+   * 本窗口内该站点的请求数（节流层按域名统计的增量）。
+   * 口径是「站点」而非「本次同步」：同期难度回填打同一站点也会计入——
+   * 这正是风控关心的量，且无论如何都证明请求在流动。
+   */
+  siteRequests: number;
+  /** 距最后一次真实请求的毫秒数；一个请求都还没发出时为 null（等待上游） */
+  lastRequestAgoMs: number | null;
+}
+
+/** 一键同步整批进度里已完成的一项 */
+export interface SyncProgressBatchItem {
+  platform: PlatformId;
+  status: 'ok' | 'failed';
+  imported: number;
+  /** 失败时的首条错误信息（与 sync_runs.error_message 同源） */
+  error?: string;
+}
+
+/** 一键同步（POST /api/sync/all）的整批进度：顺序执行，前端据此画出「待同步/已完成」 */
+export interface SyncProgressBatch {
+  /** 本批要同步的平台（顺序即执行顺序） */
+  platforms: PlatformId[];
+  /** 当前正在同步的平台；全部结束时为 null */
+  current: PlatformId | null;
+  completed: SyncProgressBatchItem[];
+  startedAt: string;
+  elapsedMs: number;
+  /**
+   * 整批结束时刻（ISO8601）；null = 仍在进行。
+   *
+   * 结束时**不立即从快照里消失**：否则最后一步「第 N 个平台完成」与「批次清空」发生在同一刻，
+   * 前端永远看不到「已完成 N/M」的收尾状态。服务端短期保留（约 5 分钟）后自行丢弃，
+   * 前端在收到 finishedAt 后展示一小段时间再隐藏。
+   */
+  finishedAt: string | null;
+}
+
+/** GET /api/sync/progress 响应：无同步时 jobs 为空数组、batch 为 null（前端据此自停轮询） */
+export interface SyncProgressSnapshot {
+  jobs: SyncProgressJob[];
+  batch: SyncProgressBatch | null;
+}
+
 /** 平台同步健康状态（按最近一次同步推导，供同步中心徽章展示） */
 export type PlatformSyncStatus =
   | 'healthy'

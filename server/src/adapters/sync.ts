@@ -9,6 +9,7 @@ import { getAdapter } from './registry.ts';
 import { createBackup } from '../backup.ts';
 import { ManualImportRequiredError, SyncError, type FetchOptions, type SyncErrorCode } from './types.ts';
 import { cancelAutoContinue, scheduleAutoContinue } from './syncScheduler.ts';
+import { beginSync, endSync, jobSiteRequests, setSyncPhase } from './syncProgress.ts';
 
 export interface SyncOptions {
   userId?: number;
@@ -18,18 +19,19 @@ export interface SyncOptions {
   triggeredBy?: 'manual' | 'retry' | 'days' | 'all' | 'auto';
 }
 
-/** 每个平台建议的同步间隔（毫秒）：按平台风控强度选定，同步中心据此展示「下次推荐同步时间」 */
+/** 每个平台建议的同步间隔（毫秒）：按平台风控强度选定，同步中心据此展示「下次推荐同步时间」。
+ *  本次整体翻倍：默认单次上限下调 + 全局按域名节流后，请求密度已显著降低，间隔相应拉长。 */
 const SUGGESTED_SYNC_INTERVAL_MS: Partial<Record<PlatformId, number>> = {
-  codeforces: 2 * 3600_000,
-  atcoder: 6 * 3600_000,
-  luogu: 6 * 3600_000,
-  nowcoder: 12 * 3600_000,
-  leetcode: 12 * 3600_000,
-  daimayuan: 12 * 3600_000,
+  codeforces: 4 * 3600_000,
+  atcoder: 12 * 3600_000,
+  luogu: 12 * 3600_000,
+  nowcoder: 24 * 3600_000,
+  leetcode: 24 * 3600_000,
+  daimayuan: 24 * 3600_000,
   // QOJ：前置 Cloudflare，请求密度越低越安全；提交记录按页（10 条/页）拉取，不宜过于频繁
-  qoj: 12 * 3600_000,
+  qoj: 24 * 3600_000,
 };
-const DEFAULT_SYNC_INTERVAL_MS = 12 * 3600_000;
+const DEFAULT_SYNC_INTERVAL_MS = 24 * 3600_000;
 
 /**
  * 将同步过程中的异常归类为可解释错误码（sync_runs.error_code）：
@@ -47,9 +49,11 @@ export function classifySyncError(e: unknown): SyncErrorCode {
 }
 
 /** 单次同步新增提交数默认上限与取值范围（分批拉取防封号）；与 settings 路由共用同一约束。
- *  保守取值：默认 500 条/次，可调 100–1500。重型用户（>2000 条）需多次点击同步逐步补全，
+ *  保守取值：默认 300 条/次，可调 100–1500。这个值同时是分页预算的乘数
+ *  （页数预算 = ⌈max/pageSize⌉×2），因此它直接决定单次同步对平台的请求次数：
+ *  默认 300 时牛客 60 页、QOJ 60 页、洛谷 30 页。重型用户（>300 条）需多次点击同步逐步补全，
  *  但每次请求量小、耗时可控，最大程度避免触发平台风控封号。 */
-export const DEFAULT_SYNC_MAX_SUBMISSIONS = 500;
+export const DEFAULT_SYNC_MAX_SUBMISSIONS = 300;
 export const MIN_SYNC_MAX_SUBMISSIONS = 100;
 export const MAX_SYNC_MAX_SUBMISSIONS = 1500;
 
@@ -116,7 +120,7 @@ function preemptsAutoContinue(triggeredBy: SyncOptions['triggeredBy']): boolean 
  * 4. 适配器按 maxSubmissions 上限分批拉取 → insertNormalized 事务入库
  * 5. 更新 last_sync_at / sync_truncated 与账号信息；截断时注册后台续拉
  *
- * 防封号策略：单次同步只拉 maxSubmissions 条新增（默认 1000），触及上限即停止并标记
+ * 防封号策略：单次同步只拉 maxSubmissions 条新增（默认 300），触及上限即停止并标记
  * sync_truncated=1；下次同步自动进入补全模式（backfill）继续拉取更早的历史，把原本一次性的
  * 全量拉取拆成多次小批量，避免短时间内大量请求触发平台风控。补全模式跳过已入库的页继续向更旧翻；
  * 当某次补全一无所获（已无可达早期记录）时自动结束补全。
@@ -151,6 +155,8 @@ export async function syncPlatform(
     return await runSyncPlatform(db, platform, handle, opts);
   } finally {
     SYNC_IN_FLIGHT.delete(platform);
+    // 进度登记与锁同生命周期：成功 / 失败 / 抛错都必须清掉，否则前端会长期显示幽灵进度
+    endSync(platform);
   }
 }
 
@@ -257,7 +263,16 @@ async function runSyncPlatform(
       ...(backfill ? { backfill: true } : {}),
       ...(backfill && account?.backfill_page ? { backfillFromPage: account.backfill_page } : {}),
     };
+    // 进度登记：模式与上限都已知，真正打上游之前（前端据此显示已用时 + 站点请求数 + 心跳）
+    beginSync({
+      platform,
+      handle,
+      mode,
+      ...(daysWindow ? { days: daysWindow } : {}),
+      maxSubmissions,
+    });
     const rows = await adapter.fetchUserSubmissions(handle, fetchOpts);
+    setSyncPhase(platform, 'saving');
     truncated = fetchOpts.truncated === true;
     waitedMs = fetchOpts.waitedMs ?? 0;
     const reachedPage = fetchOpts.backfillReachedPage;
@@ -318,6 +333,12 @@ async function runSyncPlatform(
       result.note =
         `提交记录较多，已分批同步 ${r.imported} 条以防触发平台风控；再次点击同步可继续补全更早的历史记录。` +
         `（单次上限可在「设置 → 平台账号与适配器」中调整）`;
+    } else if (mode === 'backfill' && r.imported === 0) {
+      // 补全轮次一无所获：把「没有新提交为什么还请求了」解释清楚（请求数取节流层窗口增量）
+      const requests = jobSiteRequests(platform);
+      result.note =
+        '补全检查完成：未发现更早的历史记录（库中已是最全），本次仅做检查、未新增提交' +
+        (requests !== null && requests > 0 ? `，共发出 ${requests} 次请求。` : '。');
     }
     // 截断后按平台节奏注册后台续拉：把「多次点击同步」变成自动分批。
     // days 窗口模式是补充拉取（不改账号状态）、auto 是续拉自身再截断——两者都不注册，避免无限续拉。

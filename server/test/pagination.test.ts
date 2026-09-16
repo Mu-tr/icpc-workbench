@@ -135,6 +135,46 @@ test('pagedFetch: backfill from cursor starts at backfillFromPage', async () => 
   assert.equal(callCount, 2);
 });
 
+test('pagedFetch: backfill 连续 2 个整页已知 → 判定已补到尽头并早停（回归：曾空扫满预算）', async () => {
+  // 实测场景：库中已有全部提交、没有更早历史可补。旧实现会一路 continue 到页数预算尽头
+  // （牛客 60 次 / 洛谷 30 次请求，一条都不导入），现在应在第 2 页就收尾。
+  const known = new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+  let callCount = 0;
+  const pages = [['a', 'b'], ['c', 'd'], ['e', 'f'], ['g', 'h']];
+  const opts: { backfill?: boolean; truncated?: boolean; backfillReachedPage?: number } = { backfill: true };
+  const out = await pagedFetch<string>({
+    pageSize: 2,
+    perSyncMax: 100,
+    fetchPage: async () => pages[callCount++] ?? ['x', 'y'],
+    externalIdOf: (s) => s,
+    normalize: (s) => norm(s),
+    knownExternalIds: known,
+    backfill: true,
+    opts,
+  });
+  assert.equal(out.length, 0);
+  assert.equal(callCount, 2, '连续 2 个整页已知即停，不再继续翻页');
+  assert.equal(opts.truncated, undefined, '补全到尽头不算截断（同步层据此清 sync_truncated）');
+});
+
+test('pagedFetch: backfill 中途出现新行则连续计数归零（不误判为已到尽头）', async () => {
+  const known = new Set(['a', 'b']);
+  let callCount = 0;
+  // 已知页 → 新页 → 已知页 → 新页（不足一页，自然结束）
+  const pages = [['a', 'b'], ['c', 'd'], ['a', 'b'], ['e']];
+  const out = await pagedFetch<string>({
+    pageSize: 2,
+    perSyncMax: 100,
+    fetchPage: async () => pages[callCount++] ?? [],
+    externalIdOf: (s) => s,
+    normalize: (s) => norm(s),
+    knownExternalIds: known,
+    backfill: true,
+  });
+  assert.deepEqual(out.map((r) => r.externalId), ['c', 'd', 'e']);
+  assert.equal(callCount, 4, '新行让计数归零，因此没有提前收尾');
+});
+
 test('pagedFetch: normalize returning null skips row (not known, not counted)', async () => {
   // 评测中行返回 null：不计入已知也不计入新增，但仍占页内位置
   const pages = [['a', 'skip', 'c']];

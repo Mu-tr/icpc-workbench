@@ -278,7 +278,7 @@ test('sync.maxSubmissions setting overrides default cap (100–1500)', async () 
   assert.equal(seenMax, 100);
 });
 
-test('sync.maxSubmissions out-of-range falls back to default 500', async () => {
+test('sync.maxSubmissions out-of-range falls back to default 300', async () => {
   let seenMax: number | undefined;
   const fake: PlatformAdapter = {
     platform: 'codeforces',
@@ -292,13 +292,13 @@ test('sync.maxSubmissions out-of-range falls back to default 500', async () => {
     },
   };
   register(fake);
-  // 50 低于下限 100 → 回退默认 500
+  // 50 低于下限 100 → 回退默认 300
   db.prepare("INSERT INTO settings (key, value) VALUES ('sync.maxSubmissions', '50')").run();
   await syncPlatform(db, 'codeforces', 'u');
-  assert.equal(seenMax, 500);
+  assert.equal(seenMax, 300);
 });
 
-test('sync.maxSubmissions above upper bound 1500 falls back to default 500', async () => {
+test('sync.maxSubmissions above upper bound 1500 falls back to default 300', async () => {
   let seenMax: number | undefined;
   const fake: PlatformAdapter = {
     platform: 'codeforces',
@@ -312,10 +312,10 @@ test('sync.maxSubmissions above upper bound 1500 falls back to default 500', asy
     },
   };
   register(fake);
-  // 5000 超过上限 1500 → 回退默认 500
+  // 5000 超过上限 1500 → 回退默认 300
   db.prepare("INSERT INTO settings (key, value) VALUES ('sync.maxSubmissions', '5000')").run();
   await syncPlatform(db, 'codeforces', 'u');
-  assert.equal(seenMax, 500);
+  assert.equal(seenMax, 300);
 });
 
 test('switching handle resets backfill state (full sync, no backfill)', async () => {

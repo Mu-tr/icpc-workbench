@@ -5,7 +5,7 @@ import type { ContestInfo, PlatformId } from '../../../shared/src/index.ts';
  * 页面为服务端渲染，每场比赛的完整信息在条目节点的 data-json 属性里
  * （HTML 双重转义：&amp;quot; → &quot; → "），解析后含
  * contestId / contestName / contestStartTime / contestEndTime（epoch 毫秒）。
- * 页面固定返回即将开始 + 近期结束约十几场，进程内缓存 30 分钟；
+ * 页面固定返回即将开始 + 近期结束约十几场，进程内缓存 60 分钟；
  * 页面结构变化时由聚合器降级跳过，不影响其他平台。
  */
 
@@ -70,7 +70,7 @@ export function toNowcoderContest(c: NcContestItem): ContestInfo {
 }
 
 let cache: { at: number; contests: ContestInfo[] } | null = null;
-const CACHE_MS = 30 * 60 * 1000;
+const CACHE_MS = 60 * 60 * 1000;
 
 export async function fetchNowcoderContests(fetchFn: typeof fetch = fetch): Promise<ContestInfo[]> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.contests;

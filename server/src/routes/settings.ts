@@ -13,6 +13,7 @@ import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { getAdapter } from '../adapters/registry.ts';
 import {
+  DEFAULT_SYNC_MAX_SUBMISSIONS,
   MIN_SYNC_MAX_SUBMISSIONS,
   MAX_SYNC_MAX_SUBMISSIONS,
 } from '../adapters/sync.ts';
@@ -74,16 +75,16 @@ export function readContestReminder(db: Db): { enabled: boolean; minutesBefore: 
   };
 }
 
-const DEFAULT_SYNC_MAX_SUBMISSIONS = 500;
 /** 续拉轮数上限取值域（0 = 关闭后台续拉）；读侧校验与写入校验共用这两个边界 */
 const MIN_SYNC_AUTO_CONTINUE_ROUNDS = 0;
 const MAX_SYNC_AUTO_CONTINUE_ROUNDS = 50;
 
 /**
  * 读取分批同步设置：单次同步新增上限（防封号）+ 后台续拉轮数上限 + 计蒜客自由练题开关。
- * - maxSubmissions 越界回退默认值；
+ * - maxSubmissions 越界回退默认值（**复用同步层的 `DEFAULT_SYNC_MAX_SUBMISSIONS`**：
+ *   读侧曾自带一份 500 的副本，同步层调整默认值后这里会给出与真正执行同步不同的答案）；
  * - autoContinueRounds 直接复用调度器的 `getAutoContinueRounds`（同一个 key、同一套
- *   0–50 校验、同一个默认 6）—— 读侧与真正执行续拉的调度器不可能给出不同答案；
+ *   0–50 校验、同一个默认值）—— 读侧与真正执行续拉的调度器不可能给出不同答案；
  * - jisuankePracticeSync：`settings['jisuanke.practiceSync']` 非 'false' 即开启（键缺失 = 默认开启，
  *   口径与适配器 `readSetting('jisuanke.practiceSync') !== 'false'` 完全一致）。
  */

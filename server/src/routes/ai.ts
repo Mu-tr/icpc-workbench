@@ -75,7 +75,18 @@ export function setTitlePromptTemplate(tpl: string): void {
 export function aiRoutes(
   db: Db,
   getAiConfig: () => AiConfig,
-  opts: { createProvider?: () => Pick<AiProvider, 'chat' | 'chatStream' | 'enabled'> } = {},
+  opts: {
+    createProvider?: () => Pick<AiProvider, 'chat' | 'chatStream' | 'enabled'>;
+    /**
+     * 赛事日历数据源（可选注入）。
+     *
+     * 为什么可注入：`/chat` 每次请求都会取「近 14 天赛事」拼进 system prompt，
+     * 默认实现会**实时访问 5 个外部站点**（CF/AtCoder/洛谷/牛客/计蒜客）。单测里这层
+     * 外部依赖既慢（单个用例 2s+）又不确定（离线/受限网络下必抖），所以允许注入桩，
+     * 让测试不再依赖外网；生产不传，行为不变。
+     */
+    fetchContests?: typeof fetchAllContests;
+  } = {},
 ): Router {
   const r = Router();
 
@@ -419,10 +430,10 @@ export function aiRoutes(
       }
     }
 
-    // 近 14 天赛事日历（赛事源各自有 30 分钟缓存，失败降级为空，不阻断对话）
+    // 近 14 天赛事日历（赛事源各自有 30/60 分钟缓存，失败降级为空，不阻断对话）
     let upcomingContests = '（赛事数据暂不可用）';
     try {
-      const { contests: all } = await fetchAllContests();
+      const { contests: all } = await (opts.fetchContests ?? fetchAllContests)();
       const upcoming = selectContests(all, { type: 'upcoming', limit: 10 })
         .filter((c) => {
           if (!c.startTimeIso) return false;

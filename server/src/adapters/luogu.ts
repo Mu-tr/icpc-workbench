@@ -7,6 +7,7 @@ import { difficultyFields, toCfRating } from '../../../shared/src/difficulty.ts'
 import type { FetchOptions, PlatformAdapter } from './types.ts';
 import { ManualImportRequiredError } from './types.ts';
 import { sleep, type HttpInit, asHttpClient } from './http.ts';
+import { BACKFILL_KNOWN_PAGE_LIMIT } from './pagination.ts';
 
 const API = 'https://www.luogu.com.cn';
 // 每页约 20 条。每次同步的保守页数上限：150 页 × 300ms = 45 秒
@@ -264,9 +265,10 @@ export function createLuoguAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
       const raws: LuoguRecord[] = [];
       let reachedPage = startPage;
       let naturalEnd = false; // 空页
-      let caughtUp = false; // 增量模式整页已知早停
+      let caughtUp = false; // 增量模式整页已知早停 / 补全模式连续已知页到尽头
       let rowCapped = false; // 触及新增上限
       let windowEnd = false; // 早于 since 窗口起点（仅同步最近 N 天）
+      let knownRun = 0; // 连续「整页已知」页数（补全模式收尾判据，见 pagination.ts 同名常量）
       for (let page = startPage, n = 0; n < budget; page += 1, n += 1) {
         reachedPage = page;
         const url = `${API}/record/list?user=${encodeURIComponent(handle)}&page=${page}`;
@@ -325,12 +327,19 @@ export function createLuoguAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
         // 整页已知：补全跳过该页继续向更旧，增量模式则终止（更旧都在库）
         if (known && knownInPage > 0 && knownInPage === records.length) {
           if (backfill) {
+            knownRun += 1;
+            // 连续多个整页已知 → 视为已补到尽头（与 pagination.ts 同一判据，避免空扫满预算）
+            if (knownRun >= BACKFILL_KNOWN_PAGE_LIMIT) {
+              caughtUp = true;
+              break;
+            }
             await sleepTracked(opts?.pageDelayMs ?? PAGE_DELAY_MS);
             continue;
           }
           caughtUp = true;
           break;
         }
+        knownRun = 0; // 本页出现了新行 → 仍在有效补全区段
         await sleepTracked(opts?.pageDelayMs ?? PAGE_DELAY_MS);
       }
 

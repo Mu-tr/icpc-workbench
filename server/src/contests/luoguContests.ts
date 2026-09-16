@@ -3,7 +3,7 @@ import { fetchWithChallenge } from '../adapters/luogu.ts';
 
 /**
  * 洛谷赛事数据源：非官方 content-only 接口（匿名可访问，走 C3VK 反爬挑战流程）。
- * 仅取前两页（默认 40 条：未来排期 + 近期结束），进程内缓存 30 分钟。
+ * 仅取前两页（默认 40 条：未来排期 + 近期结束），进程内缓存 60 分钟。
  * 接口结构可能随平台变更；失败时由聚合器降级跳过，不影响其他平台。
  */
 
@@ -41,7 +41,7 @@ export function toLuoguContest(c: LuoguContestItem): ContestInfo {
 }
 
 let cache: { at: number; contests: ContestInfo[] } | null = null;
-const CACHE_MS = 30 * 60 * 1000;
+const CACHE_MS = 60 * 60 * 1000;
 const PAGES = 2;
 
 export async function fetchLuoguContests(fetchFn: typeof fetch = fetch): Promise<ContestInfo[]> {

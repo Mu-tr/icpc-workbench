@@ -4,7 +4,7 @@ import type { ContestInfo, PlatformId } from '../../../shared/src/index.ts';
  * AtCoder 赛事数据源（双路合并）：
  * - 未来排期：AtCoder 官方 contests 页 HTML 解析（无官方 JSON，页面表格结构稳定）
  * - 历史场次：kenkoooo 社区静态资源 contests.json（与本项目的 AtCoder 提交同步同源）
- * 两源公开无需登录；进程内缓存 30 分钟。
+ * 两源公开无需登录；进程内缓存 60 分钟。
  */
 
 interface KenkooooContest {
@@ -85,7 +85,7 @@ async function fetchOfficialUpcoming(fetchFn: typeof fetch): Promise<ContestInfo
 }
 
 let cache: { at: number; contests: ContestInfo[] } | null = null;
-const CACHE_MS = 30 * 60 * 1000;
+const CACHE_MS = 60 * 60 * 1000;
 
 export async function fetchAtcoderContests(fetchFn: typeof fetch = fetch): Promise<ContestInfo[]> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.contests;

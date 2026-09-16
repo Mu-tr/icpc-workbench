@@ -6,6 +6,12 @@ import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
 import { syncPlatform } from '../adapters/sync.ts';
 import { cancelAutoContinue, listAutoContinue } from '../adapters/syncScheduler.ts';
+import {
+  beginBatch,
+  completeBatchItem,
+  endBatch,
+  snapshot as syncProgressSnapshot,
+} from '../adapters/syncProgress.ts';
 
 interface SyncRunRow {
   id: number;
@@ -108,6 +114,14 @@ export function syncRoutes(db: Db): Router {
     res.json({ statuses });
   });
 
+  // GET /api/sync/progress → 进行中的同步（平台/阶段/已用时/站点请求数/最后一次请求距今）
+  // 与「一键同步」整批进度。只读、进程内、无同步时 jobs 为空（前端据此自停轮询）。
+  // 为什么需要：单次同步是限速的长请求（几十秒到几分钟）且中途无响应，
+  // 前端靠这里的真实请求计数证明「还在动」，避免用户误以为卡住而退出。
+  r.get('/progress', (_req, res) => {
+    res.json(syncProgressSnapshot());
+  });
+
   // GET /api/sync/diagnostics → 纯文本诊断报告（附件下载）。
   // 只包含平台配置状态与最近同步历史，不含任何 Cookie / API Key 原文。
   r.get('/diagnostics', (_req, res) => {
@@ -153,10 +167,22 @@ export function syncRoutes(db: Db): Router {
       )
       .all(DEFAULT_USER_ID) as Array<{ platform: PlatformId; handle: string }>;
     const results = [];
-    for (const acc of accounts) {
-      const started = Date.now();
-      const result = await syncPlatform(db, acc.platform, acc.handle, { triggeredBy: 'all' });
-      results.push({ ...result, durationMs: Date.now() - started });
+    // 整批进度：前端据此画出「待同步 / 同步中 / 已完成 +N 条 / 失败」的完整队列，
+    // 而不是只知道「当前是谁」。finally 里收尾，异常路径也不留幽灵批次。
+    beginBatch(accounts.map((a) => a.platform));
+    try {
+      for (const acc of accounts) {
+        const started = Date.now();
+        const result = await syncPlatform(db, acc.platform, acc.handle, { triggeredBy: 'all' });
+        completeBatchItem(acc.platform, {
+          status: result.errors.length > 0 ? 'failed' : 'ok',
+          imported: result.imported,
+          ...(result.errors.length > 0 ? { error: result.errors[0]! } : {}),
+        });
+        results.push({ ...result, durationMs: Date.now() - started });
+      }
+    } finally {
+      endBatch();
     }
     res.json({ results });
   }));
@@ -172,21 +198,26 @@ export function syncRoutes(db: Db): Router {
     res.json({ ok: true, cancelled: cancelAutoContinue(platform as PlatformId) });
   });
 
-  // POST /api/sync/:platform  body: { handle, days? }
+  // POST /api/sync/:platform  body: { handle, days?, retry? }
   // days 为正整数时走「仅同步最近 N 天」窗口模式：补充拉取漏掉的历史，不改账号同步状态。
+  // retry=true（同步中心/结果抽屉的「重试」按钮）：语义与手动同步相同，只把 triggered_by
+  // 记为 retry，便于在历史里区分"用户主动重试失败平台"与"日常点同步"。
   r.post('/:platform', asyncHandler(async (req, res) => {
     const { platform } = req.params;
-    const { handle, days } = req.body ?? {};
+    const { handle, days, retry } = req.body ?? {};
     if (!PLATFORMS.some((p) => p.id === platform)) {
       return res.status(400).json({ error: `platform 非法: ${platform}` });
     }
     if (typeof handle !== 'string' || handle.trim() === '') {
       return res.status(400).json({ error: 'handle 必填' });
     }
+    if (retry !== undefined && typeof retry !== 'boolean') {
+      return res.status(400).json({ error: 'retry 需为布尔值（省略即普通手动同步）' });
+    }
     const daysN = Number(days);
     const opts = Number.isInteger(daysN) && daysN > 0
       ? { days: Math.min(365, daysN), triggeredBy: 'days' as const }
-      : { triggeredBy: 'manual' as const };
+      : { triggeredBy: retry === true ? ('retry' as const) : ('manual' as const) };
     const result = await syncPlatform(db, platform as PlatformId, handle.trim(), opts);
     // 平台无公开 API 等受限情况返回 200 + errors 引导（非致命）
     res.json(result);

@@ -4,6 +4,7 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import type { SyncResult } from '../../shared/src/index.ts';
 import { createDb, type Db } from '../src/db/index.ts';
+import { register } from '../src/adapters/index.ts';
 import { problemsRoutes } from '../src/routes/problems.ts';
 import { syncRoutes } from '../src/routes/sync.ts';
 import { readSyncSettings, settingsRoutes } from '../src/routes/settings.ts';
@@ -318,14 +319,14 @@ function settingsApp(db: Db): express.Express {
   return app;
 }
 
-test('GET /api/settings: sync 给出 autoContinueRounds（默认 6）与 jisuankePracticeSync（默认开启）', async () => {
+test('GET /api/settings: sync 给出 autoContinueRounds（默认 3）与 jisuankePracticeSync（默认开启）', async () => {
   const db = createDb(':memory:');
   await withApp(settingsApp(db), async (base) => {
     const body = (await (await fetch(`${base}/api/settings`)).json()) as {
       sync: { maxSubmissions: number; autoContinueRounds: number; jisuankePracticeSync: boolean };
     };
-    assert.equal(body.sync.maxSubmissions, 500);
-    assert.equal(body.sync.autoContinueRounds, 6);
+    assert.equal(body.sync.maxSubmissions, 300);
+    assert.equal(body.sync.autoContinueRounds, 3);
     assert.equal(body.sync.jisuankePracticeSync, true, '键缺失 = 默认开启（与适配器口径一致）');
   });
   db.close();
@@ -364,11 +365,11 @@ test('POST /api/settings/sync: jisuankePracticeSync 落库为 true/false 字符�
 
     // 只改上限：练习同步开关保持上次写入的 false（省略即保留）
     const keep = await postJson(base, '/api/settings/sync', { maxSubmissions: 500 });
-    assert.deepEqual(await keep.json(), { maxSubmissions: 500, autoContinueRounds: 6, jisuankePracticeSync: false });
+    assert.deepEqual(await keep.json(), { maxSubmissions: 500, autoContinueRounds: 3, jisuankePracticeSync: false });
 
     const on = await postJson(base, '/api/settings/sync', { maxSubmissions: 500, jisuankePracticeSync: true });
     assert.equal(read()?.value, 'true');
-    assert.deepEqual(await on.json(), { maxSubmissions: 500, autoContinueRounds: 6, jisuankePracticeSync: true });
+    assert.deepEqual(await on.json(), { maxSubmissions: 500, autoContinueRounds: 3, jisuankePracticeSync: true });
 
     // 非布尔（含字符串 'false'）：拒绝且不改动已存值
     for (const bad of ['false', 0, 1, null]) {
@@ -384,8 +385,8 @@ test('POST /api/settings/sync: jisuankePracticeSync 落库为 true/false 字符�
 test('POST /api/settings/sync: 越界/非数字 autoContinueRounds → 400 且原始行不变（不落库）', async () => {
   const db = createDb(':memory:');
   await withApp(settingsApp(db), async (base) => {
-    /** 直接读原始行：读侧会把越界脏值钳回默认 6，只走 GET /api/settings 断言的话
-     *  「写入 51 失败→读回 6」与「没写→读回 6」结果相同，测试不具区分力。 */
+    /** 直接读原始行：读侧会把越界脏值钳回默认 3，只走 GET /api/settings 断言的话
+     *  「写入 51 失败→读回 3」与「没写→读回 3」结果相同，测试不具区分力。 */
     const raw = () =>
       (db.prepare("SELECT value FROM settings WHERE key = 'sync.autoContinueRounds'").get() as
         | { value: string }
@@ -400,7 +401,7 @@ test('POST /api/settings/sync: 越界/非数字 autoContinueRounds → 400 且�
     const after = (await (await fetch(`${base}/api/settings`)).json()) as {
       sync: { autoContinueRounds: number };
     };
-    assert.equal(after.sync.autoContinueRounds, 6);
+    assert.equal(after.sync.autoContinueRounds, 3);
   });
   db.close();
 });
@@ -434,14 +435,14 @@ test('POST /api/settings/sync: null / 空串 / 布尔 / 数组等非数字 autoC
   db.close();
 });
 
-test('readSyncSettings: 库内脏值（越界/非整数）回退默认 6', () => {
+test('readSyncSettings: 库内脏值（越界/非整数）回退默认 3', () => {
   const db = createDb(':memory:');
   const upsert = db.prepare(
     "INSERT INTO settings (key, value) VALUES ('sync.autoContinueRounds', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   );
   for (const dirty of ['99', '-3', 'abc', '2.5']) {
     upsert.run(dirty);
-    assert.equal(readSyncSettings(db).autoContinueRounds, 6, `脏值 ${dirty} 应回退默认`);
+    assert.equal(readSyncSettings(db).autoContinueRounds, 3, `脏值 ${dirty} 应回退默认`);
   }
   // 读侧不自己实现一套校验，而是复用调度器的 getAutoContinueRounds（读侧与执行侧同源）
   upsert.run('12');
@@ -493,7 +494,7 @@ test('GET /api/sync/status: 每平台给出 autoContinue（无排期 → null）
         platform: 'codeforces',
         handle: 'tourist',
         round: 1,
-        maxRounds: 6,
+        maxRounds: 3,
         nextAt: state!.nextAt,
         running: false,
       });
@@ -513,6 +514,33 @@ test('GET /api/sync/status: 每平台给出 autoContinue（无排期 → null）
     __resetSyncSchedulerForTest();
     db.close();
   }
+});
+
+test('POST /api/sync/:platform: retry=true 记为 triggered_by=retry；非布尔 → 400', async () => {
+  const db = createDb(':memory:');
+  // 假适配器：只关心 sync_runs 的 triggered_by，不关心拉取内容
+  register({
+    platform: 'codeforces',
+    async fetchUserSubmissions() {
+      return [];
+    },
+    problemUrl: () => 'https://codeforces.com/',
+  });
+  await withApp(syncApp(db), async (base) => {
+    assert.equal((await postJson(base, '/api/sync/codeforces', { handle: 'tourist' })).status, 200);
+    assert.equal((await postJson(base, '/api/sync/codeforces', { handle: 'tourist', retry: true })).status, 200);
+
+    const rows = db
+      .prepare('SELECT triggered_by FROM sync_runs ORDER BY id ASC')
+      .all() as Array<{ triggered_by: string }>;
+    assert.deepEqual(rows.map((r) => r.triggered_by), ['manual', 'retry'], '重试要能在历史里区分出来');
+
+    // retry 只接受布尔值：字符串等一律拒绝（避免静默降级成 manual，历史里看不出是重试）
+    const bad = await postJson(base, '/api/sync/codeforces', { handle: 'tourist', retry: 'true' });
+    assert.equal(bad.status, 400);
+    assert.match(((await bad.json()) as { error: string }).error, /retry/);
+  });
+  db.close();
 });
 
 test('POST /api/sync/auto-continue/cancel: 非法 platform → 400', async () => {

@@ -4,6 +4,7 @@ import { fetchCfContests } from './cfContests.ts';
 import { fetchJisuankeContests } from './jisuankeContests.ts';
 import { fetchLuoguContests } from './luoguContests.ts';
 import { fetchNowcoderContests } from './nowcoderContests.ts';
+import { throttledFetch } from '../net/hostThrottle.ts';
 
 /**
  * 多平台赛事聚合：Codeforces / AtCoder / 洛谷 / 牛客 / 计蒜客。
@@ -28,7 +29,7 @@ export interface AllContests {
   failures: Partial<Record<PlatformId, string>>;
 }
 
-export async function fetchAllContests(fetchFn: typeof fetch = fetch): Promise<AllContests> {
+export async function fetchAllContests(fetchFn: typeof fetch = throttledFetch): Promise<AllContests> {
   const results = await Promise.allSettled([
     fetchCfContests(fetchFn),
     fetchAtcoderContests(fetchFn),

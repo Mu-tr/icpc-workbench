@@ -55,6 +55,8 @@ interface TestServer {
   aiBase: string
   todayBase: string
   providerChats: Array<{ system: string; messages: Array<{ role: string; content: string }> }>
+  /** 赛事日历桩被调用的次数（用于断言 /chat 走的是桩，不是外网） */
+  contestCalls: number[]
 }
 
 async function withServer(
@@ -63,12 +65,18 @@ async function withServer(
 ): Promise<void> {
   const db = createDb(':memory:');
   const providerChats: Array<{ system: string; messages: Array<{ role: string; content: string }> }> = [];
+  /** 赛事日历桩：/chat 会取近 14 天赛事拼 prompt，绝不能让它去访问 5 个外部站点 */
+  const contestCalls: number[] = [];
   const app = express();
   app.use(express.json());
   const cfg = provider ? { enabled: true, baseURL: 'https://x/v1', apiKey: 'k', model: 'm' } : AI_DISABLED;
   app.use(
     '/api/ai',
     aiRoutes(db, () => cfg, {
+      fetchContests: async () => {
+        contestCalls.push(Date.now());
+        return { contests: [], failures: {} };
+      },
       createProvider: provider
         ? () => ({
             enabled: provider.enabled,
@@ -92,7 +100,7 @@ async function withServer(
   await new Promise<void>((resolve) => srv.once('listening', resolve));
   const root = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
   try {
-    await fn({ db, aiBase: `${root}/api/ai`, todayBase: `${root}/api/today`, providerChats });
+    await fn({ db, aiBase: `${root}/api/ai`, todayBase: `${root}/api/today`, providerChats, contestCalls });
   } finally {
     srv.close();
     db.close();
@@ -221,6 +229,21 @@ test('ability evidence: empty recent AC renders guidance instead of evidence', a
 });
 
 // ---------- 通用 AI 助手 ----------
+
+test('assistant: /chat 的赛事日历走注入的桩（单测不再依赖外网）', async () => {
+  await withServer(
+    async ({ aiBase, contestCalls }) => {
+      const res = await fetch(`${aiBase}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(contestCalls.length, 1, '应调用注入的赛事桩一次，而不是访问 5 个外部站点');
+    },
+    { enabled: true, reply: 'ok' },
+  );
+});
 
 test('assistant: chat returns needConfig when AI disabled', async () => {
   await withServer(async ({ aiBase }) => {

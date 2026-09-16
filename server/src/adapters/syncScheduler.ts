@@ -15,18 +15,27 @@ import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { syncPlatform } from './sync.ts';
 
+/**
+ * 平台续拉间隔（毫秒）：本次整体翻倍（原 20s–90s → 40s–180s）。
+ *
+ * 理由：续拉是「用户点一次同步后自动连打」的路径，也是短时间请求密度最高的来源；
+ * 单次上限下调（默认 300）后每轮请求量本就变小，把间隔拉开可进一步降低触发风控的概率。
+ * 代价是补全历史的总时长变长——轮数上限也相应下调（见 DEFAULT_AUTO_CONTINUE_ROUNDS），
+ * 用户可再次点击同步继续补。
+ */
 export const AUTO_CONTINUE_DELAY_MS: Record<PlatformId, number> = {
-  codeforces: 20_000,
-  atcoder: 60_000,
-  luogu: 45_000,
-  nowcoder: 90_000,
-  jisuanke: 90_000,
-  daimayuan: 60_000,
-  leetcode: 60_000,
-  qoj: 90_000,
+  codeforces: 40_000,
+  atcoder: 120_000,
+  luogu: 90_000,
+  nowcoder: 180_000,
+  jisuanke: 180_000,
+  daimayuan: 120_000,
+  leetcode: 120_000,
+  qoj: 180_000,
 };
 
-export const DEFAULT_AUTO_CONTINUE_ROUNDS = 6;
+/** 一次点击同步后最多自动续拉几轮（原 6）：更少的自动轮次 = 更低的短时请求密度 */
+export const DEFAULT_AUTO_CONTINUE_ROUNDS = 3;
 
 export interface AutoContinueState {
   platform: PlatformId;

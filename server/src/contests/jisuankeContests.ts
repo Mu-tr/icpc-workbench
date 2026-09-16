@@ -3,7 +3,7 @@ import { parseJisuankeTime } from '../adapters/jisuanke.ts';
 
 /**
  * 计蒜客赛事数据源：公开 /api/contests 接口（匿名可访问）。
- * 仅取前两页（未来排期 + 近期结束），进程内缓存 30 分钟。
+ * 仅取前两页（未来排期 + 近期结束），进程内缓存 60 分钟。
  * 接口结构可能随平台变更；失败时由聚合器降级跳过，不影响其他平台。
  */
 
@@ -60,7 +60,7 @@ export function toJisuankeContest(c: JisuankeContestItem): ContestInfo | null {
 }
 
 let cache: { at: number; contests: ContestInfo[] } | null = null;
-const CACHE_MS = 30 * 60 * 1000;
+const CACHE_MS = 60 * 60 * 1000;
 
 export async function fetchJisuankeContests(fetchFn: typeof fetch = fetch): Promise<ContestInfo[]> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.contests;

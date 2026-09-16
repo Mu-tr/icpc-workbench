@@ -13,6 +13,7 @@ import type { LuoguProblemType } from '../adapters/problemBank.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
 import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr } from '../knowledge/store.ts';
 import { isValidCode } from '../knowledge/taxonomy.ts';
+import { throttledFetch } from '../net/hostThrottle.ts';
 
 interface ProblemRow {
   id: number;
@@ -183,7 +184,12 @@ function parseFilters(query: Record<string, unknown>): ProblemFilters {
   return out;
 }
 
-export function problemsRoutes(db: Db, fetchFn: typeof fetch = fetch): Router {
+/**
+ * 题库拉取（POST /bank）与难度回填（POST /backfill-difficulty）都经此 fetch 打上游。
+ * 默认注入全局按域名节流层（net/hostThrottle.ts）：这两条路径请求量最大
+ * （逐题回填可上千次），必须与提交同步共享同一份节奏桶，否则会同时打同一站点。
+ */
+export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): Router {
   const r = Router();
 
   /** 共享的 SELECT/GROUP BY 骨架：标注侧先聚合成 pk 派生表，再 LEFT JOIN（消逐行子查询） */

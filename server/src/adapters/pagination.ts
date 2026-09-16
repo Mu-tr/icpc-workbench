@@ -25,6 +25,19 @@ export function markTruncated(opts: FetchOptions | undefined): void {
   if (opts) opts.truncated = true;
 }
 
+/**
+ * 补全模式收尾判据：连续这么多个「整页已知」即认为已补到尽头，停止翻页。
+ *
+ * 为什么需要（实测）：补全模式原本遇到整页已知只会 `continue`，于是一路翻到页数预算尽头——
+ * 在「库中已有全部提交、没有新提交」时，牛客/QOJ 会白打 60 次请求、洛谷 30 次、力扣 16 次
+ * （见 .probe 探针的前后对比），而这一轮什么都不会导入。
+ *
+ * 取 2 而非 1：留一页重叠容差——续拉起点的重叠页本就可能是整页已知，
+ * 若第一批已知页就停，真正的补全（游标之后第 1 页就有新行）会被误判为"已到尽头"。
+ * 反之只要有一页出现新行，计数即归零，正常补全完全不受影响。
+ */
+export const BACKFILL_KNOWN_PAGE_LIMIT = 2;
+
 /** 累计本次同步的限速等待耗时（同步层写入 sync_runs.waited_ms，同步中心展示） */
 export function recordWait(opts: FetchOptions | undefined, ms: number): void {
   if (opts && ms > 0) opts.waitedMs = (opts.waitedMs ?? 0) + ms;
@@ -64,9 +77,11 @@ export interface PagedFetchConfig<R> {
 /**
  * 页码型平台统一分批拉取：按新→旧翻页，跳过已知条目，受新增上限与页数预算双重约束。
  * - 增量模式（非 backfill）：整页已知即提前终止（更旧都在库中）。
- * - 补全模式（backfill）：从 backfillFromPage 续拉，整页已知则跳过继续向更旧，回写 reachedPage 游标。
+ * - 补全模式（backfill）：从 backfillFromPage 续拉，整页已知则跳过继续向更旧，
+ *   但**连续 BACKFILL_KNOWN_PAGE_LIMIT 个整页已知即判定已补到尽头**（否则会在
+ *   「没有更早历史可补」时空扫满整个页数预算）；回写 reachedPage 游标。
  * - 触及新增上限 / 页数预算耗尽且有新增 → 回写 truncated=true + backfillReachedPage。
- * - 自然结束（空页 / 最后一页）/ 增量早停 / 补全一无所获 → 不截断。
+ * - 自然结束（空页 / 最后一页）/ 增量早停 / 补全到尽头 → 不截断。
  */
 export async function pagedFetch<R>(cfg: PagedFetchConfig<R>): Promise<NormalizedSubmission[]> {
   const budget = pageBudget(cfg.maxSubmissions, cfg.pageSize, cfg.perSyncMax);
@@ -74,9 +89,10 @@ export async function pagedFetch<R>(cfg: PagedFetchConfig<R>): Promise<Normalize
   const out: NormalizedSubmission[] = [];
   let reachedPage = startPage;
   let naturalEnd = false; // 空页 / 最后一页
-  let caughtUp = false; // 增量模式整页已知早停
+  let caughtUp = false; // 增量模式整页已知早停 / 补全模式连续已知页到尽头
   let rowCapped = false; // 触及新增上限
   let windowEnd = false; // 早于 since 窗口起点（仅同步最近 N 天）
+  let knownRun = 0; // 连续「整页已知」页数（补全模式收尾判据）
   const sleep = async (ms: number): Promise<void> => {
     if (ms <= 0) return;
     recordWait(cfg.opts, ms);
@@ -114,12 +130,19 @@ export async function pagedFetch<R>(cfg: PagedFetchConfig<R>): Promise<Normalize
     // 整页已知（所有行都在库中）：补全跳过该页继续向更旧，增量模式则终止（更旧都在库）
     if (cfg.knownExternalIds && knownInPage > 0 && knownInPage === rows.length) {
       if (cfg.backfill) {
+        knownRun += 1;
+        // 连续多个整页已知 → 视为已补到尽头（避免没有更早历史时空扫满预算，见常量注释）
+        if (knownRun >= BACKFILL_KNOWN_PAGE_LIMIT) {
+          caughtUp = true;
+          break;
+        }
         if (cfg.pageDelayMs) await sleep(cfg.pageDelayMs);
         continue;
       }
       caughtUp = true;
       break;
     }
+    knownRun = 0; // 本页出现了新行 → 仍在有效补全区段，重新计数
     if (rows.length < cfg.pageSize) {
       naturalEnd = true; // 最后一页
       break;

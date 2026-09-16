@@ -2,7 +2,7 @@ import type { ContestInfo, PlatformId } from '../../../shared/src/index.ts';
 
 /**
  * Codeforces 赛事数据源：官方公开 API contest.list（无需登录）。
- * 进程内缓存 30 分钟，避免频繁打官方接口。
+ * 进程内缓存 60 分钟，避免频繁打官方接口。
  */
 
 interface CfApiContest {
@@ -43,7 +43,7 @@ function toInfo(c: CfApiContest): ContestInfo {
 }
 
 let cache: { at: number; contests: ContestInfo[] } | null = null;
-const CACHE_MS = 30 * 60 * 1000;
+const CACHE_MS = 60 * 60 * 1000;
 
 export async function fetchCfContests(fetchFn: typeof fetch = fetch): Promise<ContestInfo[]> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.contests;

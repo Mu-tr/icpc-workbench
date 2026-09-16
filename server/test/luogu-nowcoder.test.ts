@@ -207,6 +207,42 @@ test('luogu: fetchUserSubmissions works with new Lentille structure (data.data.r
   assert.equal(rows[0].verdict, 'AC');
 });
 
+test('luogu: 补全连续 2 个整页已知即收尾（回归：曾空扫满 30 页预算）', async () => {
+  // 实测：库中已有全部提交时，补全模式旧实现会翻满页数预算（默认 30 次请求、0 新增）
+  let calls = 0;
+  const fetchFn = router({
+    'record/list': (url) => {
+      calls += 1;
+      const page = Number(new URL(url).searchParams.get('page'));
+      return {
+        code: 200,
+        data: {
+          records: {
+            result: [0, 1].map((i) => ({
+              id: page * 1000 + i,
+              status: 12,
+              submitTime: 1_700_000_000 - i,
+              problem: { pid: `P${page}${i}`, difficulty: 3, tags: [] },
+            })),
+          },
+        },
+      };
+    },
+  });
+  const known = new Set(['1000', '1001', '2000', '2001', '3000', '3001']);
+  const opts: { cookie: string; knownExternalIds: Set<string>; backfill: boolean; maxSubmissions: number; pageDelayMs: number; truncated?: boolean } = {
+    cookie: COOKIE,
+    knownExternalIds: known,
+    backfill: true,
+    maxSubmissions: 100, // 预算 = ⌈100/20⌉×2 = 10 页
+    pageDelayMs: 0,
+  };
+  const rows = await createLuoguAdapter(fetchFn).fetchUserSubmissions('123', opts);
+  assert.equal(rows.length, 0);
+  assert.equal(calls, 2, '连续 2 个整页已知即停（旧实现会请求满 10 页）');
+  assert.equal(opts.truncated, undefined, '补全到尽头不算截断');
+});
+
 test('luogu: 秒级 submitTime 正确转毫秒（回归：曾被当毫秒解析全部落回 1970）', async () => {
   // 线上实测洛谷 record.submitTime 是 10 位秒级时间戳
   const fetchFn = router({
