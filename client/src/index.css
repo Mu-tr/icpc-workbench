@@ -136,7 +136,9 @@ body {
 
 /* 等宽数字 / 题号 */
 .mono {
-  font-family: 'Cascadia Code', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  /* 末尾两个非等宽字体兜底 Unicode 上下标等数学符号，避免方框（tofu） */
+  font-family: 'Cascadia Code', ui-monospace, 'SFMono-Regular', Consolas, 'Segoe UI Symbol',
+    'Cambria Math', monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1280,8 +1282,16 @@ body {
   padding-left: 22px;
 }
 
+/* 列表项含公式时容易显得挤：行距与条目间距都放宽一点 */
 .markdown-body li {
-  margin: 3px 0;
+  margin: 5px 0;
+  line-height: 1.8;
+}
+
+/* 行内代码与行内公式在混排时保持同一视觉重量：
+   两者都加同量级左右外边距，避免 code 药丸紧贴中文、看起来比公式"重" */
+.markdown-body code {
+  margin-inline: 0.1em;
 }
 
 .markdown-body li::marker {
@@ -1294,7 +1304,10 @@ body {
   border-radius: 5px;
   background: var(--surface-3);
   color: var(--brand-text);
-  font-family: 'Cascadia Code', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  /* 末尾两个非等宽字体专门兜底 Unicode 上下标（₀₁ᵢ ⁿ²）等数学符号：
+     Cascadia Code / Consolas 都没有这些字形，不兜底会渲染成方框（tofu） */
+  font-family: 'Cascadia Code', ui-monospace, 'SFMono-Regular', Consolas, 'Segoe UI Symbol',
+    'Cambria Math', monospace;
   font-size: 12px;
 }
 
@@ -1366,6 +1379,186 @@ body {
 .markdown-body img {
   max-width: 100%;
   border-radius: 8px;
+}
+
+/* ---- 代码卡：围栏代码块（语言标签 + 复制 + 超长折叠） ---- */
+
+/* 代码卡整体使用等宽字体，语言标签/复制按钮覆盖回界面字体 */
+.md-code-card {
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-inset);
+  overflow: hidden;
+  /* 末尾两个非等宽字体兜底 Unicode 上下标等数学符号，避免方框（tofu） */
+  font-family: 'Cascadia Code', ui-monospace, 'SFMono-Regular', Consolas, 'Segoe UI Symbol',
+    'Cambria Math', monospace;
+}
+
+.md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-3);
+  font-family:
+    'Segoe UI Variable Text', 'Segoe UI', 'Inter', system-ui, 'PingFang SC',
+    'Microsoft YaHei UI', sans-serif;
+}
+
+.md-code-lang {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.md-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.md-code-copy:hover {
+  background: var(--overlay-3);
+  color: var(--brand);
+}
+
+.md-code-pre {
+  margin: 0;
+  padding: 9px 12px;
+  background: transparent;
+  overflow-x: auto;
+}
+
+.md-code-pre code {
+  display: block;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--code-text, var(--text-2));
+  /* 末尾两个非等宽字体兜底 Unicode 上下标等数学符号，避免方框（tofu） */
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.65;
+  /* 关闭连字：!= 被渲染成 ≠ 会让代码误读 */
+  font-variant-ligatures: none;
+  font-feature-settings: 'calt' 0, 'liga' 0;
+  tab-size: 4;
+  white-space: pre;
+}
+
+/* 超长代码折叠：只滚纵向，避免同时出现两个滚动条 */
+.md-code-card:not(.is-expanded) .md-code-pre[data-collapsible='true'] {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.md-code-toggle {
+  display: block;
+  width: 100%;
+  padding: 4px 10px;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  background: var(--surface-3);
+  color: var(--text-3);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.md-code-toggle:hover {
+  color: var(--brand);
+}
+
+.md-code-toggle .anticon {
+  margin-right: 5px;
+  font-size: 10px;
+}
+
+/* ---- 公式：块级居中、行内与正文基线对齐 ---- */
+
+/* KaTeX 自带字体以拉丁字形为主，补上中文字体回退避免 CJK 落到衬线字体 */
+.katex {
+  font-size: 1.05em;
+}
+
+.markdown-body .katex {
+  font-family: KaTeX_Main, 'Cascadia Code', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', serif;
+}
+
+.markdown-body .katex-display {
+  margin: 12px 0;
+  padding: 2px 0;
+}
+
+/* 块级公式过宽时只让公式自身横向滚动（不把滚动条挂到块级容器上，
+   避免影响 KaTeX 的居中与垂直布局计算） */
+.markdown-body .katex-display > .katex {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* 行内公式整体不拆行：长公式整体换行，而不是从中间裂开。
+   ⚠ 不能用 white-space: nowrap —— KaTeX 依赖 zero-width glue 与自适应间距来定位
+   上下标/极限（\max 的范围、\sum 的上下限），nowrap 会让它们挤在一起重叠。
+   margin-inline 给中英混排留出呼吸空间：行内公式与中文之间原本是紧贴的。 */
+.markdown-body .katex {
+  display: inline-block;
+  margin-inline: 0.18em;
+}
+
+/* 块级公式自身是块元素，不要额外左右外边距（会破坏居中） */
+.markdown-body .katex-display > .katex {
+  margin-inline: 0;
+}
+
+/* KaTeX 解析失败的公式以普通文本回退显示（非刺眼红色） */
+.katex-error {
+  color: inherit !important;
+  font-family: 'Cascadia Code', ui-monospace, 'SFMono-Regular', Consolas, 'Segoe UI Symbol',
+    'Cambria Math', monospace;
+  font-size: 0.95em;
+}
+
+/* ---- 表格：窄屏横向滚动 ---- */
+
+.md-table-wrap {
+  margin: 8px 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md-table-wrap > table {
+  margin: 0;
+}
+
+/* ---- 行内代码：与正文区分但不抢眼的浅色药丸 ---- */
+
+.markdown-body code {
+  word-break: break-word;
+}
+
+/* 公式块内不应出现行内代码样式（KaTeX 内部也可能渲染 <code>） */
+.markdown-body .katex code {
+  padding: 0;
+  border: none;
+  background: transparent;
 }
 
 /* ---------- 模板库（内置课程 + 学习进度） ---------- */
@@ -2241,13 +2434,6 @@ body {
 
 .plan-chat-msg-assistant .markdown-body {
   font-size: 13px;
-}
-
-/* KaTeX 解析失败的公式以普通文本回退显示（非刺眼红色） */
-.katex-error {
-  color: inherit !important;
-  font-family: "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.95em;
 }
 
 .plan-chat-msg-assistant .markdown-body p:first-child {

@@ -31,3 +31,7 @@ videos/
 .workbuddy/
 .superpowers/
 .scratch/
+
+# 本地诊断脚本（抓包/接口探测），非项目源码
+.probe/
+
