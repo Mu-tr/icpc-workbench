@@ -91,7 +91,7 @@ export default function Settings() {
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelOptions, setModelOptions] = useState<{ value: string }[]>([])
   const [syncMax, setSyncMax] = useState(500)
-  /** 后台续拉轮数上限（0 = 关闭；服务端默认 6）；字段可能来自旧版服务端，故可空 */
+  /** 后台续拉轮数上限（0 = 关闭；服务端默认 3）；字段可能来自旧版服务端，故可空 */
   const [syncRounds, setSyncRounds] = useState(6)
   /** 计蒜客「同步自由练题提交」开关（键缺失 = 默认开启） */
   const [practiceSync, setPracticeSync] = useState(true)
@@ -110,8 +110,8 @@ export default function Settings() {
         setReminderEnabled(d.reminder.enabled)
         setReminderTime(dayjs(d.reminder.time, 'HH:mm'))
         setContestReminder(d.contestReminder)
-        setSyncMax(d.sync?.maxSubmissions ?? 500)
-        setSyncRounds(d.sync?.autoContinueRounds ?? 6)
+        setSyncMax(d.sync?.maxSubmissions ?? 300)
+        setSyncRounds(d.sync?.autoContinueRounds ?? 3)
         setPracticeSync(d.sync?.jisuankePracticeSync !== false)
       })
       .catch((e: Error) => message.error(e.message))
@@ -706,7 +706,7 @@ export default function Settings() {
                 addonAfter="条"
                 style={{ width: 140 }}
               />
-              <span className="muted-note">提交记录过多时分批拉取，防触发平台风控封号（默认 500，保守为主）</span>
+              <span className="muted-note">提交记录过多时分批拉取，防触发平台风控封号（默认 300，保守为主）</span>
             </Space>
           </div>
           <div style={{ marginTop: 8 }}>
@@ -722,7 +722,7 @@ export default function Settings() {
                 style={{ width: 140 }}
               />
               <span className="muted-note">
-                单次同步达到上限被截断后，后台按平台节奏自动续拉的最大轮数（0 = 关闭，默认 6）。
+                单次同步达到上限被截断后，后台按平台节奏自动续拉的最大轮数（0 = 关闭，默认 3）。
                 续拉进度与「停止续拉」在「题目管理 → 导入 → 平台同步」中显示。
               </span>
             </Space>

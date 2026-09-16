@@ -9,6 +9,7 @@ import './App.css'
 import { setupExternalLinks } from './externalLinks'
 import { ThemeProvider } from './themeContext'
 import { UpdateProvider } from './updateContext'
+import { SyncProgressProvider } from './syncProgressContext'
 import App from './App.tsx'
 
 dayjs.locale('zh-cn')
@@ -19,7 +20,10 @@ createRoot(document.getElementById('root')!).render(
     <ThemeProvider>
       <BrowserRouter>
         <UpdateProvider>
-          <App />
+          {/* 同步进度：全应用共享一份轮询（悬浮卡 / 数据概览面板 / 页内提示都读它） */}
+          <SyncProgressProvider>
+            <App />
+          </SyncProgressProvider>
         </UpdateProvider>
       </BrowserRouter>
     </ThemeProvider>

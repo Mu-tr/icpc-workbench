@@ -18,6 +18,7 @@ import Mastery from './pages/Mastery'
 import Reminder from './Reminder'
 import ContestReminder from './ContestReminder'
 import UpdateChecker from './UpdateChecker'
+import SyncProgressBadge from './SyncProgressBadge'
 import { get } from './api'
 import SiderMenu from './components/SiderMenu'
 import { MENU } from './menuConfig'
@@ -42,6 +43,8 @@ export default function App() {
     <Layout style={{ minHeight: '100vh' }}>
       <Reminder />
       <ContestReminder />
+      {/* 全局同步悬浮卡：切到任何页面都能看到「还在同步」，避免用户误以为卡住而退出 */}
+      <SyncProgressBadge />
       <Sider
         width={200}
         collapsedWidth={68}

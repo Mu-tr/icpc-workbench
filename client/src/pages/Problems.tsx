@@ -19,9 +19,12 @@ import {
   Upload,
 } from 'antd'
 import type { TreeSelectProps } from 'antd'
-import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, EditOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
+import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useSearchParams } from 'react-router-dom'
+import SyncProgressHint from '../components/SyncProgressHint'
+import SyncHistoryDrawer from '../components/SyncHistoryDrawer'
+import { useSyncProgress } from '../syncProgressContext'
 import type { KnowledgeCoverage, KnowledgePointEntry, PlatformId } from '../../../shared/src/index.ts'
 import { PLATFORMS } from '../../../shared/src/index.ts'
 import IntentPopover from '../components/IntentPopover'
@@ -150,7 +153,7 @@ export default function Problems() {
   const [draftDiffMax, setDraftDiffMax] = useState<number | undefined>()
   // 内置题库开箱即用：默认包含未做题库题（否则题库再大默认视图也只有做过的题）
   const [includeBank, setIncludeBank] = useState(true)
-  const [importOpen, setImportOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(() => searchParams.get('import') === 'sync')
   /** 「导入刷题记录」弹窗当前页签（受控：SyncTab 用它判断自己是否活跃，从而刷新/轮询续拉状态） */
   const [importTab, setImportTab] = useState('sync')
   const [cleaning, setCleaning] = useState(false)
@@ -1124,6 +1127,10 @@ function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boole
   const [handle, setHandle] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string>()
+  // 同步进度（全局共享的 /api/sync/progress 轮询）：本页只看当前所选平台那一行
+  const { refresh: refreshProgress } = useSyncProgress()
+  // 「上次同步结果」抽屉（最近 50 次同步明细，平台/模式/耗时/错误原因）
+  const [historyOpen, setHistoryOpen] = useState(false)
   // 各平台后台续拉状态（GET /api/sync/status）：截断后服务端会自行分批续拉，这里给出进度与手动停止
   const [statuses, setStatuses] = useState<SyncPlatformStatus[]>([])
   const [cancelling, setCancelling] = useState<string>()
@@ -1155,6 +1162,9 @@ function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boole
   const run = async () => {
     if (!handle.trim()) return
     setBusy(true)
+    setResult(undefined)
+    // 立刻拉一次进度：点下去就看到「已用时 0 秒 · 正在建立连接」，而不是空白等待
+    refreshProgress()
     try {
       const r = await post<{ imported: number; skipped: number; errors: string[]; truncated?: boolean; note?: string }>(`/api/sync/${platform}`, { handle: handle.trim() })
       const parts = [`导入 ${r.imported} 条`, `去重 ${r.skipped} 条`]
@@ -1168,6 +1178,7 @@ function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boole
       message.error((e as Error).message)
     } finally {
       setBusy(false)
+      refreshProgress()
     }
   }
 
@@ -1194,8 +1205,14 @@ function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boole
         <Button type="primary" loading={busy} onClick={run}>同步</Button>
       </Space>
       {result && <p style={{ marginTop: 12 }}>{result}</p>}
-      {pending.length > 0 && (
-        <div style={{ marginTop: 12 }}>
+      {/* 同步进行中：显示真实请求进度（已用时 / 已请求次数 / 最后一次请求距今），
+          避免用户以为卡住而直接关掉应用 */}
+      {busy && (
+        <p style={{ marginTop: 12, marginBottom: 0 }}>
+          <SyncProgressHint platform={platform} />
+        </p>
+      )}
+      {pending.length > 0 && (        <div style={{ marginTop: 12 }}>
           {pending.map((s) => {
             const ac = s.autoContinue!
             return (
@@ -1221,6 +1238,12 @@ function SyncTab({ onDone, active = true }: { onDone: () => void; active?: boole
           })}
         </div>
       )}
+      <div style={{ marginTop: 12 }}>
+        <a onClick={() => setHistoryOpen(true)} style={{ fontSize: 13 }}>
+          <HistoryOutlined /> 上次同步结果（各平台最近 50 次）
+        </a>
+      </div>
+      <SyncHistoryDrawer open={historyOpen} onClose={() => setHistoryOpen(false)} />
     </div>
   )
 }

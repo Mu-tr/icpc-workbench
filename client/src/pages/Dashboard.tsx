@@ -25,6 +25,9 @@ import type { DifficultyStat, OverallStats, PlatformStat, TrendPoint, WeaknessPr
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
 import StatStrip from '../components/StatStrip'
+import SyncStatusCard from '../components/SyncStatusCard'
+import SyncProgressHint from '../components/SyncProgressHint'
+import { useSyncProgress } from '../syncProgressContext'
 import { platformName, rateColor } from '../ui'
 import { get, post } from '../api'
 import type { PlatformId, SyncResult } from '../../../shared/src/index.ts'
@@ -175,9 +178,12 @@ export default function Dashboard() {
   }
 
   // 一键同步所有已绑定账号（增量），完成后刷新概览数据
+  const { refresh: refreshProgress } = useSyncProgress()
   const doSync = async () => {
     if (syncing) return
     setSyncing(true)
+    // 立刻拉一次进度：让「同步中」在点下去的下一个渲染就出现，不必等轮询周期
+    refreshProgress()
     try {
       const r = await post<SyncAllResponse>('/api/sync/all')
       if (r.results.length === 0) {
@@ -211,13 +217,18 @@ export default function Dashboard() {
       message.error((e as Error).message)
     } finally {
       setSyncing(false)
+      // 收尾也立刻刷新一次：让面板显示「已完成 N/M」而不是等下一个轮询周期
+      refreshProgress()
     }
   }
 
   const syncButton = (
-    <Button icon={<SyncOutlined spin={syncing} />} loading={syncing} onClick={doSync}>
-      同步数据
-    </Button>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+      <Button icon={<SyncOutlined spin={syncing} />} loading={syncing} onClick={doSync}>
+        同步数据
+      </Button>
+      <SyncProgressHint />
+    </div>
   )
 
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '80px auto' }} />
@@ -225,6 +236,8 @@ export default function Dashboard() {
     return (
       <div>
         <PageHeader title="数据概览" description="追踪你的训练进度和薄弱环节" extra={syncButton} />
+        {/* 首次同步（还没有任何数据）时也要看得见进度：这正是最容易误以为卡住的时刻 */}
+        <SyncStatusCard />
         <Card>
           <Empty
             description="暂无刷题数据 —— 到「设置」绑定平台账号后点右上角「同步数据」，或到「题目管理」手动导入"
@@ -267,6 +280,9 @@ export default function Dashboard() {
         description="追踪你的训练进度和薄弱环节"
         extra={syncButton}
       />
+
+      {/* 同步状态：进行中显示逐平台进度；空闲显示上次同步结果（含历史抽屉入口） */}
+      <SyncStatusCard />
 
       <StatStrip
         items={[
