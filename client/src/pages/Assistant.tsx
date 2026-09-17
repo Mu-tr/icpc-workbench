@@ -1412,7 +1412,7 @@ export default function Assistant() {
                       </div>
                     </details>
                   )}
-                  <Markdown text={text} />
+                  <Markdown text={text} streaming={sending && i === messages.length - 1} />
                   {text.trim() && (
                     <Button
                       size="small"

@@ -118,13 +118,154 @@ const CODE_IDENTIFIER =
   /^(?:std|push_back|pop_back|emplace_back|make_pair|lower_bound|upper_bound|sync_with_stdio|tie|ios|printf|scanf|sort|max_element|min_element|__int128|size_t|int64_t|uint64_t|NULL|nullptr|append|extend|strip|split|join|len|range|enumerate|zip)::?$/i
 
 /**
+ * 数学下标里常见的**运算符名后缀**：`dp_max`、`ans_min`、`sum_max`。
+ * 这类写法的后缀是数学运算符（读作"dp 在 max 处"），所以按数学下标渲染更合理。
+ *
+ * 只收**有实际证据**的 `max` / `min`（`dp_min` 类误判的正用例就是这几个）。
+ * 每加一个词都会扩大误伤面：`query_max`、`prefix_sum` 这类"动词/名词 + 运算符名"的
+ * 变量名只凭 token 形态与 `dp_max` 完全同构、无法区分，所以按需增量，别一次塞一堆。
+ */
+const MATH_OPERATOR_SUFFIXES = new Set(['max', 'min'])
+
+/**
+ * 「代码语境」的强信号（**只认语法，不认反引号**）：同一行里出现这些，
+ * 说明这行在讲代码而不是公式。
+ *
+ * 刻意不含反引号：AI 会把说明里的数学也用反引号包起来（用户截图里整段说明都是
+ * `` `r` ``、`` `c←c+1` `` 这种），拿反引号当"这行是代码"的证据，会把说明里的数学
+ * 又推回代码外观 —— 正是要修的问题。
+ */
+const CODE_SYNTAX_CONTEXT =
+  /;|::|->|\/\/|\/\*|#\s*(?:include|define|pragma|ifdef|ifndef)|\b(?:int|long|double|float|char|bool|void|unsigned|size_t|const|struct|class|namespace|typedef|using|vector|nullptr|sizeof|template|return|def)\b/
+
+/**
+ * 运算符后缀规则（`dp_max`）用的代码语境：语法信号之外，**反引号**（显式代码标注）
+ * 与**下标访问**（`dp_max[i]`）同样算代码证据。
+ */
+const CODE_CONTEXT =
+  /`[^`\n]*`|;|::|->|\/\/|\/\*|#\s*(?:include|define|pragma|ifdef|ifndef)|\b(?:int|long|double|float|char|bool|void|unsigned|size_t|const|struct|class|namespace|typedef|using|vector|nullptr|sizeof|template|return|def)\b|\w+\s*\[[^\]]*[A-Za-z_]/
+
+/** 明确的**代码形态**：出现这些就绝不当成数学记号 */
+const CODE_SHAPE =
+  /;|::|->|\/\/|\/\*|#\s*(?:include|define|pragma|ifdef|ifndef)|\b[A-Za-z_]\w*\s*\(|\.[A-Za-z_]\w*|\b(?:int|long|double|float|char|bool|void|string|auto|vector|pair|map|set|queue|stack|unsigned|size_t|const|struct|class|namespace|typedef|using|return|def|if|else|for|while|switch|case|break|continue|new|delete|print|printf|scanf|cout|cin|endl|std|nullptr|lambda|import|from|range|enumerate|append|extend|split|join|sort)\b/
+
+/**
+ * 数学记号里的关系符 / 箭头 / 集合符号。
+ * 刻意**不含裸 `+` `-`**：`a[x] + a[x+1]` 这类"带运算符的 ASCII 下标表达式"
+ * 曾让用户看到过乱码（截图回归，见 test 里的用例），那条线不碰。
+ * `−`（U+2212 数学减号）与 ASCII `-` 不同，它是排版出来的数学符号，收进来。
+ */
+const MATH_RELATION = /[=←→↔⇔⇒⇐≤≥≠≈±×÷·√∞∈∉∪∩∑∏Σ∂∇⌊⌋⌈⌉−]/
+
+/** 数学里的 `mod`（独立成词：不能是 `dp_mod`、`model` 的一部分） */
+const MATH_MOD_WORD = /(?<![\w\\])mod(?![\w])/
+
+/** 极短的数学符号：单字母、纯数字、带符号数字、±数字（`r`、`c`、`0`、`-1`、`±1`） */
+const SHORT_MATH_SYMBOL = /^(?:[A-Za-z]|[+-]?\d+(?:\.\d+)?|±\d+)$/
+
+/**
+ * 带下标的数学符号写法：`a_i`、`dp_i`、`k−a_i`。
+ * 下标只有 1-2 个字符才算数学记号；`vis_cnt`、`max_element`、`foo_bar` 这类
+ * 3+ 字符后缀是 snake_case 变量名（后缀长度就是那条第 3 节里"已知不可靠"的启发式，
+ * 这里只是把同一条线用在"反引号里到底是数学还是代码"这个判断上）。
+ */
+const SUBSCRIPT_NOTATION = /[A-Za-z0-9]_[A-Za-z0-9]{1,2}(?![A-Za-z0-9_])/
+
+/** 整段就是一个下标记号：`a[offset]`、`dp[i][j]`（不带任何其它运算符） */
+const BRACKET_SYMBOL = /^[A-Za-z_]\w*(?:\s*\[[^\]\n]*\])+$/
+
+/**
+ * **伪代码结构特征**：控制流关键字（不要求后面跟括号）、自增自减、赋值/行尾冒号。
+ *
+ * `looksLikeCode` 里的控制流判定要求 `if (`，而 AI 写的伪代码是
+ * `if cnt[i] > 0 :`（没有括号），于是整块伪代码会因为某一行含 `…` 这类"强数学记号"
+ * 被判成公式 —— 实测后果：所有换行被压成一行，KaTeX 还会吞掉词间空格
+ * （`for i` → `fori`、`else break answer` → `elsebreakanswer`）。
+ * 宁可把公式留在代码卡里，也不能把代码渲染成公式，所以单独认这几个信号。
+ */
+const PSEUDO_CODE =
+  /(?<![\\\w])(?:if|elif|elseif|else|for|foreach|while|switch|case|default|break|continue|return|then|do|end|def|function|procedure|repeat|until|begin)(?![\w])|\+\+|--|:=|(?:\w|\))\s*:\s*$/m
+
+/**
+ * 这段内容是**数学记号**还是**代码** —— 用于把「说明正文里的数学」从代码外观
+ * （行内代码 span / 代码卡）里解放出来。
+ *
+ * 判定顺序与全项目一致：**默认是代码**，只有出现明确的数学结构才升级为数学。
+ *   · 已经是 LaTeX 记法（`\cmd`、`_{}`、`^{}`）→ 数学
+ *   · 明确的代码形态（分号、限定名、成员访问、函数调用、关键字…）→ 代码
+ *   · 关系符/箭头/`mod`/极短数学符号/带下标的符号 → 数学
+ *   · 整段就是一个下标记号（`a[offset]`）→ 数学；但同一行是代码语境时仍是代码
+ *
+ * @param content 片段内容（不含反引号）
+ * @param context 该片段所在的行，用于判定代码语境
+ */
+export function looksLikeMathNotation(content: string, context = ''): boolean {
+  const s = content.trim()
+  if (!s) return false
+  // 已是 LaTeX 记法：交给原有公式管线
+  if (/\\[a-zA-Z]|_\{|\^\{/.test(s)) return true
+  // 明确的代码形态优先（`O(n log n)`、`g[prev].push_back(cur)`、`int x = 1;`）
+  if (CODE_SHAPE.test(s)) return false
+  if (MATH_RELATION.test(s) || MATH_MOD_WORD.test(s) || SHORT_MATH_SYMBOL.test(s)) return true
+  // 带下标的符号写法（`k−a_i`、`a_1`）
+  if (SUBSCRIPT_NOTATION.test(s)) return true
+  // 单个下标记号：说明正文里这是数学符号（`a[offset]`、`dp[i][j]`），
+  // 但同一行有代码语法特征时仍按代码（`int dp[100005];`、`dp[i][j] = 0;`）
+  if (BRACKET_SYMBOL.test(s)) return !CODE_SYNTAX_CONTEXT.test(context)
+  return false
+}
+
+/**
+ * 反引号里其实是**中文说明**而不是代码：`` `价值` ``、`` `未使用` ``。
+ * AI 习惯用反引号引一个术语，渲染成等宽代码药丸很怪。要求不含任何代码语法特征，
+ * 所以 `` `int x; // 计数` `` 这类仍然按代码。
+ */
+export function isQuotedChineseTerm(content: string): boolean {
+  const s = content.trim()
+  return /[\u4e00-\u9fff]/.test(s) && !CODE_SHAPE.test(s)
+}
+
+/**
+ * 比 looksLikeMathNotation 更严：必须出现**关系符 / 数学词**（`=`、`←`、`mod` …），
+ * 只有"单个下标记号"（`g[i][j]`）或"单个短符号"（`0`）不算数学。
+ *
+ * 用于推翻围栏：围栏是 AI **显式写的代码块**，要改判成公式需要更强的证据；
+ * 而正文里的反引号只是弱标注（AI 习惯用它包数学），所以那边可以放宽一档。
+ */
+export function looksLikeMathEquation(content: string): boolean {
+  const s = content.trim()
+  if (!s) return false
+  if (/\\[a-zA-Z]|_\{|\^\{/.test(s)) return true
+  if (CODE_SHAPE.test(s)) return false
+  return MATH_RELATION.test(s) || MATH_MOD_WORD.test(s)
+}
+
+/**
  * 片段是否其实是「代码引用」而非公式。
  * 例如正文里提到的 g[prev].push_back(cur)、std::sort(a, a+n)、dp[i][j]、dp_max：
  * 这些含下划线/括号，会被数学种子命中，但它们属于代码，应渲染成行内代码。
  *
  * 注意要求片段内不含空格/逗号混排，避免把 `dp[i] + a[j]` 这类数学表达式整体标成代码。
+ * （实际效果：`dp_max = min(dp_j)` 这种整段式子会被"含空格"这条直接判为数学，
+ *   所以本文的形态规则只影响**正文里单独提到的那个 token**。）
+ *
+ * ⚠ 下划线左右各 ≥2 字符这条仍然是启发式，现状与取舍：
+ *
+ *   判为公式：dp_i  c_i  a_m  f_i  x_1  dp_i_j  a_b_c  f_max
+ *             dp_max  dp_min  sum_max  ans_min      ← 运算符名后缀（已修正）
+ *             a[offset]  dp[i]  dp[i][j]            ← 单个下标记号（说明正文里是数学）
+ *   判为代码：push_back  vis_cnt  foo_bar  my_var  is_valid  sync_with_stdio
+ *             max_element  a[x] + a[x+1]（带运算符的表达式不碰）
+ *             dp_max[..] / dp[i][j]（同一行有代码语境时）
+ *
+ * 仍然**已知误判**的是：
+ *   · `dp_i_j` 这类嵌套下标判成公式后，KaTeX 只对第一个 `_` 生效，不是双下标；
+ *   · 裸提到 `query_max` / `prefix_sum` 这类"动词+运算符名"的变量名会被判成公式
+ *     （与 `dp_min` 同构，无法用形态区分）。代价可接受：它们多数出现在带反引号、
+ *     声明或下标访问的代码语境里，那由 CODE_CONTEXT 兜住；完全裸提时才走公式。
+ *     真要再压，应加"动词性前缀"这类语义信号，而不是继续调字符数阈值。
  */
-export function looksLikeCodeReference(fragment: string): boolean {
+export function looksLikeCodeReference(fragment: string, context = ''): boolean {
   const s = fragment.trim()
   // 含 LaTeX 命令或中文说明的一定不是代码引用
   if (!s || /\\[a-zA-Z]/.test(s) || /[\u4e00-\u9fff]/.test(s)) return false
@@ -136,11 +277,25 @@ export function looksLikeCodeReference(fragment: string): boolean {
   // 但**单字母后缀**是数学下标：`dp_i`、`c_i`、`a_m` 必须走公式（否则会渲染成等宽代码，
   // 与同一句话里的 `f_{i-1}` 风格不一致）。所以要求后缀至少两个字符，
   // 或多段下划线（`sync_with_stdio`）。
-  if (/^[A-Za-z]{2,}_[A-Za-z0-9]{2,}(?:_[A-Za-z0-9]+)*$/.test(s)) return true
+  if (/^[A-Za-z]{2,}_[A-Za-z0-9]{2,}(?:_[A-Za-z0-9]+)*$/.test(s)) {
+    // 例外：后缀是数学运算符名时按数学下标渲染（`dp_max` 读作 dp 在 max 处），
+    // 除非同一行有明确的代码语境（声明 / 分号 / 限定名 / 反引号 / 下标访问）
+    const suffix = s.slice(s.lastIndexOf('_') + 1).toLowerCase()
+    if (MATH_OPERATOR_SUFFIXES.has(suffix) && !CODE_CONTEXT.test(context)) return false
+    return true
+  }
   if (CODE_IDENTIFIER.test(s)) return true
-  // 下标访问 a[...]：要求括号内还有标识符，排除 x[i] 这种数学下标
+  // 整段就是一个下标记号（`a[offset]`、`dp[i][j]`）：说明正文里它是**数学**，
+  // 不是代码（KaTeX 渲染时方括号原样保留，含义不变）。同一行有代码语法时才按代码。
+  if (BRACKET_SYMBOL.test(s)) return CODE_SYNTAX_CONTEXT.test(context)
+  // 下标访问 a[...]：括号内还有标识符说明是代码数组（`g[prev].push_back` 已在上面的限定名分支拦下）
   const bracket = /[A-Za-z_]\w*\s*\[([^\]]*)\]/.exec(s)
   if (bracket && /[A-Za-z_]/.test(bracket[1]!)) return true
+  // 括号里只有数字（`dp[100005]` = 数组大小）：单看片段与数学下标 `a[5]` 判断不了，
+  // 但同一行有代码语境（声明 / 分号 / 限定名 / 反引号 / 下标访问）时按代码渲染 ——
+  // `int dp[100005];` 是 DP 讲解里最常见的写法之一，判成公式是排版事故。
+  // 纯正文里提到的 `以 dp[100005] 存状态` 保持现状（数学下标），不做无守卫的扩张。
+  if (bracket && CODE_CONTEXT.test(context)) return true
   return false
 }
 
@@ -191,6 +346,28 @@ export function normalizeMathSymbolsForDetect(text: string): string {
 }
 
 /**
+ * 多行内容是否是**一条被折行的式子**（而不是多行代码）。
+ *
+ * AI 常把一条长公式折成两行写，第二行以运算符开头（对齐续行）：
+ *   `avail(i) = cnt[i]` / `         + (i != k-i ? cnt[k-i] : 0)`
+ * 这种折行只是排版，合并成一行交给 KaTeX 才是正确结果，不该留在代码卡里。
+ *
+ * 反例（保持代码）：
+ *   · `dp[0] = 1` / `dp[i] = dp[i-1] + dp[i-2]` —— 两行都以标识符开头，是两条独立语句；
+ *   · 含 `;`（语句结束符）或伪代码结构（控制流 / `++` / `--`）。
+ */
+function isSingleWrappedExpression(lines: string[]): boolean {
+  if (lines.length < 2) return false
+  // 后续行都必须以运算符开头（续行的标志）
+  if (!lines.slice(1).every((l) => /^[+\-*/·×÷−=<>≤≥&|^%\\]/.test(l.trim()))) return false
+  const body = lines.join(' ')
+  if (body.includes(';')) return false
+  if (PSEUDO_CODE.test(body.replace(/\\text\{[^}]*\}/g, ''))) return false
+  // 还要有"这是一条式子"的正面证据
+  return MATH_RELATION.test(body) || MATH_MOD_WORD.test(body) || looksStronglyMath(body)
+}
+
+/**
  * 围栏代码块内容是否为数学公式。
  *
  * AI 经常把公式写进围栏（避免 Markdown 语法干扰），而且写法五花八门，判定顺序：
@@ -221,11 +398,22 @@ export function shouldConvertFenceToMath(langRaw: string, body: string): boolean
   const code = normalizeMathSymbolsForDetect(stripLineComments(trimmed)).trim()
   if (!code) return false
   if (looksLikeCode(code)) return false
+  // 伪代码结构（`if cnt[i] > 0 :`、`cnt[i]--`、`for i = 0…n :`）→ 代码。
+  // 这一步必须在"含强数学记号"之前：否则只要块里有一行含 `…`/`≤` 这类记号，
+  // 整块伪代码就会被判成公式，所有换行被压成一行（用户截图里的"代码粘连"）。
+  // `\text{…}` 里是字面说明，先摘掉再判，避免 `\text{if}` 之类误伤公式。
+  if (PSEUDO_CODE.test(code.replace(/\\text\{[^}]*\}/g, ''))) return false
   const lines = code.split('\n').map((l) => l.trim()).filter(Boolean)
   if (lines.length === 0) return false
-  // 单行：含强数学记号即可
-  if (lines.length === 1) return looksStronglyMath(lines[0]!)
-  // 多行：从宽 —— 只要**至少一行**含强数学记号，且包含该记号的行里没有普通说明文字，
+  // 单行：含强数学记号即可；或者它本身就是一条数学**式子**（`b[r][c] = a[(r - c) mod n]`
+  // 这类 ASCII 记法没有 LaTeX/Unicode 特征，但它是公式，不该塞进代码卡）。
+  // 比正文里宽松的 looksLikeMathNotation 严一档：围栏是显式的代码块标注，
+  // 只有 `g[i][j]`/`0` 这种孤零零的片段仍然留在代码卡里。
+  if (lines.length === 1) return looksStronglyMath(lines[0]!) || looksLikeMathEquation(lines[0]!)
+  // 多行但是**一条被折行的式子**（`avail(i) = cnt[i]` / `  + (i != k-i ? cnt[k-i] : 0)`）→
+  // 公式：折行只是排版，合并成一行才是正确结果（用户截图反馈的第二类"公式被当代码卡"）
+  if (isSingleWrappedExpression(lines)) return true
+  // 多行值表：从宽 —— 只要**至少一行**含强数学记号，且包含该记号的行里没有普通说明文字，
   // 就整块按公式渲染。像 `n = 1 : a[0]` / `n ≥ 3 : S + M` 这种值表，
   // 部分行（`a[0]`）没有强数学记号，但它明显是公式而不是代码。
   const mathLines = lines.filter((l) => looksStronglyMath(l))
@@ -234,14 +422,28 @@ export function shouldConvertFenceToMath(langRaw: string, body: string): boolean
 }
 
 /**
- * 剥掉行尾解释性注释（`// 说明`）。
+ * 行尾解释性注释（`// 说明`）的匹配模式。
  *
- * 仅在注释符后面跟着空白或中文字符时才剥（`a // b`、`a // 说明`），
+ * 仅在注释符后面跟着空白或中文字符时才匹配（`a // b`、`a // 说明`），
  * 避免把 `n//2` 这类整除、或 `http://` 误判。行内代码 span 里的内容保持不动。
  */
+const LINE_COMMENT = /\s*\/\/\s*(?=[\s\u4e00-\u9fff]|$)(.*)$/
+
+/** 剥掉行尾解释性注释（`// 说明`） */
 export function stripLineComments(text: string): string {
   return text
     .split('\n')
-    .map((line) => line.replace(/\s*\/\/\s*(?=[\s\u4e00-\u9fff]|$).*$/, ''))
+    .map((line) => line.replace(LINE_COMMENT, ''))
     .join('\n')
+}
+
+/**
+ * 取出被剥掉的那些解释性注释文本（不含注释符），用于**不静默丢内容**：
+ * 公式块里的中文说明转成 `\text{…}` 留在公式里（见 markdownMath.normalizeFenceBody）。
+ */
+export function extractLineComments(text: string): string[] {
+  return text
+    .split('\n')
+    .map((line) => LINE_COMMENT.exec(line)?.[1]?.trim() ?? '')
+    .filter(Boolean)
 }

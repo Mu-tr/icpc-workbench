@@ -19,7 +19,7 @@ import {
   normalizeMathDelimiters,
   wrapBareMath,
 } from '../src/components/markdownMath.ts'
-import { shouldConvertFenceToMath, looksLikeCode, normalizeLang, stripLineComments } from '../src/components/markdownCode.ts'
+import { shouldConvertFenceToMath, looksLikeCode, normalizeLang, stripLineComments, looksLikeCodeReference } from '../src/components/markdownCode.ts'
 
 // ---------- stripOuterCodeFence ----------
 
@@ -157,10 +157,16 @@ describe('正文里的代码引用渲染为行内代码', () => {
     assert.ok(out.includes('std::sort'), out)
     assert.ok(!/\$std::sort/.test(out), out)
   })
-  it('dp[i][j] 下标访问保持代码形态', () => {
+  it('说明正文里的单个下标记号按数学渲染（dp[i][j] / a[offset]）', () => {
+    // 本轮按用户反馈翻面：说明里的 `dp[i][j]` 是数学符号，不是代码。
+    // KaTeX 渲染时方括号原样保留（不做下标改写），含义不变。
     const out = preprocessMath('状态 dp[i][j] 表示前 i 个')
-    assert.ok(out.includes('dp[i][j]'), out)
-    assert.ok(!/\$dp/.test(out), out)
+    assert.ok(out.includes('$dp[i][j]$'), out)
+    assert.ok(preprocessMath('权值正是 a[offset]').includes('$a[offset]$'))
+    assert.ok(preprocessMath('用 dp_max[i] 记录').includes('$dp_max[i]$'))
+    // 同一行有代码语法语境时仍是代码
+    const code = preprocessMath('数组 int dp[i][j]; 的写法')
+    assert.ok(!code.includes('$dp'), code)
   })
   it('裸 snake_case 标识符 push_back 按代码处理', () => {
     const out = wrapBareMath('用 push_back 插入')
@@ -176,14 +182,243 @@ describe('正文里的代码引用渲染为行内代码', () => {
       assert.ok(!out.includes('`'), `${src} 被当成代码: ${out}`)
     }
   })
-  it('多字母下标的标识符仍按代码渲染（push_back / dp_max）', () => {
-    for (const src of ['push_back', 'dp_max', 'vis_cnt']) {
+  it('非运算符后缀的 snake_case 仍按代码渲染（push_back / vis_cnt）', () => {
+    for (const src of ['push_back', 'vis_cnt']) {
       const out = preprocessMath(`前缀 ${src} 后缀`)
       assert.ok(out.includes(`\`${src}\``), `${src} 未保持代码: ${out}`)
     }
   })
+  it('运算符名后缀按公式渲染（dp_max / dp_min），有代码语境时才是代码', () => {
+    for (const src of ['dp_max', 'dp_min', 'sum_max', 'ans_min']) {
+      const out = preprocessMath(`前缀 ${src} 后缀`)
+      assert.ok(out.includes(`$${src}$`), `${src} 未进公式: ${out}`)
+    }
+    // 同一行的代码语境（声明 / 分号 / 下标访问 / 反引号）把身份翻回代码
+    for (const line of ['int dp_max[100005];', 'dp_min 的初值设为 0;', '用 `dp_max` 记录最大值']) {
+      const out = preprocessMath(line)
+      assert.ok(!out.includes('$dp_m'), `${line} 里的 dp_m* 被误判成公式: ${out}`)
+    }
+  })
   it('公式里的绝对值 | … | 不被截断，且裸 | 表达式被识别', () => {
     assert.ok(preprocessMath('令 x = |a| + |b| 即可').includes('$|a| + |b|$'))
+  })
+  // 回归：`$` 定界符**紧贴**裸数学时，包裹会拼出 `$$`（块级定界符），
+  // 截断前面那个行内公式。流式半成品里必然出现（`满足 $a_j` 的收尾 `$` 还没到）。
+  it('定界符紧贴裸数学时不拼出 $$，保持原样', () => {
+    const text = '其中 $j 满足 $a_j 的取值'
+    const out = preprocessMath(text)
+    assert.ok(!out.includes('$$'), `拼出了块级定界符: ${out}`)
+    assert.equal(out, text)
+  })
+  it('带数字下标的代码声明不被包进公式（截图级排版事故回归）', () => {
+    // 修复前：`int dp[100005];` → `int $dp[100005]$;`（整行代码渲染成斜体公式）
+    for (const line of ['int dp[100005];', 'int dp_max[100005];', 'long long f[1005];']) {
+      const out = preprocessMath(line)
+      assert.ok(!out.includes('$'), `${line} 被包进了公式: ${out}`)
+    }
+    // 纯正文里提到的数字下标保持现状（不无守卫地扩张）
+    assert.ok(preprocessMath('以 dp[100005] 数组存状态').includes('$dp[100005]$'))
+  })
+  it('紧跟语句结束符的片段按代码语句渲染（dp[i] = dp[i-1] + 1;）', () => {
+    const out = preprocessMath('转移就是 dp[i] = dp[i-1] + 1;')
+    assert.ok(out.includes('`dp[i] = dp[i-1] + 1`'), out)
+    assert.ok(!out.includes('$'), out)
+  })
+  it('定界符后面有空格时不受影响，裸数学照常包裹', () => {
+    const out = preprocessMath('前缀 $a_i$ 与 b_j 之和')
+    assert.ok(out.includes('$b_j$'), out)
+    assert.ok(!out.includes('$$'), out)
+  })
+})
+
+// ---------- 代码引用 vs 数学下标：现有行为契约 ----------
+
+/**
+ * `looksLikeCodeReference` 是一条启发式（下划线左右各 ≥2 字符 → 代码，否则当数学下标）。
+ * 本轮按决定修掉「多字母数学下标被判成代码」：**后缀是数学运算符名（max/min）时按公式渲染**，
+ * 代价是 `dp_max` 与 `dp_min` 必须一起翻面（两者形态完全同构），
+ * 以及裸提到的 `query_max` 这类变量名也会走公式（用代码语境信号兜住多数情况）。
+ *
+ * 这张表把**现有行为**钉住（有意为之 / 已知误判 / 已知代价都标出来）：
+ * 将来要动这条规则，先看这里哪些是有意设计、哪些是承认的误判，再决定翻哪一面。
+ */
+describe('代码引用 vs 数学下标：现有行为契约', () => {
+  it('单字母后缀 → 数学下标（有意：与 f_{i-1} 的渲染风格保持一致）', () => {
+    for (const src of ['dp_i', 'c_i', 'a_m', 'f_i', 'x_1']) {
+      assert.equal(looksLikeCodeReference(src), false, `${src} 应判为公式`)
+    }
+  })
+  it('运算符名后缀（max/min）→ 数学下标（本轮修正；dp_max 一并翻面）', () => {
+    for (const src of ['dp_max', 'dp_min', 'sum_max', 'ans_min']) {
+      assert.equal(looksLikeCodeReference(src), false, `${src} 应判为公式`)
+    }
+  })
+  it('其余 snake_case → 代码标识符（有意：push_back 这类绝不能变斜体公式）', () => {
+    for (const src of ['push_back', 'vis_cnt', 'foo_bar', 'my_var', 'is_valid', 'sync_with_stdio', 'max_element']) {
+      assert.equal(looksLikeCodeReference(src), true, `${src} 应判为代码`)
+    }
+  })
+  it('左侧只有 1 个字符时后缀再长也判为公式（f_max 是这条的副作用，不是规则覆盖）', () => {
+    assert.equal(looksLikeCodeReference('f_max'), false)
+  })
+  it('代码语境兜住运算符后缀：声明 / 分号 / 限定名 / 反引号 / 下标访问 → 仍是代码', () => {
+    assert.equal(looksLikeCodeReference('dp_max', 'int dp_max[100005];'), true)
+    assert.equal(looksLikeCodeReference('dp_max', '把 dp_max 初始化为 0;'), true)
+    assert.equal(looksLikeCodeReference('dp_max', 'std::max(dp_max, x)'), true)
+    assert.equal(looksLikeCodeReference('query_max', '用 `query_max` 维护'), true)
+    assert.equal(looksLikeCodeReference('sum_min', 'sum_min[i] 表示前缀和'), true)
+  })
+  it('嵌套下标被判成公式，但 KaTeX 只吃第一个 `_`（**已知误判**，非预期双下标）', () => {
+    // 记录现状：`dp_i_j` → `$dp_i_j$`，渲染出来是 dp_i 后面跟一个字面 j，不是双下标。
+    // 修它需要另一套信号（把嵌套 `_` 拆成 `_{i,j}`），本轮有意不动。
+    assert.equal(looksLikeCodeReference('dp_i_j'), false)
+    assert.equal(looksLikeCodeReference('a_b_c'), false)
+  })
+  it('裸提到「动词+运算符名」的变量名会判成公式（**已知代价**，与 dp_min 同构无法区分）', () => {
+    // `query_max` / `prefix_sum` 这类变量名与 `dp_min` 形态完全一样，形态规则无法二选一；
+    // 有代码语境时由上一个用例兜住，完全裸提时才落到公式。再想压需要语义（动词性前缀）信号。
+    assert.equal(looksLikeCodeReference('query_max'), false)
+  })
+})
+
+// ---------- 说明正文里的数学不再被当成代码（截图反馈） ----------
+
+/**
+ * 用户截图：AI 把说明里的数学符号**全部用反引号包起来**（`r`、`c`、`c←c+1`、
+ * `offset = (r - c) mod n`、`a[offset]`），并把一条公式写进空标记围栏。
+ * 之前这些一律按代码渲染（行内代码 span / 代码卡），整段说明变成等宽代码块。
+ *
+ * 本轮按「默认是代码、只有明确数学结构才升级」的分层原则把它们放回数学渲染，
+ * 同时守住真正的代码（push_back / a[x] + a[x+1] / O(n log n) / int x = 1;）。
+ */
+describe('说明正文里的数学记号不再渲染成代码', () => {
+  it('反引号里的短数学符号 → 行内公式', () => {
+    const out = preprocessMath('记行号为 `r`，列号为 `c`。')
+    assert.ok(out.includes('$r$') && out.includes('$c$'), out)
+    assert.ok(!out.includes('`'), out)
+  })
+  it('反引号里的数学表达式 → 行内公式（含 mod → \\bmod）', () => {
+    const out = preprocessMath('把 `offset = (r - c) mod n` 称为偏移')
+    assert.ok(out.includes('$offset = (r - c) \\bmod n$'), out)
+  })
+  it('反引号里的单个下标记号 → 行内公式', () => {
+    const out = preprocessMath('格子的权值正是 `a[offset]`。')
+    assert.ok(out.includes('$a[offset]$'), out)
+  })
+  it('反引号里的箭头/取模/带符号数 → 行内公式', () => {
+    const out = preprocessMath('- **向右**：`c←c+1`，`r` 不变 → `offset` 变为 `offset-1 (mod n)`')
+    assert.ok(out.includes('$c\\leftarrow c+1$'), out)
+    assert.ok(out.includes('$offset-1 (\\bmod n)$'), out)
+    // 行内「同词一致」：`offset` 在同一行里已经出现在数学记号中 → 也按数学渲染
+    assert.ok(out.includes('$offset$'), out)
+    assert.ok(!out.includes('`'), out)
+  })
+  it('纯数字/带符号数字 → 行内公式', () => {
+    const out = preprocessMath('步长为 `±1` 的随机游走，起点 `offset = 0`，终点也必须是 `0`。')
+    assert.ok(out.includes('$±1$'), out)
+    assert.ok(out.includes('$offset = 0$'), out)
+    assert.ok(out.includes('$0$'), out)
+  })
+  it('空标记围栏里的数学式子 → 块级公式，且行尾说明转成 \\text{} 保留', () => {
+    const out = preprocessMath('```\nb[r][c] = a[(r - c) mod n]      // 这里的 mod 取非负余数\n```')
+    assert.ok(out.includes('$$'), out)
+    assert.ok(out.includes('b[r][c] = a[(r - c) \\bmod n]'), out)
+    assert.ok(out.includes('\\text{这里的 mod 取非负余数}'), out)
+    assert.ok(!out.includes('```'), out)
+    // `\text{}` 里是字面文本：不能被 mod→\bmod 改写（KaTeX 文本模式下会报错）
+    assert.ok(!out.includes('\\text{这里的 \\bmod'), out)
+  })
+  it('真代码仍然保持代码（红线）', () => {
+    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'O(n log n)', 'sort(a, a + n)']) {
+      const out = preprocessMath(`前缀 \`${src}\` 后缀`)
+      assert.ok(out.includes(`\`${src}\``), `${src} 被误转公式: ${out}`)
+    }
+    const decl = preprocessMath('开一个 int dp[100005]; 数组，转移写成 dp[i] = dp[i-1] + 1; 即可')
+    assert.ok(!decl.includes('$'), decl)
+  })
+  it('mod 只在独立成词时才转 \\bmod（标识符里的 mod 不动）', () => {
+    assert.ok(preprocessMath('用 `dp_mod` 记录').includes('`dp_mod`'))
+    assert.ok(preprocessMath('$model(x)$').includes('model(x)'))
+  })
+  it('反引号里的中文术语去掉反引号（不是代码）', () => {
+    const out = preprocessMath('使它的 `价值` 为 `0`，若不是则未使用')
+    assert.ok(!out.includes('`价值`'), `中文术语仍是代码: ${out}`)
+    assert.ok(out.includes('价值'), out)
+    // 含代码语法的中文内容仍是代码（注释、语句）
+    assert.ok(preprocessMath('写成 `int x; // 计数` 即可').includes('`int x; // 计数`'))
+  })
+  it('反引号里的 Unicode 减号 + 下标 → 数学（k−a_i）', () => {
+    assert.ok(preprocessMath('使它的价值为 `k−a_i = 0`').includes('$k-a_i = 0$'))
+    assert.ok(preprocessMath('或是 `k−a_i` 本身').includes('$k-a_i$'))
+    assert.ok(preprocessMath('下标 `a_1` 与 `x_ij`').includes('$a_1$'))
+  })
+  it('多行伪代码围栏不被转成公式（换行与缩进必须保留）', () => {
+    // 用户截图回归：块里只要有一行含 `…`（强数学记号），整块伪代码曾被判成公式，
+    // 所有换行被压成一行、KaTeX 还吞掉词间空格（for i → fori、else break answer → elsebreakanswer）
+    const block = [
+      '```',
+      'need = 0',
+      'for i = 0…n :',
+      '    if cnt[i] > 0 :',
+      '        cnt[i]--, need++',
+      '    else:',
+      '        break',
+      'answer = i',
+      '```',
+    ].join('\n')
+    assert.equal(preprocessMath(block), block)
+    // 单行伪代码同样不升级（控制流关键字就是代码证据）
+    const flat = '```\nneed = 0 for i = 0…n : if cnt[i] > 0 : cnt[i]-- else break answer = i\n```'
+    assert.equal(preprocessMath(flat), flat)
+    // 但真正的公式围栏照旧升级
+    assert.ok(preprocessMath('```\nO(n·3^{n/6})\n```').includes('$$'))
+  })
+  it('反引号里自带 $ 定界符时保持代码（展示"公式源码怎么写"）', () => {
+    const text = '源码写作 `$a_i + b_i$` 的形式'
+    assert.equal(preprocessMath(text), text)
+  })
+  it('折行的公式（第二行以运算符开头）转成块级公式，注释以 \\text{} 保留', () => {
+    // 用户截图 3：这张卡不是代码，是一条被折成两行的公式
+    const raw = [
+      '```',
+      'avail(i) = cnt[i]                  // 直接保留 i',
+      '         + (i != k-i ? cnt[k-i] : 0) // 变换得到 i（若 i 与 k-i 不同）',
+      '```',
+    ].join('\n')
+    const out = preprocessMath(raw)
+    assert.ok(out.includes('$$'), `没有转成块级公式: ${out}`)
+    assert.ok(!out.includes('```'), out)
+    assert.ok(out.includes('avail(i) = cnt[i]'), out)
+    // 编程写法写成的关系符要转成真正的数学关系符（替换会留多余空格，比对前归一化）
+    assert.ok(out.replace(/[ \t]+/g, ' ').includes('i \\ne k-i'), out)
+    // 两处中文说明都保留
+    assert.ok(out.includes('\\text{直接保留 i') && out.includes('变换得到 i（若 i 与 k-i 不同）}'), out)
+  })
+  it('多行伪代码仍然留在代码卡（折行公式的判定不能放宽到代码）', () => {
+    const pseudo = [
+      '```',
+      'need = 0            // 已经成功构造了 0..need-1',
+      'for i = 0 … n:',
+      '    if cnt[i] > 0:          cnt[i]--, need++',
+      '    else break              // i 不能得到，mex = i',
+      'answer = i',
+      '```',
+    ].join('\n')
+    assert.equal(preprocessMath(pseudo), pseudo)
+  })
+  it('边界：自增/返回/调用这类仍是代码，含关系符与不等式的仍是数学', () => {
+    for (const src of ['i++', 'return dp[n]', 'sort(a, a + n)', 'n//2']) {
+      const out = preprocessMath(`前缀 \`${src}\` 后缀`)
+      assert.ok(out.includes(`\`${src}\``), `${src} 被误转公式: ${out}`)
+    }
+    for (const [src, want] of [
+      ['n ≤ 10^5', '$n \\le 10^5$'],
+      ['x = y + 1', '$x = y + 1$'],
+    ] as const) {
+      // 符号替换会留下多余空格（`≤ ` + 原文空格），比对前先归一化
+      const out = preprocessMath(`前缀 \`${src}\` 后缀`).replace(/[ \t]+/g, ' ')
+      assert.ok(out.includes(want), `${src} 未按数学渲染: ${out}`)
+    }
   })
 })
 
@@ -254,11 +489,17 @@ describe('代码与公式的身份判定', () => {
     assert.equal(shouldConvertFenceToMath('', 'g[i][j]'), false)
     // 复杂度记号 O(...) 无歧义，属于公式
     assert.equal(shouldConvertFenceToMath('', 'O(n log n)'), true)
-    // 公式 + 代码注释混排：留在代码框（注释里的中文不能进 KaTeX）
+    // 公式 + 代码注释混排（第二行是运算符开头的续行）→ 公式（本轮翻面）：
+    // 注释现在会转成 \text{} 保留，所以"注释中文不能进 KaTeX"这条理由已不成立；
+    // 用户也明确要求"除了代码以外的公式符号都要渲染"。
     assert.equal(
       shouldConvertFenceToMath('', 'sum = a[0] + a[n-1]  // 每个元素至少出现一次\n     + n * min(a)  // 再额外一次'),
-      false,
+      true,
     )
+    // 但**两行独立语句**（都以标识符开头）仍留在代码卡里
+    assert.equal(shouldConvertFenceToMath('', 'dp[0] = 1\ndp[i] = dp[i-1] + dp[i-2]'), false)
+    // 有语句结束符 / 伪代码结构 → 代码
+    assert.equal(shouldConvertFenceToMath('', 'avail(i) = cnt[i];\n  + cnt[k-i];'), false)
     // 真实 C++：关键字特征优先于数学记号
     assert.equal(shouldConvertFenceToMath('', 'int main() {\n  int dp_max = 0;\n  return dp_max;\n}'), false)
   })
@@ -495,7 +736,7 @@ describe('行内代码里的数学被转回公式', () => {
     assert.ok(!out.includes('`dp'), out)
   })
   it('真代码的反引号内容保持代码', () => {
-    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'dp[i][j]']) {
+    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'O(n log n)']) {
       const out = preprocessMath(`前缀 \`${src}\` 后缀`)
       assert.ok(out.includes(`\`${src}\``), `${src} 被误转公式: ${out}`)
     }
@@ -625,8 +866,10 @@ describe('表格中的数学公式', () => {
     assert.ok(!out.includes('$$'), `单元格内不应出现块级公式: ${out}`)
   })
 
-  it('单元格内的行内代码保持代码（不转公式）', () => {
-    const text = '| a | b |\n| --- | --- |\n| `a[x]` | `dp_max` |'
+  it('单元格内的行内代码保持代码（真代码标识符不转公式）', () => {
+    // 说明：单元格里的 `a[x]` 这类**单个下标记号**本轮已按数学渲染（见身份判定用例），
+    // 这里用真正的代码标识符守住"单元格内代码不被转公式"这条。
+    const text = '| a | b |\n| --- | --- |\n| `push_back` | `dp_max` |'
     assert.equal(preprocessMath(text), text)
   })
 

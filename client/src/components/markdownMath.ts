@@ -13,9 +13,12 @@
  * `ios::sync_with_stdio` / `g[prev].push_back` / `f_{i,j}` 被误当作公式渲染。
  */
 import {
+  extractLineComments,
   isMarkdownishLang,
+  isQuotedChineseTerm,
   looksLikeCode,
   looksLikeCodeReference,
+  looksLikeMathNotation,
   looksStronglyMath,
   normalizeLang,
   normalizeMathScriptChars,
@@ -59,32 +62,89 @@ function restoreAll(text: string, ctx: ProtectionContext): string {
 /** 行内代码 span（支持 ``a`b`` 这类多反引号界定） */
 const BACKTICK_SPAN = /(`+)([^\n]+?)\1/g
 
+/** 说明正文里的"普通单词"：`offset`、`dp` 这类单个小写词（判定见 protectInlineCode 第二遍） */
+const PLAIN_WORD = /^[A-Za-z][A-Za-z]{1,11}$/
+
 /**
  * 行内代码（`...`）默认原样保留，绝不参与公式转换。
  *
  * 反引号通常是"这段是代码"的显式标注：`dp_max`、`g[prev].push_back(cur)`、
  * `a[x] + a[x+1]` 被渲染成斜体公式是排版事故。
  *
- * **唯一例外**：span 内是真正的 LaTeX 数学（含 `_{…}` / `^{…}` / `\命令`）。
+ * **例外一（原有）**：span 内是真正的 LaTeX 数学（含 `_{…}` / `^{…}` / `\命令`）。
  * AI 常把公式写成 `` `dp_{i-1}` ``、`` `\max_{j}(dp_j)` ``，此时反引号是误加，
  * 保留会让它显示成字面等宽文本 `dp_{i-1}`（用户反馈的"仍然没渲染成下标"）。
- * 这类内容剥掉反引号交回公式管线。判定刻意收窄到"含 LaTeX 记号"，
- * 所以 `push_back`、`[1, i]`、`dp[i][j]`、`a[x] + a[x+1]` 仍保持代码外观。
+ *
+ * **例外二（本轮）**：span 内是**数学记号**而不是代码 —— `r`、`c`、`0`、`±1`、
+ * `a[offset]`、`offset = (r - c) mod n`、`c←c+1`。AI 会把说明正文里的数学符号
+ * 统统用反引号包起来（用户截图里整段说明都是 `` `r` ``、`` `c←c+1` `` 这种），
+ * 一律按代码渲染会让整段说明变成等宽代码块，与同一段里的公式风格割裂。
+ * 判定走 looksLikeMathNotation（**默认是代码**，只有明确数学结构才升级），
+ * 所以 `push_back`、`vis_cnt`、`O(n log n)`、`a[x] + a[x+1]` 仍然保持代码外观。
  *
  * 必须放在围栏保护之后调用：否则围栏开合的三个反引号会被当作行内代码的界定符，
  * 围栏语法随之泄漏进正文。
  */
 function protectInlineCode(text: string, ctx: ProtectionContext): string {
-  return text.replace(BACKTICK_SPAN, (m, _tick: string, body: string) => {
-    // 行内代码不跨行；跨行说明是误配对（例如与之后的围栏反引号配成一对）
-    if (body.includes('\n')) return m
+  // 第一遍：收集所有 span 及其所在行（数学判定要看同一行是不是代码语境）
+  interface Span {
+    start: number
+    end: number
+    raw: string
+    body: string
+    /** 中文术语（`` `价值` ``）：不是代码，去掉反引号按普通文本渲染 */
+    quotedTerm: boolean
+    math: boolean
+  }
+  const spans: Span[] = []
+  for (const m of text.matchAll(BACKTICK_SPAN)) {
+    const raw = m[0]
+    const body = m[2]!
+    const start = m.index
+    // 行内代码不跨行（BACKTICK_SPAN 已排除 \n），跨行说明是误配对（与之后围栏的反引号配成一对）
+    const lineStart = text.lastIndexOf('\n', start) + 1
+    const nl = text.indexOf('\n', start)
+    const line = text.slice(lineStart, nl === -1 ? text.length : nl)
     const t = body.trim()
-    // span 内是 LaTeX 数学 → 剥掉反引号交给公式管线。
-    // 单字母下标（`dp_i`、`c_j`）也算：它们与 `dp_{i-1}` 是同一种记法，
-    // 一个渲染成公式、另一个渲染成等宽代码会非常割裂。
-    if (/_{|\^\{|\\[a-zA-Z]/.test(t) || /^[A-Za-z]{1,3}_[A-Za-z0-9]$/.test(t)) return t
-    return mark(ctx, m)
-  })
+    // LaTeX 记号，或"单字母 + 下标"（`dp_i`）→ 交回公式管线
+    const latexish = /_{|\^\{|\\[a-zA-Z]/.test(t) || /^[A-Za-z]{1,3}_[A-Za-z0-9]$/.test(t)
+    // 反引号里是中文说明（`价值`、`未使用`）→ 那是被引起来的术语，不是代码
+    const quotedTerm = isQuotedChineseTerm(t)
+    spans.push({ start, end: start + raw.length, raw, body, quotedTerm, math: latexish || looksLikeMathNotation(t, line) })
+  }
+  // 第二遍：行内「同词一致」。`offset` 单独一个 span 时，形态上与代码变量名
+  // （`vis_cnt`）无法区分；但如果同一行里这个词已经出现在某个数学记号里面
+  //（`offset-1 (mod n)`、`a[offset]`），那它就是数学记号，跟着一起走公式。
+  const mathBodies = spans.filter((s) => s.math).map((s) => s.body)
+  const sameWordInMath = (word: string): boolean =>
+    mathBodies.some((b) => new RegExp(`(?<![A-Za-z])${word}(?![A-Za-z])`).test(b))
+  // 第三遍：按位置回填（数学 → 剥反引号并显式包裹；其余 → 占位符保护）
+  let out = ''
+  let pos = 0
+  for (const s of spans) {
+    if (s.start < pos) continue
+    out += text.slice(pos, s.start)
+    const t = s.body.trim()
+    const asMath = s.math || (PLAIN_WORD.test(t) && sameWordInMath(t))
+    if (s.quotedTerm) {
+      // 被引起来的中文术语：去掉反引号按普通文本渲染
+      out += t
+    } else if (/^\$[^$\n]+\$$/.test(t)) {
+      // span 内自带完整的 `$…$`（`源码写作 `$a_i + b_i$` 的形式`）：这是在展示
+      // "公式源码该怎么写"，反引号有实际含义，保持代码外观
+      out += mark(ctx, s.raw)
+    } else if (asMath && !t.includes('$')) {
+      // 显式写成 `$…$`：`r`、`0` 这类片段匹配不到数学种子，交给后面的裸数学包裹会漏渲染
+      out += `$${t}$`
+    } else if (asMath) {
+      // span 内自带 `$` 定界符：原样放出，避免拼出 `$$`
+      out += t
+    } else {
+      out += mark(ctx, s.raw)
+    }
+    pos = s.end
+  }
+  return out + text.slice(pos)
 }
 
 /**
@@ -189,11 +249,22 @@ const CODE_OR_MATH = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`+[^`\n]*`+|\$\$[\s\S]*?\$\
 /**
  * 对 Markdown 源文本中「普通文本区」（代码块/行内代码/已有公式之外的部分）做转换。
  * 其余部分原样保留 —— 代码块里的下划线标识符、公式内部的内容都不能被二次处理。
+ *
+ * `afterMath` 告诉回调「这一段文本是否紧跟在已有公式区之后」：紧贴时不能再补开引号，
+ * 否则会与公式的收尾 `$` 拼出 `$$`（见 wrapMathInLine 的说明）。
  */
-function transformTextRegions(text: string, fn: (s: string) => string): string {
+function transformTextRegions(text: string, fn: (s: string, afterMath: boolean) => string): string {
+  let afterMath = false
   return text
     .split(CODE_OR_MATH)
-    .map((part, i) => (i % 2 === 1 ? part : fn(part)))
+    .map((part, i) => {
+      if (i % 2 === 1) {
+        // 公式区的收尾定界符就是 `$`；代码区（围栏/行内代码）结尾是反引号，不影响
+        afterMath = part.endsWith('$')
+        return part
+      }
+      return fn(part, afterMath)
+    })
     .join('')
 }
 
@@ -338,7 +409,7 @@ export function wrapBareMath(text: string): string {
   const afterIndent = protectIndentedBlocks(afterInline, ctx)
 
   // 第二步：剩余的文本区里检测裸数学并包裹（公式区/代码区都不参与）
-  const wrapped = transformTextRegions(afterIndent, (part) => wrapMathInText(part, ctx))
+  const wrapped = transformTextRegions(afterIndent, (part, afterMath) => wrapMathInText(part, ctx, afterMath))
 
   // 第三步：还原代码区与引用块标记
   return restoreAll(wrapped, ctx)
@@ -360,6 +431,11 @@ function tryStandaloneDisplayMath(rawLine: string): string | null {
   const trimmed = rawLine.trim()
   if (!trimmed || trimmed.includes('$$') || trimmed.length > 400) return null
   if (!looksStronglyMath(trimmed) || looksLikeCode(trimmed)) return null
+  // 整行已经是一个完整的行内公式（`$…$`，例如行内代码里的公式刚被剥掉反引号）：
+  // 直接取内部源码升级为块级公式。否则下面会套成 `$$\n$…$\n$$` —— 嵌套定界符
+  // 会把展示公式拆坏（KaTeX 只认最外层那对）。
+  const whole = /^\$([^$\n]+)\$$/.exec(trimmed)
+  if (whole) return `\n$$\n${whole[1]!.trim()}\n$$\n`
   const wrapped = wrapMathInLine(trimmed)
   const parts = wrapped.split(CODE_OR_MATH)
   if (!parts.some((p, i) => i % 2 === 1 && p.startsWith('$'))) return null
@@ -386,8 +462,11 @@ function mergeAdjacentInlineMath(text: string): string {
 }
 
 /**
- * 把文本切成独立行，逐行处理（数学片段不跨行） */
-function wrapMathInText(text: string, ctx: ProtectionContext): string {
+ * 把文本切成独立行，逐行处理（数学片段不跨行）
+ *
+ * @param startsAfterMath 这段文本是否紧跟在已有公式区之后（只有第一行的第一个片段受影响）
+ */
+function wrapMathInText(text: string, ctx: ProtectionContext, startsAfterMath = false): string {
   // 先把表格块的竖线换成占位符，表格结构就不会被数学包裹破坏
   const body = protectTablePipes(text, ctx)
   const lines = body.split('\n')
@@ -395,7 +474,8 @@ function wrapMathInText(text: string, ctx: ProtectionContext): string {
   //（$$ 与收尾 $$ 分处两行，必须整体保留，否则会把展示公式拆坏）
   const out: string[] = []
   let inDisplay = false
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
     const fences = (line.match(/\$\$/g) ?? []).length
     const wasInDisplay = inDisplay
     if (fences % 2 === 1) inDisplay = !inDisplay
@@ -403,7 +483,8 @@ function wrapMathInText(text: string, ctx: ProtectionContext): string {
       out.push(line)
       continue
     }
-    out.push(tryStandaloneDisplayMath(line) ?? wrapMathInLine(line))
+    const afterMath = startsAfterMath && i === 0
+    out.push(tryStandaloneDisplayMath(line) ?? wrapMathInLine(line, afterMath))
   }
   return mergeAdjacentInlineMath(out.join('\n'))
 }
@@ -467,7 +548,12 @@ function protectTablePipes(text: string, ctx: ProtectionContext): string {
   return lines.map((line, i) => (inTable[i] ? line.replace(/\|/g, () => mark(ctx, '|')) : line)).join('\n')
 }
 
-function wrapMathInLine(line: string): string {
+/**
+ * 包裹一行里的裸数学片段。
+ *
+ * @param afterMath 该行是否紧跟在已有公式区之后（此时行首的片段紧贴公式的收尾 `$`）
+ */
+function wrapMathInLine(line: string, afterMath = false): string {
   let result = ''
   let pos = 0
   while (pos < line.length) {
@@ -515,9 +601,24 @@ function wrapMathInLine(line: string): string {
     const visible = line.slice(fragStart, end)
     if (MATH_SEED.test(fragment)) {
       if (fragStart > pos) result += line.slice(pos, fragStart)
-      // 代码引用 → 行内代码；数学表达式 → 行内公式。
-      // 代码引用要连同尾随空格一起写成 `xxx `（不 trim），否则会吃掉原文的词间空格
-      result += looksLikeCodeReference(visible) ? '`' + visible + '`' : `$${visible}$`
+      // 身份判定要带上**整行**做语境：`dp_max` 是数学下标还是变量名取决于这一行
+      // 在讲公式还是讲代码（见 markdownCode.CODE_CONTEXT）。
+      // 片段紧跟 `;` 也说明这是一条代码语句而不是公式：`dp[i] = dp[i-1] + 1;`
+      // （`;` 本身不是数学字符，所以不会被扩进片段里，只能在这里看后一个字符）
+      if (looksLikeCodeReference(visible, line) || line[end] === ';') {
+        // 代码引用 → 行内代码。
+        // 代码引用要连同尾随空格一起写成 `xxx `（不 trim），否则会吃掉原文的词间空格
+        result += '`' + visible + '`'
+      } else if (result.endsWith('$') || (afterMath && fragStart === 0)) {
+        // 前一个字符就是 `$` 定界符（原文里已有一个公式的开/闭定界符）：
+        // 直接拼 `$…$` 会形成 `$$`，而 `$$` 是**块级公式**定界符 ——
+        // 既可能截断前面那个行内公式，也可能让整段排版方式突变。
+        // 这种"紧贴"只出现在半成品文本里，保持原样（宁可不够好看，也不改坏定界符结构）。
+        result += visible
+      } else {
+        // 数学表达式 → 行内公式
+        result += `$${visible}$`
+      }
     } else {
       if (fragStart > pos) result += line.slice(pos, fragStart)
       result += visible
@@ -591,19 +692,31 @@ function cleanMathSource(body: string): string {
   return fixManualSizeNesting(body)
 }
 
+/** `\text{}` 里需要转义的字符（KaTeX 在文本模式下对这些仍然敏感） */
+function escapeMathText(s: string): string {
+  return s.replace(/[\\_^%&#${}~]/g, (c) => `\\${c}`)
+}
+
 /**
- * 围栏正文归一化：去掉空行、把折行合并为空格。
+ * 围栏正文归一化：去掉空行、把折行合并为空格，并**把行尾说明性注释保留下来**。
  *
  * AI 常把一条公式拆成多行写（在逗号后换行、中间还夹空行）；这些换行在数学模式下
  * 只是空白，但空行会提前终止 `$$` 块、导致公式被截断。这里统一压成单行。
+ *
+ * 注释（`b[r][c] = a[(r-c) mod n]   // 这里的 mod 取非负余数`）原本在转公式时被直接
+ * 丢掉 —— 用户能看到的说明文字无声消失，比排版不完美糟糕得多。这里转成
+ * `\quad \text{…}` 留在公式尾部（正是 section 5 里记的"若要保留应转 `\text{…}`"）。
  */
 function normalizeFenceBody(body: string): string {
-  return stripLineComments(body)
+  const comments = extractLineComments(body)
+  const math = stripLineComments(body)
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
     .join(' ')
     .trim()
+  if (comments.length === 0) return math
+  return `${math} \\quad \\text{${escapeMathText(comments.join('；'))}}`
 }
 
 /** 需要"限制符在正下方"的大运算符：\max / \min / \lim / \sum … */
@@ -649,10 +762,24 @@ function enhanceMathLayout(body: string): string {
 }
 
 /**
+ * 只对公式里 `\text{…}` **之外**的部分做替换。
+ *
+ * `\text{…}` 里是字面文本：把注释里的 `mod` 换成 `\bmod`、把 `≤` 换成 `\le`，
+ * 都会让 KaTeX 在文本模式下直接报错（"Can't use function '\bmod' in text mode"）。
+ */
+function outsideMathText(src: string, fn: (s: string) => string): string {
+  return src
+    .split(/(\\text\{[^}]*\})/g)
+    .map((part, i) => (i % 2 === 1 ? part : fn(part)))
+    .join('')
+}
+
+/**
  * 把数学片段中的 KaTeX 不兼容字符转为合法 LaTeX：
  * - 特殊字符转义：& → \&, # → \#, % → \%（KaTeX 中 & 是表格分隔符、# 是宏参数、% 是注释）
  * - Unicode 数学符号 → LaTeX 命令（KaTeX 不认识 ¬ ⊕ ⊗ ℓ 等 Unicode 符号）
- * 仅在 $...$ / $$...$$ 包裹的数学内容内做转换，不影响普通文本。
+ * 仅在 $...$ / $$...$$ 包裹的数学内容内做转换，不影响普通文本；
+ * 公式里已有的 `\text{…}` 说明文字保持原样（见 outsideMathText）。
  */
 export function normalizeMathSymbols(text: string): string {
   // 按公式分段：只处理 $...$ / $$...$$ 内的内容
@@ -662,69 +789,82 @@ export function normalizeMathSymbols(text: string): string {
       if (i % 2 === 0) return seg // 普通文本：不转换
       const isBlock = seg.startsWith('$$')
       const body = isBlock ? seg.slice(2, -2) : seg.slice(1, -1)
-      const converted = body
-        // LaTeX 命令保护：不转换已存在的 \& \# \% 等
-        .replace(/(?<!\\)&/g, '\\&')
-        .replace(/(?<!\\)#/g, '\\#')
-        .replace(/(?<!\\)%/g, '\\%')
-        // Unicode 数学符号 → LaTeX 命令
-        .replace(/¬/g, '\\neg ')
-        .replace(/⊕/g, '\\oplus ')
-        .replace(/⊗/g, '\\otimes ')
-        .replace(/ℓ/g, '\\ell ')
-        .replace(/≤/g, '\\le ')
-        .replace(/≥/g, '\\ge ')
-        .replace(/≠/g, '\\ne ')
-        .replace(/·/g, '\\cdot ')
-        .replace(/×/g, '\\times ')
-        .replace(/÷/g, '\\div ')
-        .replace(/→/g, '\\to ')
-        .replace(/←/g, '\\leftarrow ')
-        .replace(/↔/g, '\\leftrightarrow ')
-        .replace(/⇔/g, '\\Leftrightarrow ')
-        .replace(/⇒/g, '\\Rightarrow ')
-        // Unicode 省略号/减号 → LaTeX 等价物（KaTeX 把 … 渲染成文本省略号，
-        // 数学排版应为 \dots；− 是 Unicode 数学减号，转为 ASCII 减号更稳）
-        .replace(/…/g, '\\dots ')
-        .replace(/−/g, '-')
-        .replace(/√/g, '\\sqrt ')
-        .replace(/⌊/g, '\\lfloor ')
-        .replace(/⌋/g, '\\rfloor ')
-        .replace(/⌈/g, '\\lceil ')
-        .replace(/⌉/g, '\\rceil ')
-        .replace(/∈/g, '\\in ')
-        .replace(/∉/g, '\\notin ')
-        .replace(/∪/g, '\\cup ')
-        .replace(/∩/g, '\\cap ')
-        .replace(/⊆/g, '\\subseteq ')
-        .replace(/⊇/g, '\\supseteq ')
-        .replace(/∀/g, '\\forall ')
-        .replace(/∃/g, '\\exists ')
-        .replace(/∂/g, '\\partial ')
-        .replace(/∞/g, '\\infty ')
-        .replace(/Σ/g, '\\sum ')
-        .replace(/∏/g, '\\prod ')
-        .replace(/²/g, '^2')
-        .replace(/³/g, '^3')
-        // Unicode 下标字符 → _{...}（连续多个下标合并为一组，如 ᵢ₋₁ → _{i-1}）
-        .replace(/([ᵢⱼₙₘₚₖₐᵦₓᵧ₀₁₂₃₄₅₆₇₈₉₊₋]+)/g, (m: string) => {
-          const map: Record<string, string> = {
-            'ᵢ': 'i', 'ⱼ': 'j', 'ₙ': 'n', 'ₘ': 'm', 'ₚ': 'p', 'ₖ': 'k',
-            'ₐ': 'a', 'ᵦ': 'b', 'ₓ': 'x', 'ᵧ': 'y',
-            '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5',
-            '₆': '6', '₇': '7', '₈': '8', '₉': '9', '₀': '0',
-            '₊': '+', '₋': '-',
-          }
-          return '_{' + [...m].map((c) => map[c] ?? c).join('') + '}'
-        })
-        // Unicode 上标数字 → ^{...}（连续多个合并，如 ¹² → ^{12}）
-        .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)/g, (m: string) => {
-          const map: Record<string, string> = {
-            '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
-            '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
-          }
-          return '^{' + [...m].map((c) => map[c] ?? c).join('') + '}'
-        })
+      const converted = outsideMathText(body, (math) =>
+        math
+          // 编程写法写成的关系符 → LaTeX（AI 常把公式写成 `i != k-i ? … : …`、`k-i >= 0`）：
+          // 不转的话 KaTeX 会把 `!` 当阶乘记号排出 `a! = b`，`>=` 排成 `> =`。
+          // 必须在 `&` 转义之前处理 `&&`，否则会被拆成 `\&\&`（对齐分隔符）。
+          .replace(/!=/g, '\\ne ')
+          .replace(/<=/g, '\\le ')
+          .replace(/>=/g, '\\ge ')
+          .replace(/&&/g, '\\land ')
+          // LaTeX 命令保护：不转换已存在的 \& \# \% 等
+          .replace(/(?<!\\)&/g, '\\&')
+          .replace(/(?<!\\)#/g, '\\#')
+          .replace(/(?<!\\)%/g, '\\%')
+          // 数学里的 `mod` 必须写成 \bmod：否则 KaTeX 会把 m·o·d 当成三个变量排开，
+          // 与 `(r - c) mod n` 的数学含义完全不是一回事。要求独立成词，
+          // 避免误伤 `dp_mod`、`model` 这类标识符（不补尾空格：原文的空格就是分隔符）
+          .replace(/(?<![\w\\])mod(?![\w])/g, '\\bmod')
+          // Unicode 数学符号 → LaTeX 命令
+          .replace(/¬/g, '\\neg ')
+          .replace(/⊕/g, '\\oplus ')
+          .replace(/⊗/g, '\\otimes ')
+          .replace(/ℓ/g, '\\ell ')
+          .replace(/≤/g, '\\le ')
+          .replace(/≥/g, '\\ge ')
+          .replace(/≠/g, '\\ne ')
+          .replace(/·/g, '\\cdot ')
+          .replace(/×/g, '\\times ')
+          .replace(/÷/g, '\\div ')
+          .replace(/→/g, '\\to ')
+          .replace(/←/g, '\\leftarrow ')
+          .replace(/↔/g, '\\leftrightarrow ')
+          .replace(/⇔/g, '\\Leftrightarrow ')
+          .replace(/⇒/g, '\\Rightarrow ')
+          // Unicode 省略号/减号 → LaTeX 等价物（KaTeX 把 … 渲染成文本省略号，
+          // 数学排版应为 \dots；− 是 Unicode 数学减号，转为 ASCII 减号更稳）
+          .replace(/…/g, '\\dots ')
+          .replace(/−/g, '-')
+          .replace(/√/g, '\\sqrt ')
+          .replace(/⌊/g, '\\lfloor ')
+          .replace(/⌋/g, '\\rfloor ')
+          .replace(/⌈/g, '\\lceil ')
+          .replace(/⌉/g, '\\rceil ')
+          .replace(/∈/g, '\\in ')
+          .replace(/∉/g, '\\notin ')
+          .replace(/∪/g, '\\cup ')
+          .replace(/∩/g, '\\cap ')
+          .replace(/⊆/g, '\\subseteq ')
+          .replace(/⊇/g, '\\supseteq ')
+          .replace(/∀/g, '\\forall ')
+          .replace(/∃/g, '\\exists ')
+          .replace(/∂/g, '\\partial ')
+          .replace(/∞/g, '\\infty ')
+          .replace(/Σ/g, '\\sum ')
+          .replace(/∏/g, '\\prod ')
+          .replace(/²/g, '^2')
+          .replace(/³/g, '^3')
+          // Unicode 下标字符 → _{...}（连续多个下标合并为一组，如 ᵢ₋₁ → _{i-1}）
+          .replace(/([ᵢⱼₙₘₚₖₐᵦₓᵧ₀₁₂₃₄₅₆₇₈₉₊₋]+)/g, (m: string) => {
+            const map: Record<string, string> = {
+              'ᵢ': 'i', 'ⱼ': 'j', 'ₙ': 'n', 'ₘ': 'm', 'ₚ': 'p', 'ₖ': 'k',
+              'ₐ': 'a', 'ᵦ': 'b', 'ₓ': 'x', 'ᵧ': 'y',
+              '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5',
+              '₆': '6', '₇': '7', '₈': '8', '₉': '9', '₀': '0',
+              '₊': '+', '₋': '-',
+            }
+            return '_{' + [...m].map((c) => map[c] ?? c).join('') + '}'
+          })
+          // Unicode 上标数字 → ^{...}（连续多个合并，如 ¹² → ^{12}）
+          .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)/g, (m: string) => {
+            const map: Record<string, string> = {
+              '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+              '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+            }
+            return '^{' + [...m].map((c) => map[c] ?? c).join('') + '}'
+          }),
+      )
       return isBlock ? `$$${converted}$$` : `$${converted}$`
     })
     .join('')

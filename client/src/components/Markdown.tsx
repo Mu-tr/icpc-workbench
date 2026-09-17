@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -7,6 +7,8 @@ import 'katex/dist/katex.min.css'
 import { CaretRightOutlined, CheckOutlined, CopyOutlined } from '@ant-design/icons'
 import { preprocessMath } from './markdownMath.ts'
 import { normalizeLang } from './markdownCode.ts'
+import { repairStreamingMarkdown } from './markdownStream.ts'
+import { reportMathIssues } from './markdownDiag.ts'
 
 /**
  * Markdown 渲染（AI 回复 / 模板思路 / 笔记 / 题单描述）：
@@ -18,10 +20,20 @@ import { normalizeLang } from './markdownCode.ts'
  *   · 文字 —— 常规排版：标题层级、列表、引用、表格
  * 「代码 / 公式 / 文字」的身份判定在 preprocessMath + markdownCode 中完成，
  * 本组件只负责把它们渲染成对应的外观。
+ *
+ * 流式输出时（`streaming`）先经 markdownStream 补上未闭合的定界符：
+ * 否则每一帧屏幕末尾都会闪出字面的 `**`、`` ` ``、`$$`。
  */
 
 /** 代码卡内超过该行数时折叠，避免 AI 贴几百行代码把消息撑爆 */
 const COLLAPSE_LINES = 24
+
+/**
+ * 是否开启 KaTeX 失败诊断（仅 vite dev）。生产构建里 `import.meta.env.DEV` 为常量
+ * false，整个诊断分支被静态消除；静态渲染（node 里跑本组件）时 `import.meta.env`
+ * 不存在，可选链会安全地取到 undefined。
+ */
+const DEV_DIAG = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true
 
 interface CodeChildProps {
   className?: string
@@ -92,8 +104,29 @@ function CodeCard({ lang, code }: { lang: string; code: string }) {
   )
 }
 
-function MarkdownInner({ text }: { text: string }) {
-  const processed = preprocessMath(text)
+/** 组件属性：`streaming` 表示这条消息**正在流式输出**（内容还会继续追加） */
+interface MarkdownProps {
+  text: string
+  /**
+   * 是否处于流式输出中。只有流式时才做「未闭合语法补全」：
+   * 一段已经写完的文本里出现单个 `*`/`_`/`$` 是正常写法（`2 * 3`、`价格 $5`、
+   * `push_back`），补符号会改变原意；而流式的每一帧本来就是半成品。
+   */
+  streaming?: boolean
+}
+
+function MarkdownInner({ text, streaming = false }: MarkdownProps) {
+  // 流式：先补上未闭合的定界符，再走公式预处理管线
+  // （补全必须在 preprocessMath **之前**：管线按 `$…$`/`` `…` `` 定界符切分区域，
+  //   定界符不配对时整段内容的身份判定都会跟着错）
+  const source = streaming ? repairStreamingMarkdown(text) : text
+  const processed = preprocessMath(source)
+
+  // dev-only：把 KaTeX 解析失败的公式报到控制台（生产构建里不执行）
+  useEffect(() => {
+    if (DEV_DIAG) reportMathIssues(processed)
+  }, [processed])
+
   return (
     <div className="markdown-body">
       <ReactMarkdown
