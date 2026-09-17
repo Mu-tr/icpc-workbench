@@ -386,6 +386,18 @@ describe('说明正文里的数学记号不再渲染成代码', () => {
     assert.equal(preprocessMath(given), given)
     assert.equal(preprocessMath(preprocessMath(given)), given)
   })
+  it('长箭头、iff 与 en dash 渲染为带间距的数学关系（用户反馈）', () => {
+    const out = preprocessMath('$$i ──► v   iff   a[i] = v  or  a[i] = k – v$$')
+    assert.ok(out.includes('\\longrightarrow'), out)
+    assert.ok(out.includes('\\iff'), out)
+    assert.ok(out.includes('k - v'), out)
+  })
+  it('集合构造的竖线转成 \\mid，pref 作为函数名保持直立（用户反馈）', () => {
+    const out = preprocessMath('$$pref(v) = #{ i | b[i] <= v } .$$')
+    assert.ok(out.includes('\\operatorname{pref}'), out)
+    assert.ok(out.includes('\\#\\{ i \\mid b[i] \\le'), out)
+    assert.ok(out.includes('v \\}'), out)
+  })
   it('反引号里的中文术语去掉反引号（不是代码）', () => {
     const out = preprocessMath('使它的 `价值` 为 `0`，若不是则未使用')
     assert.ok(!out.includes('`价值`'), `中文术语仍是代码: ${out}`)
@@ -483,7 +495,7 @@ describe('带函数调用写法的公式不再被误判成代码卡', () => {
     assert.ok(out.includes('$$'), `没有转成块级公式: ${out}`)
     assert.ok(!out.includes('```'), out)
     // KaTeX 里裸花括号是"分组"（不显示），必须转成 \{ \} 才看得到集合括号
-    assert.ok(out.includes('\\#\\{ i | b_i(k) < m \\}'), out)
+    assert.ok(out.includes('\\#\\{ i \\mid b_i(k) < m \\}'), out)
   })
   it('以关系符开头的续写式子（= max(0, upper_bound(…))）转成块级公式', () => {
     const out = preprocessMath('```\n= max(0, upper_bound(a, k-m) - lower_bound(a, t+1))\n```')

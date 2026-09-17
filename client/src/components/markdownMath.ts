@@ -875,6 +875,11 @@ function outsideMathText(src: string, fn: (s: string) => string): string {
     .join('')
 }
 
+/** 集合构造 `{ x | P(x) }`：ASCII 竖线要写成 `\mid` 才有关系符间距。 */
+function midSetBuilder(body: string): string {
+  return body.replace(/(?<!\\)\|/, '\\mid')
+}
+
 /**
  * 把数学片段中的 KaTeX 不兼容字符转为合法 LaTeX：
  * - 特殊字符转义：& → \&, # → \#, % → \%（KaTeX 中 & 是表格分隔符、# 是宏参数、% 是注释）
@@ -897,8 +902,11 @@ export function normalizeMathSymbols(text: string): string {
           // 渲染成 `cnt(m) = #i|b_i(k)<m`，把集合记号吃掉了。
           // 只动这两种无歧义写法：`#` 紧跟的括号、括号内含 `|` 的集合构造；
           // `_{…}`/`^{…}`/`\cmd{…}` 这些 LaTeX 分组一律不碰。
-          .replace(/#\s*\{([^{}]*)\}/g, '\\#\\{$1\\}')
-          .replace(/(?<![\^_\\])\{([^{}]*\|[^{}]*)\}/g, '\\{$1\\}')
+          .replace(/#\s*\{([^{}]*)\}/g, (_m, body: string) => `\\#\\{${midSetBuilder(body)}\\}`)
+          .replace(
+            /(?<![\^_\\])\{([^{}]*\|[^{}]*)\}/g,
+            (_m, body: string) => `\\{${midSetBuilder(body)}\\}`,
+          )
           // 编程写法写成的关系符 → LaTeX（AI 常把公式写成 `i != k-i ? … : …`、`k-i >= 0`）：
           // 不转的话 KaTeX 会把 `!` 当阶乘记号排出 `a! = b`，`>=` 排成 `> =`。
           // 必须在 `&` 转义之前处理 `&&`，否则会被拆成 `\&\&`（对齐分隔符）。
@@ -943,8 +951,12 @@ export function normalizeMathSymbols(text: string): string {
           // 词的边界立刻可辨。这里**不**补尾空格：\mathop 的间距由 TeX 负责。
           // 前后都用 \w 环绕断言：`ans_xor`、`txorid` 这类标识符不受影响；
           // 再排除前导 `{`，避免把已经写好的 `\operatorname{xor}` 二次包裹（幂等性）。
-          .replace(/(?<![\\\w{])(?:lcm|gcd|shl|shr|xor|div|and|or)(?![\w])/g, '\\operatorname{$&}')
+          .replace(/(?<![\\\w{])(?:pref|lcm|gcd|shl|shr|xor|div|and|or)(?![\w])/g, '\\operatorname{$&}')
+          // 逻辑连接词 iff 是关系符，必须用 \iff 才有两侧间距；否则 i/f/f 会贴成变量串。
+          .replace(/(?<![\\\w])iff(?![\w])/g, '\\iff ')
           // Unicode 数学符号 → LaTeX 命令
+          .replace(/[─—]{2,}\s*[►▶>]/g, '\\longrightarrow ')
+          .replace(/⟶/g, '\\longrightarrow ')
           .replace(/¬/g, '\\neg ')
           .replace(/⊕/g, '\\oplus ')
           .replace(/⊗/g, '\\otimes ')
@@ -965,6 +977,7 @@ export function normalizeMathSymbols(text: string): string {
           // 数学排版应为 \dots；− 是 Unicode 数学减号，转为 ASCII 减号更稳）
           .replace(/…/g, '\\dots ')
           .replace(/−/g, '-')
+          .replace(/–/g, '-')
           .replace(/√/g, '\\sqrt ')
           .replace(/⌊/g, '\\lfloor ')
           .replace(/⌋/g, '\\rfloor ')
