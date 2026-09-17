@@ -35,3 +35,6 @@ videos/
 # 本地诊断脚本（抓包/接口探测），非项目源码
 .probe/
 
+# 渲染验证脚本的临时编译产物（client/test/renderCheck.mjs 每次运行重新生成）
+client/test/.render-out/
+

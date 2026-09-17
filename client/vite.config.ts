@@ -1,12 +1,99 @@
-import { defineConfig } from 'vite'
+import net from 'node:net'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
 // 服务端端口可用 PORT 环境变量覆盖（dev:server 同读该变量）——
 // Windows 上 3000-3xxx 段被 Hyper-V/winnat 动态保留时（listen EACCES），换端口即可继续开发
 const apiPort = process.env.PORT ?? '3001'
 
+/**
+ * 后端就绪前的请求闸门。
+ *
+ * `npm run dev` 前后端同时起，但两者启动时间不在一个量级：vite 约 1.3s 就绪，
+ * 后端要引导完 express + 20 多个路由模块 + 打开 SQLite + 适配器（实测 node 直跑
+ * 约 1.6s，`tsx watch` 下更久），这段时间端口还没监听。
+ * 代理 `/api/*` 会拿到 ECONNREFUSED，而 vite 自己的错误处理器会**无条件**把整段
+ * 堆栈打到控制台（见 vite 源码 `proxy.on('error', ...)`；它在 `configure` 之后注册，
+ * 所以没法从 configure 里屏蔽）。结果就是启动时刷一屏 AggregateError 堆栈。
+ *
+ * 所以在代理之前加一层闸门：后端端口没通时**把请求挂住**（首屏的 /api 请求只是慢一点，
+ * 不会变成"加载失败"），端口一通就放行走代理；万一后端始终起不来，最多挂
+ * WAIT_MS 再返回可重试的 503。探测在后台定时做，连通后永久放行，稳态零开销。
+ *
+ * 中间件顺序有保障：vite 会先 await 所有 `configureServer` 钩子，之后才装
+ * cachedTransformMiddleware / proxyMiddleware（见 node_modules/vite 的 dist 中
+ * `for (const hook of config.getSortedPluginHooks("configureServer"))` 那一段），
+ * 所以这里同步注册的中间件一定跑在代理前面。
+ */
+// 导出供 test/apiGate.check.mjs 做独立验证（vite 只取 default export，多导出一个无副作用）
+export function apiStartupGate(host: string, port: number, waitMs = 20000): Plugin {
+  return {
+    name: 'api-startup-gate',
+    configureServer(server) {
+      const log = (msg: string) => server.config.logger.info(`\x1b[36m[api-gate]\x1b[0m ${msg}`)
+      let ready = false
+      let warned = false
+      let probes = 0
+      /** 被挂住的请求：后端就绪后统一放行 */
+      const pending = new Map<() => void, NodeJS.Timeout>()
+
+      const probe = (): Promise<boolean> =>
+        new Promise((resolve) => {
+          const socket = net.connect({ host, port })
+          const done = (ok: boolean) => {
+            socket.destroy()
+            resolve(ok)
+          }
+          socket.once('connect', () => done(true))
+          socket.once('error', () => done(false))
+          socket.setTimeout(300, () => done(false))
+        })
+
+      const release = (): void => {
+        for (const [next, timer] of pending) {
+          clearTimeout(timer)
+          next()
+        }
+        pending.clear()
+      }
+
+      const tick = async (): Promise<void> => {
+        if (ready) return
+        probes += 1
+        if (await probe()) {
+          ready = true
+          log(`后端 ${host}:${port} 已就绪（探测 ${probes} 次），放行 ${pending.size} 个等待中的请求`)
+          release()
+          return
+        }
+        if (!warned) {
+          warned = true
+          log(`后端 ${host}:${port} 尚未就绪（引导中）：/api 请求先挂起，就绪后自动放行`)
+        }
+        setTimeout(() => void tick(), 300)
+      }
+      void tick()
+
+      // configureServer 里同步注册的中间件跑在 vite 内部中间件（含代理）之前
+      server.middlewares.use((req, res, next) => {
+        if (ready || !req.url?.startsWith('/api')) return next()
+        const timer = setTimeout(() => {
+          if (!pending.delete(next)) return
+          // 客户端可能在这期间断开了：对已结束/已销毁的响应再写会抛错
+          if (res.writableEnded || res.destroyed) return
+          res.statusCode = 503
+          res.setHeader('Content-Type', 'application/json; charset=utf-8')
+          res.setHeader('Retry-After', '1')
+          res.end(JSON.stringify({ error: 'api-starting', message: '后端仍未就绪，请稍后重试' }))
+        }, waitMs)
+        pending.set(next, timer)
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), apiStartupGate('127.0.0.1', Number(apiPort))],
   server: {
     port: 5173,
     proxy: {

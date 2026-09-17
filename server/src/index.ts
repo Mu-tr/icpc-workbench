@@ -37,25 +37,10 @@ seedBuiltinBank(db); // 内置题库播种：版本变化时 upsert 一次，日
 initAdapters(config.dataDir);
 // 后台分批续拉调度器：截断的同步按平台节奏自动续拉下一批（未装配则不排期，不影响手动同步）
 configureSyncScheduler({ db });
-// 知识点管线：JSONL 源真相 → SQLite 索引幂等重建（无 JSONL 时零开销）
+// 知识点存储目录（便宜：只记路径）；JSONL → SQLite 的重建在 listen 之后做，见文件末尾
 initKnowledgeStore(config.dataDir);
-try {
-  const purged = purgeAiAnnotations(db, { dataDir: config.dataDir });
-  if (purged.deleted > 0 || purged.tombstones > 0) {
-    console.log(`[knowledge] 已清理 AI 标注: 删除 ${purged.deleted} 条，写入 ${purged.tombstones} 个 tombstone`);
-  }
-} catch (e) {
-  console.error(`[knowledge] AI 标注清理失败（不影响启动）: ${(e as Error).message}`);
-}
-try {
-  const loaded = loadAnnotationsIntoDb(db, config.dataDir);
-  if (loaded.lines > 0) {
-    console.log(`[knowledge] 已从 JSONL 重建索引: ${loaded.inserted} 条标注 / ${loaded.problems} 题（跳过未知 code ${loaded.skippedUnknownCode}）`);
-  }
-} catch (e) {
-  console.error(`[knowledge] JSONL 索引重建失败（不影响启动）: ${(e as Error).message}`);
-}
 // 每日首次启动自动备份（settings 键幂等）；失败不阻塞启动
+// 放在 listen 之前：备份期间不接收请求，快照更干净（这一步很快，不含索引重建）
 try {
   const daily = maybeDailyBackup(db);
   if (daily.created) console.log(`[backup] 已创建每日备份 ${daily.file}`);
@@ -102,6 +87,14 @@ app.use(errorHandler);
 const port = Number(process.env.PORT ?? config.port);
 // 这是本地单用户应用：绝不默认暴露到局域网。若以后需要远程访问，应单独
 // 设计认证和 TLS，而不是通过修改此处的默认行为绕过安全边界。
+//
+// ⚠ 顺序很重要：**先 listen，再做启动期初始化**（见文件末尾的知识点索引重建）。
+// 端口绑定是同步的，而初始化的代码是同步阻塞的，所以"先 listen"只会把端口
+// 提前打开，不会让请求读到未初始化的状态（请求要等事件循环空出来才会被处理）。
+//
+// 实测（node 直接跑本文件，PORT=4102）：端口可连接 1.57s / 首个 200 返回 1.67s，
+// 其中索引重建只占约 0.1s —— 启动开销主要在进程引导（import + 打开 DB + 适配器），
+// 不在重建。所以这里改的是"把失败窗口压到最小"，而不是消除那 1.5s 引导时间。
 const server: Server = app.listen(port, '127.0.0.1', () => {
   console.log(`[server] listening on http://localhost:${port}`);
   console.log(`[server] widget page: http://localhost:${port}/widget`);
@@ -121,6 +114,25 @@ server.on('error', (e: NodeJS.ErrnoException) => {
   }
   process.exit(1);
 });
+
+// 知识点管线：JSONL 源真相 → SQLite 索引幂等重建（无 JSONL 时零开销）。
+// 放在 listen 之后：端口提前打开，这几百毫秒里的请求排队等初始化结束（不会连接失败）。
+try {
+  const purged = purgeAiAnnotations(db, { dataDir: config.dataDir });
+  if (purged.deleted > 0 || purged.tombstones > 0) {
+    console.log(`[knowledge] 已清理 AI 标注: 删除 ${purged.deleted} 条，写入 ${purged.tombstones} 个 tombstone`);
+  }
+} catch (e) {
+  console.error(`[knowledge] AI 标注清理失败（不影响启动）: ${(e as Error).message}`);
+}
+try {
+  const loaded = loadAnnotationsIntoDb(db, config.dataDir);
+  if (loaded.lines > 0) {
+    console.log(`[knowledge] 已从 JSONL 重建索引: ${loaded.inserted} 条标注 / ${loaded.problems} 题（跳过未知 code ${loaded.skippedUnknownCode}）`);
+  }
+} catch (e) {
+  console.error(`[knowledge] JSONL 索引重建失败（不影响启动）: ${(e as Error).message}`);
+}
 
 // Graceful shutdown：收到信号时关闭 HTTP 连接与数据库，避免 WAL 写入中途被强制终止
 let shuttingDown = false;
