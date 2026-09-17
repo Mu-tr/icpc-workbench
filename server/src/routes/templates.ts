@@ -14,6 +14,7 @@ import { upsertBankProblems } from '../import/bankService.ts';
 import { syncPlatform } from '../adapters/sync.ts';
 import type { PlatformId, SyncResult } from '../../../shared/src/index.ts';
 import { platformMeta } from '../../../shared/src/index.ts';
+import { compileTypstToPdf, renderTemplatesTypst } from '../templates/typst.ts';
 
 interface ProgressRow {
   template_id: string;
@@ -199,6 +200,12 @@ export interface ExportBundle {
   }>;
 }
 
+export interface TemplatesRouteOptions {
+  dataDir?: string;
+  /** 测试注入点；缺省时调用真实 Typst 编译器。 */
+  compilePdf?: (bundle: ExportBundle) => Promise<Buffer>;
+}
+
 /**
  * 汇总可导出的「自己写过的模板」：全部自建模板 + 内置课程条目中用户写入过内容的笔记。
  * 数据结构与渲染解耦——Markdown 现已落地，后续 Word / PDF 生成器复用同一份 bundle。
@@ -324,7 +331,7 @@ function renderTemplatesMarkdown(db: Db): string {
 }
 
 /** 内置模板课程 + 自建模板 + 个人学习进度 + 例题练习状态 */
-export function templatesRoutes(db: Db): Router {
+export function templatesRoutes(db: Db, options: TemplatesRouteOptions = {}): Router {
   const r = Router();
 
   // GET /api/templates → 课程大纲全量（合并自建模板，含个人进度、用户写入内容、例题状态）+ 统计 + 下一课
@@ -635,6 +642,23 @@ export function templatesRoutes(db: Db): Router {
     res.setHeader('Content-Disposition', 'attachment; filename="icpc-templates.md"');
     res.send(renderTemplatesMarkdown(db));
   });
+
+  // GET /api/templates/export.pdf → 直接由结构化 bundle 生成 Typst，再编译为 PDF。
+  r.get(
+    '/export.pdf',
+    asyncHandler(async (_req, res) => {
+      const bundle = buildExportBundle(db);
+      const compile =
+        options.compilePdf ??
+        ((value: ExportBundle) =>
+          compileTypstToPdf(renderTemplatesTypst(value), { dataDir: options.dataDir }));
+      const pdf = await compile(bundle);
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="icpc-templates-${stamp}.pdf"`);
+      res.send(pdf);
+    }),
+  );
 
   // 未知子路径统一提示
   r.use((_req, res) => res.status(404).json({ error: '未知模板接口' }));

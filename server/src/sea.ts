@@ -49,12 +49,18 @@ import { PLATFORMS } from '../../shared/src/index.ts';
 import { setTaxonomyJson } from './knowledge/taxonomy.ts';
 import { setRulesJson } from './knowledge/ruleEngine.ts';
 import { initKnowledgeStore, loadAnnotationsIntoDb, purgeAiAnnotations } from './knowledge/store.ts';
+import { setBundledTypstBinary } from './templates/typst.ts';
 
 const CLIENT_DIST_PREFIX = 'client-dist/';
 const WIDGET_FILES = ['widget.html'];
 
 export function startServer(): { app: Express; port: number; config: AppConfig } {
   const config = loadConfigForRuntime();
+  if (isSea()) {
+    setBundledTypstBinary(
+      assetToBuffer(getAsset('vendor/typst') as ArrayBuffer | Buffer),
+    );
+  }
 
   // SEA 资源注入：schema 与提示词模板从 exe 内读取
   setSchemaSql(readTextAsset('src/db/schema.sql'));
@@ -101,7 +107,7 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   app.use('/api/problems', problemsRoutes(db));
   app.use('/api/reviews', reviewsRoutes(db));
   app.use('/api/today', todayRoutes(db));
-  app.use('/api/templates', templatesRoutes(db));
+  app.use('/api/templates', templatesRoutes(db, { dataDir: config.dataDir }));
   app.use('/api/contests', contestsRoutes());
   app.use('/api/checkins', checkinsRoutes(db));
   app.use('/api/settings', settingsRoutes(db, config));

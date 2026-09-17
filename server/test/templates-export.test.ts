@@ -6,11 +6,14 @@ import { createDb } from '../src/db/index.ts';
 import { templatesRoutes } from '../src/routes/templates.ts';
 import { CURRICULUM } from '../src/templates/curriculum.ts';
 
-async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
+async function withServer(
+  fn: (base: string) => Promise<void>,
+  options: Parameters<typeof templatesRoutes>[1] = {},
+): Promise<void> {
   const db = createDb(':memory:');
   const app = express();
   app.use(express.json());
-  app.use('/api/templates', templatesRoutes(db));
+  app.use('/api/templates', templatesRoutes(db, options));
   const srv = app.listen(0);
   await new Promise<void>((resolve) => srv.once('listening', resolve));
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/api/templates`;
@@ -149,4 +152,42 @@ test('export.md: code fences grow to outbid backticks in user code', async () =>
     assert.match(md, /`````+cpp/);
     assert.match(md, /`````+cpp[\s\S]*int x = 0;/);
   });
+});
+
+test('export.pdf: converts the structured export bundle into a PDF attachment', async () => {
+  const pdf = Buffer.from('%PDF-1.7\nICPC templates\n%%EOF');
+  let receivedCounts: [number, number] | null = null;
+
+  await withServer(
+    async (base) => {
+      await fetch(`${base}/custom`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          categoryKey: 'basic',
+          name: 'PDF 导出测试',
+          difficulty: 2,
+          tags: ['测试'],
+          code: 'int main() { return 0; }',
+          idea: '验证 PDF 入口',
+        }),
+      });
+
+      const res = await fetch(`${base}/export.pdf`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'application/pdf');
+      assert.match(
+        res.headers.get('content-disposition') ?? '',
+        /attachment; filename="icpc-templates-\d{4}-\d{2}-\d{2}\.pdf"/,
+      );
+      assert.deepEqual(Buffer.from(await res.arrayBuffer()), pdf);
+      assert.deepEqual(receivedCounts, [1, 0]);
+    },
+    {
+      compilePdf: async (bundle) => {
+        receivedCounts = [bundle.customCount, bundle.builtinNoteCount];
+        return pdf;
+      },
+    },
+  );
 });

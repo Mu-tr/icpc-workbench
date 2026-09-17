@@ -4,7 +4,7 @@ interface SaveFilePickerOptions {
   types?: Array<{ description?: string; accept: Record<string, string[]> }>
 }
 interface WritableStream {
-  write: (data: string) => Promise<void>
+  write: (data: string | Blob) => Promise<void>
   close: () => Promise<void>
 }
 interface FileHandle {
@@ -24,7 +24,11 @@ function getPicker(): ShowSaveFilePicker | undefined {
 }
 
 /** 优先走原生保存对话框；返回 false 表示当前环境不支持，需降级 */
-async function saveViaPicker(filename: string, text: string, mime: string): Promise<boolean> {
+async function saveViaPicker(
+  filename: string,
+  data: string | Blob,
+  mime: string,
+): Promise<boolean> {
   const picker = getPicker()
   if (!picker) return false
   const ext = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')) : ''
@@ -33,14 +37,14 @@ async function saveViaPicker(filename: string, text: string, mime: string): Prom
     types: ext ? [{ description: '文档', accept: { [mime.split(';')[0]]: [ext] } }] : undefined,
   })
   const writable = await handle.createWritable()
-  await writable.write(text)
+  await writable.write(data)
   await writable.close()
   return true
 }
 
 /** 降级路径：Blob + 触发浏览器默认下载 */
-function saveViaBlob(filename: string, text: string, mime: string): void {
-  const blob = new Blob([text], { type: mime })
+function saveViaBlob(filename: string, data: string | Blob, mime: string): void {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: mime })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
   a.download = filename
@@ -59,6 +63,8 @@ export interface SaveUrlOptions {
   successText?: string | false
   /** antd message 实例（由组件内 App.useApp().message 注入）；不传则无提示 */
   message?: MessageLike
+  /** true 时按二进制读取并保存（PDF 等），默认按文本读取 */
+  binary?: boolean
 }
 
 /** 从 URL 取文本并以「可选位置」方式保存 */
@@ -68,14 +74,15 @@ export async function saveUrlAsFile({
   mime = 'text/markdown;charset=utf-8',
   successText = '已导出',
   message,
+  binary = false,
 }: SaveUrlOptions): Promise<void> {
   try {
     const res = await fetch(url)
     if (!res.ok) throw new Error(`导出失败（${res.status}）`)
-    const text = await res.text()
+    const data: string | Blob = binary ? await res.blob() : await res.text()
     try {
-      const saved = await saveViaPicker(filename, text, mime)
-      if (!saved) saveViaBlob(filename, text, mime)
+      const saved = await saveViaPicker(filename, data, mime)
+      if (!saved) saveViaBlob(filename, data, mime)
     } catch (e) {
       // 用户在保存对话框点「取消」→ AbortError，静默提示并退出，不当作错误
       if ((e as Error)?.name === 'AbortError') {
@@ -84,7 +91,7 @@ export async function saveUrlAsFile({
       }
       // WebView2 / 内嵌 iframe 等平台 showSaveFilePicker 存在但 createWritable 被拒
       // （NotSupportedError）→ 不报错，降级为 Blob 下载
-      saveViaBlob(filename, text, mime)
+      saveViaBlob(filename, data, mime)
     }
     if (successText !== false) message?.success(successText)
   } catch (e) {

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   Button,
   Card,
+  Dropdown,
   Empty,
   Form,
   Input,
@@ -23,8 +24,11 @@ import {
   CodeOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  DownOutlined,
   EditOutlined,
   FieldTimeOutlined,
+  FileMarkdownOutlined,
+  FilePdfOutlined,
   ImportOutlined,
   LinkOutlined,
   PlayCircleOutlined,
@@ -40,6 +44,7 @@ import IndentSwitch from '../components/IndentSwitch'
 import { tagColor } from '../ui'
 import { saveUrlAsFile } from '../download'
 import { del, get, patch, post, put } from '../api'
+import { TEMPLATE_EXPORT_OPTIONS, type TemplateExportFormat } from '../templateExport'
 import type { TemplateContentInfo, TemplateExampleInfo, TemplateItemInfo, TemplatesResponse, TemplateStatus } from '../types'
 
 const STATUS_META: Array<{ key: TemplateStatus; label: string; icon: typeof CheckCircleOutlined }> = [
@@ -85,14 +90,25 @@ function contentOf(t: TemplateItemInfo): TemplateContentInfo {
   return t.content ?? { code: null, idea: null, complexity: null, url: null }
 }
 
-/** 一键导出自己写过的模板为 Markdown 文件（自建模板 + 内置条目里写过内容的笔记） */
-const downloadTemplates = () => {
-  const stamp = new Date().toISOString().slice(0, 10)
-  void saveUrlAsFile({
-    url: '/api/templates/export.md',
-    filename: `icpc-templates-${stamp}.md`,
-    successText: '模板已导出',
-  })
+/** 一键导出自己写过的模板（自建模板 + 内置条目里写过内容的笔记） */
+const downloadTemplates = async (
+  format: TemplateExportFormat,
+  setExporting: (value: boolean) => void,
+): Promise<void> => {
+  setExporting(true)
+  try {
+    const stamp = new Date().toISOString().slice(0, 10)
+    const isPdf = format === 'pdf'
+    await saveUrlAsFile({
+      url: isPdf ? '/api/templates/export.pdf' : '/api/templates/export.md',
+      filename: `icpc-templates-${stamp}.${isPdf ? 'pdf' : 'md'}`,
+      mime: isPdf ? 'application/pdf' : 'text/markdown;charset=utf-8',
+      binary: isPdf,
+      successText: isPdf ? 'PDF 已导出' : '模板已导出',
+    })
+  } finally {
+    setExporting(false)
+  }
 }
 
 export default function Templates() {
@@ -108,6 +124,7 @@ export default function Templates() {
   const [contentEditing, setContentEditing] = useState<TemplateItemInfo | null>(null)
   const [contentDraft, setContentDraft] = useState<TemplateContentInfo>({ code: '', idea: '', complexity: '', url: '' })
   const [syncingId, setSyncingId] = useState<string>()
+  const [exporting, setExporting] = useState(false)
   const [dragCat, setDragCat] = useState<string | null>(null)
   const [dragOverCat, setDragOverCat] = useState<{ key: string; pos: 'before' | 'after' } | null>(null)
   /** 拖拽源分类 key（ref 即时读写，不依赖 state 异步更新） */
@@ -371,9 +388,21 @@ export default function Templates() {
             <Button icon={<PlusOutlined />} onClick={() => openCreate()}>
               新建模板
             </Button>
-            <Button icon={<DownloadOutlined />} onClick={downloadTemplates}>
-              导出模板
-            </Button>
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: TEMPLATE_EXPORT_OPTIONS.map((option) => ({
+                  key: option.format,
+                  icon: option.format === 'pdf' ? <FilePdfOutlined /> : <FileMarkdownOutlined />,
+                  label: option.label,
+                })),
+                onClick: ({ key }) => void downloadTemplates(key as TemplateExportFormat, setExporting),
+              }}
+            >
+              <Button icon={<DownloadOutlined />} loading={exporting}>
+                导出模板 <DownOutlined />
+              </Button>
+            </Dropdown>
           </Space>
         }
       />

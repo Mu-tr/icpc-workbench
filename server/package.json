@@ -5,8 +5,11 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prepare-typst.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "prepare:typst": "node scripts/prepare-typst.mjs",
+    "pretest": "node scripts/prepare-typst.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/**/*.test.ts"
   },

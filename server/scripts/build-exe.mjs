@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 // TypeScript 源码直接静态导入：本脚本要求 Node 24（CI 与 package.json engines 一致），
 // 该版本默认启用类型擦除，可加载 buildPostjectArgs 供打包与测试共用。
 import { buildPostjectArgs } from '../src/sea-postject.ts';
+import { ensureTypstBinary } from './prepare-typst.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const serverRoot = path.resolve(__dirname, '..');
@@ -36,6 +37,7 @@ const exe = (name) => (isWindows ? `${name}.exe` : name);
 // --core-only：桌面壳打包用的无窗口核心（Windows: icpc-core.exe / mac: icpc-core），跳过 release 目录组装
 const coreOnly = process.argv.includes('--core-only');
 const exePath = path.join(outDir, coreOnly ? exe('icpc-core') : exe('icpc-workbench'));
+const typstBinary = await ensureTypstBinary({ quiet: true });
 
 console.log('[1/5] 构建前端 client/dist ...');
 execSync('npm run build', { cwd: repoRoot, stdio: 'inherit' });
@@ -110,6 +112,7 @@ assets['src/ai/assistant-prompt.md'] = path.join(serverRoot, 'src', 'ai', 'assis
 assets['src/knowledge/taxonomy.json'] = path.join(serverRoot, 'src', 'knowledge', 'taxonomy.json');
 assets['src/knowledge/rules.json'] = path.join(serverRoot, 'src', 'knowledge', 'rules.json');
 assets['public/widget.html'] = path.join(serverRoot, 'src', 'public', 'widget.html');
+assets['vendor/typst'] = typstBinary;
 
 // 前端 dist：二进制原样内嵌，附 manifest.txt 清单（运行时按清单提取）
 const clientDist = path.join(repoRoot, 'client', 'dist');

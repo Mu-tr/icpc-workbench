@@ -11,6 +11,7 @@ icpc-workbench-*.md
 
 # SEA 打包产物（90MB exe），本地构建生成
 server/release/
+server/vendor/typst/
 .zcode/
 
 # 代码签名证书（含私钥，绝不入库）
