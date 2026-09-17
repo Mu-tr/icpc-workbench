@@ -52,6 +52,12 @@
   --code-operator: #69d7a5;
   --code-comment: #8993a2;
   --code-invalid: #ff7b84;
+  /* Markdown 代码卡语法高亮（rehype-highlight / highlight.js）。
+     关键字/类型/函数/注释/运算符直接复用上面 CodeEditor 的 --code-*，
+     保证「编辑器里看到的颜色」和「AI 回答里看到的颜色」是同一套 */
+  --hl-string: #98c379;
+  --hl-variable: #d8e0ee;
+  --hl-tag: #ff8b93;
   --overlay-1: var(--overlay-1);
   --overlay-2: var(--overlay-2);
   --overlay-3: var(--overlay-3);
@@ -106,6 +112,10 @@
   --code-operator: #1b7154;
   --code-comment: #6b7484;
   --code-invalid: #b8353f;
+  /* 亮色高亮：相对 --surface-inset(#eaedf3) 校准对比度 */
+  --hl-string: #2a7d4f;
+  --hl-variable: #3f4757;
+  --hl-tag: #b0322a;
   --overlay-1: rgba(0, 0, 0, 0.02);
   --overlay-2: rgba(0, 0, 0, 0.04);
   --overlay-3: rgba(0, 0, 0, 0.06);
@@ -1469,6 +1479,87 @@ body {
   white-space: pre;
 }
 
+/* ---- 语法高亮（highlight.js 的 hljs-* 类名，配色走 --code-* 变量，暗/亮自动跟随） ----
+   刻意不引入 highlight.js 官方主题：官方主题自带固定背景色，会盖掉代码卡的
+   --surface-inset，也跟不随 Antd 的亮/暗切换。这里只着色、不碰背景。 */
+.markdown-body .hljs-comment,
+.markdown-body .hljs-quote {
+  color: var(--code-comment, var(--text-3));
+  font-style: italic;
+}
+
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-doctag,
+.markdown-body .hljs-section {
+  color: var(--code-keyword, var(--brand));
+}
+
+.markdown-body .hljs-built_in,
+.markdown-body .hljs-type,
+.markdown-body .hljs-class .hljs-title,
+.markdown-body .hljs-title.class_ {
+  color: var(--code-type, var(--accent-blue));
+}
+
+.markdown-body .hljs-title,
+.markdown-body .hljs-title.function_,
+.markdown-body .hljs-function .hljs-title {
+  color: var(--code-func, var(--brand));
+  font-weight: 600;
+}
+
+.markdown-body .hljs-string,
+.markdown-body .hljs-char,
+.markdown-body .hljs-regexp,
+.markdown-body .hljs-addition {
+  color: var(--hl-string, var(--green));
+}
+
+.markdown-body .hljs-number,
+.markdown-body .hljs-symbol,
+.markdown-body .hljs-bullet {
+  color: var(--code-const, var(--amber));
+}
+
+/* 预处理指令（#include / #define）：不是普通注释，给它独立颜色 */
+.markdown-body .hljs-meta,
+.markdown-body .hljs-meta .hljs-keyword {
+  color: var(--code-control, var(--accent-violet));
+}
+
+.markdown-body .hljs-variable,
+.markdown-body .hljs-template-variable,
+.markdown-body .hljs-attr,
+.markdown-body .hljs-attribute,
+.markdown-body .hljs-property {
+  color: var(--hl-variable, var(--text-2));
+}
+
+.markdown-body .hljs-operator,
+.markdown-body .hljs-punctuation {
+  color: var(--code-operator, var(--green));
+}
+
+/* HTML/XML：标签名与尖括号 */
+.markdown-body .hljs-tag,
+.markdown-body .hljs-name {
+  color: var(--hl-tag, var(--red));
+}
+
+.markdown-body .hljs-deletion {
+  color: var(--red);
+}
+
+.markdown-body .hljs-emphasis {
+  font-style: italic;
+}
+
+.markdown-body .hljs-strong {
+  font-weight: 700;
+}
+
 /* 超长代码折叠：只滚纵向，避免同时出现两个滚动条 */
 .md-code-card:not(.is-expanded) .md-code-pre[data-collapsible='true'] {
   max-height: 420px;
@@ -2471,6 +2562,59 @@ body {
   width: 260px;
   flex-shrink: 0;
   overflow-y: auto;
+  transition: width 160ms ease;
+}
+
+/* 侧栏顶部的折叠按钮（样式与全局侧边栏的 sider-footer-toggle 保持一致） */
+.assistant-side-head {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 2px 8px;
+}
+
+.assistant-side-toggle {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-3);
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  transition:
+    color 140ms ease,
+    background 140ms ease,
+    border-color 140ms ease;
+}
+
+.assistant-side-toggle:hover {
+  color: var(--text-2);
+  background: var(--hover-bg);
+  border-color: var(--line);
+}
+
+.assistant-layout.is-side-collapsed .assistant-side {
+  width: 40px;
+  overflow: hidden;
+}
+
+.assistant-layout.is-side-collapsed .assistant-side-head {
+  justify-content: center;
+  padding: 0;
+}
+
+/* 收起后按钮独自漂在窄栏里，给个边框底色保证它仍然像"可以点" */
+.assistant-layout.is-side-collapsed .assistant-side-toggle {
+  border-color: var(--line);
+  background: var(--surface, var(--bg-elevated));
+}
+
+/* 折叠后：会话记录/上下文/能力值整体让位给对话区，只保留顶部的展开按钮 */
+.assistant-layout.is-side-collapsed .assistant-side > *:not(.assistant-side-head) {
+  display: none;
 }
 
 .assistant-main {

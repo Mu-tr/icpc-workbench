@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Alert, App as AntdApp, Button, Card, Input, Modal, Popconfirm, Select, Space, Spin, Tag } from 'antd'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { Alert, App as AntdApp, Button, Card, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import {
   CopyOutlined,
@@ -7,6 +7,8 @@ import {
   EditOutlined,
   HolderOutlined,
   LoadingOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   PaperClipOutlined,
   PlusOutlined,
   PushpinFilled,
@@ -34,6 +36,7 @@ import {
 import type { PlanListItem } from '../types'
 import Markdown from '../components/Markdown'
 import PageHeader from '../components/PageHeader'
+import { createStreamBuffer } from '../streamBuffer'
 import { rememberSessionFiles, getSessionFileText, forgetSessionFiles } from './sessionFiles'
 import {
   extractAbilityUpdate,
@@ -270,6 +273,49 @@ function patchActiveSessionMessages(
   }))
 }
 
+// ---------- 消息结构化块解析（带缓存） ----------
+
+interface MsgBlocks {
+  modify: string | null
+  abilityUpd: { level: number; reason?: string } | null
+  tplAdds: TemplateAddDraft[]
+  listDraft: ListCreateDraft | null
+  planDraft: PlanCreateDraft | null
+  /** 剥掉所有结构化块之后、留给 Markdown 渲染的正文 */
+  text: string
+}
+
+/**
+ * 解析结果按消息对象缓存。
+ *
+ * 流式输出时 store 每帧都会更新一次消息数组，map 里每条助手消息都要跑六组 regex
+ * （计划修改 / 能力值 / 模板 / 题单 / 训练计划 + 对应的剥离）。历史消息的内容根本
+ * 没变，却跟着每帧重扫 —— 消息一多这就是纯粹的白工。消息对象引用不变时用缓存直接
+ * 返回（WeakMap，消息被丢弃后自动回收）。
+ */
+const blockCache = new WeakMap<ChatMsg, { content: string; blocks: MsgBlocks }>()
+
+function parseMessageBlocks(m: ChatMsg): MsgBlocks {
+  const cached = blockCache.get(m)
+  if (cached && cached.content === m.content) return cached.blocks
+
+  const modify = extractModifyBlock(m.content)
+  const abilityUpd = extractAbilityUpdate(m.content)
+  const tplAdds = extractTemplateAdd(m.content)
+  const listDraft = extractListCreate(m.content)
+  const planDraft = extractPlanCreate(m.content)
+
+  let text = stripModifyBlock(m.content)
+  if (abilityUpd) text = stripAbilityUpdate(text)
+  if (tplAdds.length > 0) text = stripTemplateAdd(text)
+  if (listDraft) text = stripListCreate(text)
+  if (planDraft) text = stripPlanCreate(text)
+
+  const blocks: MsgBlocks = { modify, abilityUpd, tplAdds, listDraft, planDraft, text }
+  blockCache.set(m, { content: m.content, blocks })
+  return blocks
+}
+
 // ---------- 相对时间 ----------
 
 function relTime(ts: number): string {
@@ -287,6 +333,19 @@ function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+// ---------- 左侧栏折叠 ----------
+
+/** 折叠状态持久化：切页/刷新后保持用户的选择（localStorage 不可用时仅本次会话生效） */
+const SIDE_COLLAPSED_KEY = 'icpc-assistant-side-collapsed'
+
+function readSideCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDE_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
 }
 
 // ---------- 组件 ----------
@@ -317,10 +376,11 @@ export default function Assistant() {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [dragId, setDragId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
+  /** 左侧栏折叠：会话记录/上下文/能力值收成一条窄栏，把宽度让给对话区 */
+  const [sideCollapsed, setSideCollapsed] = useState(readSideCollapsed)
   /** 拖拽源 id（ref 即时读写，不依赖 state 异步更新） */
   const dragIdRef = useRef<string | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  /** 消息列表可滚动容器，用于判断用户是否在底部附近 */
+  /** 消息列表可滚动容器：判断用户是否在底部附近，也是自动滚动的作用对象 */
   const msgsRef = useRef<HTMLDivElement>(null)
   /** 用户是否在底部附近（true 时流式更新自动滚到底，false 时不打断用户上滑查看） */
   const stickToBottomRef = useRef(true)
@@ -337,6 +397,19 @@ export default function Assistant() {
   useEffect(() => {
     setPendingAtts([])
   }, [activeId])
+
+  // ---------- 左侧栏折叠 ----------
+  /** 折叠/展开左侧栏（fold/unfold 图标与全局侧边栏保持一致） */
+  const toggleSideCollapsed = useCallback(() => {
+    setSideCollapsed((c) => {
+      try {
+        localStorage.setItem(SIDE_COLLAPSED_KEY, c ? '0' : '1')
+      } catch {
+        /* localStorage 不可用时仅本次会话生效 */
+      }
+      return !c
+    })
+  }, [])
 
   // ---------- 文件上传 ----------
   /** 图片 MIME 类型：走 Files API 上传，以 file 内容块引用 */
@@ -614,10 +687,27 @@ export default function Assistant() {
 
   useEffect(loadAbility, [loadAbility])
 
-  // 流式更新时只在用户已在底部附近时才自动滚动，不打断用户上滑查看历史
-  useEffect(() => {
-    if (stickToBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  /**
+   * 流式更新时只在用户已在底部附近时才跟随，不打断上滑查看历史。
+   *
+   * 两个关键点：
+   *   1. 流式期间直接写 scrollTop 而不是 scrollIntoView({behavior:'smooth'})。
+   *      平滑滚动是一段异步动画，每来一帧就新起一段，动画互相打断就会看到滚动条
+   *      来回抽搐（"滚动跳动"）；而且 scrollIntoView 会把所有可滚动祖先一起滚。
+   *      直接赋值是同步的，配合上面的节流，看起来就是匀速往下走。
+   *   2. 只有"发新消息 / 生成结束"这类一次性变化才用平滑滚动 —— 那种场景下
+   *      内容是一大块跳变的，用动画过渡更自然。
+   *
+   * 用 useLayoutEffect：在浏览器绘制前就把位置调好，避免"内容先画在视口外、
+   * 下一帧才滚过去"造成的一帧跳动。
+   */
+  useLayoutEffect(() => {
+    const el = msgsRef.current
+    if (!el || !stickToBottomRef.current) return
+    if (sending) {
+      el.scrollTop = el.scrollHeight
+    } else {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     }
   }, [messages, sending])
 
@@ -668,6 +758,28 @@ export default function Assistant() {
     const ac = new AbortController()
     sessionAbortControllers.set(sessionId, ac)
 
+    /**
+     * 流式增量先攒起来再批量写库：
+     * 一个 token 一次 setState 会让 React 每秒重渲染上百次（每次都要重解析整段
+     * Markdown + 重排公式），攒批后压到每秒十几次，肉眼依然连贯。
+     * 正文与思维链共用一个定时器，同帧到达也只触发一次重渲染。
+     */
+    const buf = createStreamBuffer(({ delta, reasoning }) => {
+      if (!delta && !reasoning) return
+      patchActiveSessionMessages(sessionId, (msgs) => {
+        const last = msgs[msgs.length - 1]
+        if (!last || last.role !== 'assistant') return msgs
+        return [
+          ...msgs.slice(0, -1),
+          {
+            ...last,
+            ...(delta ? { content: last.content + delta } : {}),
+            ...(reasoning ? { reasoning: (last.reasoning ?? '') + reasoning } : {}),
+          },
+        ]
+      })
+    })
+
     try {
       // 先种一条空 assistant 消息，流式 delta 逐字追加到它
       patchActiveSessionMessages(sessionId, (msgs) => [
@@ -701,28 +813,13 @@ export default function Assistant() {
           ...(sendPlanId !== undefined ? { planId: sendPlanId } : {}),
           ...(sendListId !== undefined ? { listId: sendListId } : {}),
         },
-        (delta) => {
-          // 追加到最后一条 assistant 消息（用户可能已切到其他会话，但写入仍指向原会话）
-          patchActiveSessionMessages(sessionId, (msgs) => {
-            const last = msgs[msgs.length - 1]
-            if (last && last.role === 'assistant') {
-              return [...msgs.slice(0, -1), { ...last, content: last.content + delta }]
-            }
-            return msgs
-          })
-        },
+        (delta) => buf.pushDelta(delta),
         ac.signal,
-        (reasoningChunk) => {
-          // 推理内容（思维链）追加到最后一条 assistant 消息的 reasoning 字段
-          patchActiveSessionMessages(sessionId, (msgs) => {
-            const last = msgs[msgs.length - 1]
-            if (last && last.role === 'assistant') {
-              return [...msgs.slice(0, -1), { ...last, reasoning: (last.reasoning ?? '') + reasoningChunk }]
-            }
-            return msgs
-          })
-        },
+        (reasoningChunk) => buf.pushReasoning(reasoningChunk),
       )
+      // 流已结束：先把缓冲里剩下的内容落库，再处理用量/截断等收尾信息，
+      // 否则这些内容会被追加到"还没有最后一段文字"的消息上
+      buf.flush()
       // token 用量：写入最后一条 assistant 消息（前端展示消耗）
       if (result.usage) {
         patchActiveSessionMessages(sessionId, (msgs) => {
@@ -827,6 +924,8 @@ export default function Assistant() {
         })
       }
     } finally {
+      // 异常/中止路径也要把缓冲里的字送出去，保证"停止生成"时看到的内容是完整的
+      buf.dispose()
       sessionAbortControllers.delete(sessionId)
       setChatState((prev) => {
         if (!prev.sendingIds.has(sessionId)) return prev
@@ -1067,8 +1166,22 @@ export default function Assistant() {
           }
         />
       )}
-      <div className="assistant-layout">
+      <div className={`assistant-layout${sideCollapsed ? ' is-side-collapsed' : ''}`}>
         <div className="assistant-side">
+          {/* 折叠按钮：收起后本栏只留这条窄边，把宽度让给对话区 */}
+          <div className="assistant-side-head">
+            <Tooltip title={sideCollapsed ? '展开侧栏' : '收起侧栏'} placement="right">
+              <button
+                type="button"
+                className="assistant-side-toggle"
+                aria-label={sideCollapsed ? '展开侧栏' : '收起侧栏'}
+                aria-expanded={!sideCollapsed}
+                onClick={toggleSideCollapsed}
+              >
+                {sideCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              </button>
+            </Tooltip>
+          </div>
           {/* 会话记录 */}
           <Card
             size="small"
@@ -1374,17 +1487,8 @@ export default function Assistant() {
                   </div>
                 )
               }
-              const modify = extractModifyBlock(m.content)
-              const abilityUpd = extractAbilityUpdate(m.content)
-              const tplAdds = extractTemplateAdd(m.content)
+              const { modify, abilityUpd, tplAdds, listDraft, planDraft, text } = parseMessageBlocks(m)
               const hasTpl = tplAdds.length > 0
-              const listDraft = extractListCreate(m.content)
-              const planDraft = extractPlanCreate(m.content)
-              let text = stripModifyBlock(m.content)
-              if (abilityUpd) text = stripAbilityUpdate(text)
-              if (hasTpl) text = stripTemplateAdd(text)
-              if (listDraft) text = stripListCreate(text)
-              if (planDraft) text = stripPlanCreate(text)
               // 旧消息用 m.applied 表示模板已写入（向后兼容：无 appliedTpl 时视为该消息模板均已应用）
               const appliedTpl =
                 m.applied === true && !m.appliedTpl ? tplAdds.map((_, j) => j) : (m.appliedTpl ?? [])
@@ -1536,7 +1640,6 @@ export default function Assistant() {
                 <Spin size="small" />
               </div>
             )}
-            <div ref={bottomRef} />
           </div>
           <div className="plan-chat-input">
             {pendingAtts.length > 0 && (

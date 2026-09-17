@@ -250,6 +250,37 @@ function looksLikeMathTail(body: string): boolean {
   return /\\[a-zA-Z]|[_^{}]|[≤≥≠∈∉∪∩√∞→←×·]|[=+*/]\s*[a-zA-Z0-9\\]/.test(body)
 }
 
+/**
+ * 修掉**写了一半的链接/图片**：`[快速排序](https://examp` 在渲染时会原样显示成
+ * 一串字面 `](https://examp`，是流式里最刺眼的"源码泄漏"。
+ *
+ * 做法：只认"正文已收尾、URL 还没收尾"的形态（`[…](` 之后到串尾没有 `)`），
+ * 从 `[` 处整段截掉 —— 让链接在写完的那一帧整条出现，而不是逐字符长出来。
+ * 只有 `[` 而没有 `](` 的形态不动（`a[i]` 写到一半的 `a[i` 渲染出来就是一个
+ * 普通 `[`，截掉反而会让已经打出来的字缩回去，抖得更明显）。
+ *
+ * 代码区与公式区内的 `[` 一律跳过（`a[prev]` 是下标，不是链接）。
+ */
+function repairIncompleteLinks(text: string, scan: ScanResult): string {
+  let start = -1
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (scan.code[i] || scan.math[i]) continue
+    if (text[i] === '[') {
+      start = i
+      break
+    }
+  }
+  if (start === -1) return text
+  const rest = text.slice(start)
+  // `!?` 同时覆盖图片；`[^)\n]*$` 保证 URL 部分确实还没闭合
+  if (/^!?\[[^\]\n]*\]\([^)\n]*$/.test(rest)) {
+    // 图片语法连前面的 `!` 一起截掉，否则会剩下一个孤零零的感叹号
+    if (start > 0 && text[start - 1] === '!' && !scan.code[start - 1] && !scan.math[start - 1]) start--
+    return text.slice(0, start)
+  }
+  return text
+}
+
 /** 词内单个 `~` 转义：GFM 的单波浪线删除线会把 `20~25` 当成删除线定界符 */
 function escapeWordTildes(text: string, scan: ScanResult): string {
   return text.replace(/([\p{L}\p{N}_])~(?!~)(?=[\p{L}\p{N}_])/gu, (m, _p: string, offset: number) =>
@@ -329,7 +360,8 @@ function unclosedDelimiters(text: string, scan: ScanResult): string {
 /* ============================ 入口 ============================ */
 
 /**
- * 补上流式输出里未闭合的 Markdown 定界符（仅在"正在流式输出"时调用）。
+ * 补上流式输出里未闭合的 Markdown 定界符，并截掉写了一半的链接
+ * （仅在"正在流式输出"时调用）。
  *
  * 完整消息不要调用本函数：一段已经写完的文本里出现单个 `*`/`_`/`$` 是正常写法
  * （`2 * 3`、`价格 $5`、`a_b`），补符号反而会改变原意。
@@ -339,7 +371,8 @@ function unclosedDelimiters(text: string, scan: ScanResult): string {
  */
 export function repairStreamingMarkdown(text: string): string {
   // 快速返回：没有任何可能未闭合的定界符字符时不必扫描
-  if (!text || !/[*_~`$\\]/.test(text)) return text
+  // （`[` 也要算进来：写了一半的链接同样需要修）
+  if (!text || !/[*_~`$\\[]/.test(text)) return text
 
   let out = text
   let scan = scanStream(out)
@@ -376,11 +409,45 @@ export function repairStreamingMarkdown(text: string): string {
     }
   }
 
-  // 5. 词内单个 `~`：先把 `20~25` 这类转义掉，再谈删除线定界符
+  // 5. 写了一半的链接/图片：`[…](https://examp` 整段截掉，避免闪出字面 `](`
+  scan = scanStream(out)
+  out = repairIncompleteLinks(out, scan)
+
+  // 6. 词内单个 `~`：先把 `20~25` 这类转义掉，再谈删除线定界符
   scan = scanStream(out)
   out = escapeWordTildes(out, scan)
 
-  // 6. 未闭合的强调定界符（`**加粗` / `*斜体` / `~~删除线`）
+  // 7. 未闭合的强调定界符（`**加粗` / `*斜体` / `~~删除线`）
   scan = scanStream(out)
   return out + unclosedDelimiters(out, scan)
+}
+
+/* ============================ 增量渲染：稳定块切点 ============================ */
+
+/**
+ * 找「已写定的部分」与「还在增长的部分」的分界，供 Markdown 组件做增量渲染。
+ *
+ * AI 一帧一帧追加内容时，只有**最后一个块**会变，前面所有块早就定稿了。
+ * 把文本从这里切成两段分别渲染：前段交给 memo 过的 Markdown（字符串没变就整段
+ * 跳过解析与 KaTeX 排版），只有尾段每帧重来 —— 这就是「边生成边渲染」里
+ * 真正省下重复渲染的那一刀。
+ *
+ * 切点必须同时满足三个条件，否则宁可不切（返回 -1）：
+ *   1. 是一个空行（`\n\n`）—— 块级边界；
+ *   2. 在代码区/公式区之外 —— 围栏里、公式里的空行是内容，切开会撕裂代码块；
+ *   3. 前面已经有足够长的稳定内容 —— 太短的文档切了也没收益。
+ *
+ * @returns 切点下标（前段取 `[0, cut)`，尾段取 `[cut, ...)`）；无安全切点时返回 -1
+ */
+export function findStableBlockSplit(text: string, minPrefix = 600): number {
+  if (text.length < minPrefix + 64) return -1
+  const scan = scanStream(text)
+  const limit = text.length - 2
+  for (let i = limit; i >= minPrefix; i--) {
+    if (text[i] !== '\n' || text[i + 1] !== '\n') continue
+    // 两个 `\n` 都必须落在代码区与公式区之外（围栏/公式内部的空行是内容）
+    if (scan.code[i] || scan.math[i] || scan.code[i + 1] || scan.math[i + 1]) continue
+    return i + 2
+  }
+  return -1
 }

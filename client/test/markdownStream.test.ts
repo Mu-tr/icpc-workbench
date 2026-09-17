@@ -9,7 +9,7 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { repairStreamingMarkdown } from '../src/components/markdownStream.ts'
+import { repairStreamingMarkdown, findStableBlockSplit } from '../src/components/markdownStream.ts'
 import { preprocessMath } from '../src/components/markdownMath.ts'
 
 /** 断言"补了收尾"：期望结果等于原文 + 后缀 */
@@ -213,6 +213,88 @@ describe('整体性质', () => {
     for (const input of inputs) {
       const once = repairStreamingMarkdown(input)
       assert.equal(repairStreamingMarkdown(once), once, `不幂等: ${JSON.stringify(input)} → ${JSON.stringify(once)}`)
+    }
+  })
+})
+
+// ---------- 写了一半的链接 / 图片 ----------
+
+describe('未闭合链接与图片', () => {
+  it('写到一半的链接整段截掉，不留字面 ](https://…', () => {
+    assert.equal(repairStreamingMarkdown('参考[快速排序](https://examp'), '参考')
+  })
+  it('刚打出 ]( 也截掉', () => {
+    assert.equal(repairStreamingMarkdown('见[这里]('), '见')
+  })
+  it('图片语法连 ! 一起截掉', () => {
+    assert.equal(repairStreamingMarkdown('图示：![示意](https://x.com/a.pn'), '图示：')
+  })
+  it('写完整的链接不动', () => {
+    assertUnchanged('参考[快速排序](https://example.com) 这篇')
+  })
+  it('URL 里带括号且已闭合时不动', () => {
+    assertUnchanged('见[文档](https://a.com/x_(y)) 说明')
+  })
+  it('只有 [ 而没到 ]( 的形态不动（a[i] 写到一半）', () => {
+    // 截掉会让已经打出来的字缩回去，抖得更明显；渲染出来只是一个普通 `[`
+    assertUnchanged('数组 a[i')
+    assertUnchanged('数组 a[i] 结束')
+  })
+  it('代码区里的 [ 不是链接，不动', () => {
+    assertUnchanged('取 `a[prev]` 的值')
+  })
+  it('链接后面还有正文时不误截', () => {
+    assertUnchanged('见[文档](https://a.com) 然后继续写')
+  })
+})
+
+// ---------- 增量渲染切点 ----------
+
+describe('findStableBlockSplit（流式增量渲染切点）', () => {
+  /** 造一段由空行分隔的多段文本，保证总长超过切点阈值 */
+  const longDoc = (tail: string): string => {
+    const head = Array.from({ length: 30 }, (_, i) => `第 ${i} 段：这是一段足够长的说明文字，用来把文档撑过阈值。`).join('\n\n')
+    return `${head}\n\n${tail}`
+  }
+
+  it('文末正在打字的那一段被切出来，前面整段保持稳定', () => {
+    const tail = '正在打字的最后一段'
+    const text = longDoc(tail)
+    const cut = findStableBlockSplit(text)
+    assert.ok(cut > 0, '应当找到切点')
+    assert.equal(text.slice(cut), tail, '尾段应当正好是还在增长的那一块')
+    assert.ok(text.slice(0, cut).includes('第 29 段'), '前段应当保留已写定的内容')
+  })
+
+  it('未闭合的代码围栏内部不是切点：整块代码留在尾段', () => {
+    const tail = '```cpp\nint a = 1;'
+    const text = longDoc(tail)
+    const cut = findStableBlockSplit(text)
+    assert.ok(cut > 0, '应当找到切点')
+    assert.equal(text.slice(cut), tail, '围栏不能被切开，否则代码块会被撕裂')
+    assert.ok(!text.slice(0, cut).includes('```cpp'), '围栏应当留在尾段')
+  })
+
+  it('未闭合的块级公式内部不是切点', () => {
+    const tail = '$$ x = 1'
+    const text = longDoc(tail)
+    const cut = findStableBlockSplit(text)
+    assert.ok(cut > 0, '应当找到切点')
+    assert.equal(text.slice(cut), tail, '公式不能被切开')
+  })
+
+  it('短文档不切（走原来的整体渲染，行为不变）', () => {
+    assert.equal(findStableBlockSplit('很短的一段话。'), -1)
+    assert.equal(findStableBlockSplit(''), -1)
+  })
+
+  it('随着内容增长，切点只会前进不会回退', () => {
+    const base = longDoc('')
+    let prev = 0
+    for (const extra of ['一', '一段', '一段话', '一段话。', '一段话。\n\n第二段开始']) {
+      const cut = findStableBlockSplit(base + extra)
+      assert.ok(cut >= prev, `切点回退了: ${prev} → ${cut}`)
+      prev = cut
     }
   })
 })

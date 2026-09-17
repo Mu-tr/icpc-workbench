@@ -22,7 +22,7 @@
  *     以及正文有没有被吞进公式区。
  */
 
-import { register } from 'node:module'
+import { createRequire, register } from 'node:module'
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -33,6 +33,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const clientRoot = resolvePath(here, '..')
+/** Markdown.tsx 里 `import 'katex/dist/katex.min.css'` 实际会解析到的那份样式表 */
+const katexCssPath = createRequire(join(clientRoot, 'package.json')).resolve('katex/dist/katex.min.css')
 const outDir = join(here, '.render-out')
 
 /* ---------------------------- 1. 编译 ---------------------------- */
@@ -401,10 +403,22 @@ check('每个公式都能被 KaTeX 严格解析（含 ±、\\bmod、\\text{中�
 })
 
 check('真代码红线：反引号里的代码标识符仍是代码', () => {
-  const html = render('用 `push_back` 插入，比较 `a[x] + a[x+1]`，复杂度 `O(n log n)`。', false)
-  for (const frag of ['<code>push_back</code>', '<code>a[x] + a[x+1]</code>', '<code>O(n log n)</code>']) {
+  const html = render('用 `push_back` 插入，比较 `a[x] + a[x+1]`，还需要 `sort(a, a + n)`。', false)
+  for (const frag of ['<code>push_back</code>', '<code>a[x] + a[x+1]</code>', '<code>sort(a, a + n)</code>']) {
     assert.ok(html.includes(frag), `缺少 ${frag}: ${html.slice(0, 300)}`)
   }
+})
+
+check('复杂度记号按公式渲染（本轮按用户反馈翻面：不再是代码）', () => {
+  const html = render('复杂度为 O((n+#events)logn+q⋅n) 左右。', false)
+  assert.ok(!html.includes('katex-error'), '出现 katex-error')
+  assert.ok(html.includes('class="katex"'), `复杂度没有渲染成公式: ${html.slice(0, 400)}`)
+  // `\log` 是 \mathop，KaTeX 会排成函数名 + 应用间距（MathML 里紧跟着 <mo>⁡</mo>）
+  assert.ok(html.includes('<mi>log</mi>') || html.includes('mop'), `log 没有升为 LaTeX 函数名: ${html.slice(0, 500)}`)
+  // `#` 必须转义，否则会被 KaTeX 当宏参数报错
+  const text = visibleText(html)
+  assert.ok(text.includes('#events'), `集合/计数记号 # 丢了: ${text.slice(0, 200)}`)
+  assert.equal(auditMathRender(preprocessMath('复杂度为 O((n+#events)logn+q⋅n) 左右。')).length, 0, '公式无法被 KaTeX 解析')
 })
 
 check('多行伪代码围栏保持代码卡，换行与缩进不丢（用户截图：代码粘连）', () => {
@@ -486,11 +500,136 @@ check('折行的公式转成块级公式，同一段里的伪代码仍留在代�
   assert.equal(auditMathRender(preprocessMath(raw)).length, 0, '有公式无法被 KaTeX 解析')
 })
 
+check('带函数调用写法的公式不再进代码卡（用户截图 4：集合基数 / 续写式子）', () => {
+  const raw = [
+    '把 a 预先排序，所有统计都可以用二分得到：',
+    '',
+    '- badR = #{ a_i > t and a_i ≤ k−m }',
+    '      = max(0, upper_bound(a, k-m) - lower_bound(a, t+1))',
+    '',
+    '所以我们只需要快速求出',
+    '',
+    '```',
+    'cnt(m) = #{ i | b_i(k) < m }',
+    '```',
+    '',
+    '遍历 c ：',
+    '',
+    '```',
+    'if c_j ≥ cur :    // 还能给出 cur',
+    '    cur++',
+    '```',
+  ].join('\n')
+  const html = render(raw, false)
+  const text = visibleText(html).replace(/\s+/g, ' ')
+  // 数学模式下 `lower_bound` 会渲染成 lower 带下标 bound（下划线本身不可见），
+  // 所以比对时去掉空白、只认标识符主体
+  const flat = text.replace(/\s+/g, '')
+  // 两张"公式卡"都变成数学；只有伪代码那张仍是代码卡
+  assert.equal((html.match(/class="md-code-card/g) ?? []).length, 1, `代码卡数量不对: ${html.slice(0, 400)}`)
+  assert.ok(html.includes('katex-display'), `集合基数定义没有渲染成块级公式: ${html.slice(0, 300)}`)
+  assert.ok(text.includes('cnt(m)'), `公式内容丢了: ${text.slice(0, 200)}`)
+  assert.ok(text.includes('badR'), `列表项里的式子丢了: ${text.slice(0, 200)}`)
+  assert.ok(flat.includes('upperbound(a,k−m)') || flat.includes('upperbound(a,k-m)'), `upper_bound 丢了: ${text.slice(0, 200)}`)
+  assert.ok(flat.includes('lowerbound(a,t+1)'), `lower_bound 丢了: ${text.slice(0, 200)}`)
+  // 集合括号必须可见（裸花括号在 KaTeX 里是分组、不显示）
+  assert.ok(text.includes('{') && text.includes('}'), `集合括号不可见: ${text.slice(0, 200)}`)
+  // 伪代码仍是代码卡，注释与缩进都在
+  assert.ok(html.includes('if c_j ≥ cur :') && html.includes('// 还能给出 cur'), '伪代码内容丢了')
+  assert.ok(!html.includes('katex-error'), '出现 katex-error')
+  assert.equal(auditMathRender(preprocessMath(raw)).length, 0, '有公式无法被 KaTeX 解析')
+})
+
+check('列表项不会被块级公式吞掉（`- badR = …` 的列表标记还在）', () => {
+  const html = render('- badR = #{ a_i > t and a_i ≤ k−m }\n      = max(0, upper_bound(a, k-m) - lower_bound(a, t+1))', false)
+  assert.ok(html.includes('<ul>') && html.includes('<li>'), `列表结构丢了: ${html.slice(0, 300)}`)
+  assert.ok(!html.includes('katex-display'), '列表项被升级成块级公式（会把标记吞进公式）')
+  assert.ok(html.includes('class="katex"'), '列表项里的式子没有渲染成行内公式')
+})
+
 check('裸写的单个下标记号按数学渲染（dp[i] / a[offset]）', () => {
   for (const raw of ['状态 dp[i] 表示前 i 个', '权值正是 a[offset]']) {
     const html = render(raw, false)
     assert.ok(html.includes('class="katex"'), `${raw} 没有渲染成公式: ${html.slice(0, 200)}`)
     assert.ok(!html.includes('<code'), `${raw} 被渲染成代码: ${html.slice(0, 200)}`)
+  }
+})
+
+/**
+ * 用户粘贴的 mex 讲解（反馈原文：「中间有的数学公式被当成代码块了」）。
+ *
+ * 这两行没有 LaTeX 命令、没有 Unicode 数学符号，只有普通的 ASCII `=`，
+ * 于是落在 `shouldConvertFenceToMath` 多行分支的「至少一行含强数学记号」之外、
+ * 整块退回代码卡 —— 而**同样内容只剩一行**时是能正常渲染成公式的。
+ */
+const MEX_REPLY = [
+  '把每个下标 `i` 看成一件「资源」，它可以提供两种"价值"：',
+  '',
+  '```',
+  'value = a_i          (不变)',
+  'value = k - a_i      (变换)',
+  '```',
+  '',
+  '在构造 `mex` 时，若我们想让 `0` 出现在 a\' 中，就必须挑选一件资源，使它的 `价值` 为 `0`。',
+].join('\n')
+
+check('分段定义（同一量的几种取值）不再被塞进代码卡', () => {
+  const html = render(MEX_REPLY, false)
+  assert.equal(
+    (html.match(/class="md-code-card/g) ?? []).length,
+    0,
+    `分段定义被渲染成代码卡了: ${html.slice(0, 500)}`,
+  )
+  // 每条取值各自排成一条居中公式（而不是合并成一行）
+  assert.equal((html.match(/katex-display/g) ?? []).length, 2, `块级公式数不对: ${html.slice(0, 500)}`)
+  assert.ok(!html.includes('katex-error'), '出现 katex-error')
+  assert.equal(auditMathRender(preprocessMath(MEX_REPLY)).length, 0, '有公式无法被 KaTeX 解析')
+  // 行尾中文小注不丢
+  const text = visibleText(html).replace(/\s+/g, '')
+  assert.ok(text.includes('(不变)') && text.includes('(变换)'), `中文小注丢了: ${text.slice(0, 300)}`)
+})
+
+check('整段只有一个围栏时，分段定义同样按公式渲染', () => {
+  const html = render('```\nvalue = a_i          (不变)\nvalue = k - a_i      (变换)\n```', false)
+  assert.equal((html.match(/class="md-code-card/g) ?? []).length, 0, `整段围栏被渲染成代码卡: ${html.slice(0, 400)}`)
+  assert.equal((html.match(/katex-display/g) ?? []).length, 2, `块级公式数不对: ${html.slice(0, 400)}`)
+  assert.ok(!html.includes('katex-error'), '出现 katex-error')
+})
+
+check('红线：一组独立赋值语句仍留在代码卡里', () => {
+  const html = render('转移：\n\n```\ndp[0] = 1\ndp[i] = dp[i-1] + dp[i-2]\n```', false)
+  assert.equal(
+    (html.match(/class="md-code-card/g) ?? []).length,
+    1,
+    `独立语句不该转公式（会压成一条首尾相接的式子）: ${html.slice(0, 400)}`,
+  )
+  assert.ok(!html.includes('class="katex"'), `独立语句不该渲染成公式: ${html.slice(0, 400)}`)
+})
+
+/**
+ * 用户反馈：`res=ans(k1)xorans(k2)xor…xorans(kq)` 这句公式中间没有间隔，看不清。
+ *
+ * KaTeX 按 LaTeX 规则在数学模式里忽略空格，词运算符 `xor` 退化成一串挨个排的字母，
+ * 与相邻标识符糊在一起。转成 `\operatorname` 后它是 \mathop，KaTeX 会在两侧排 TeX 的薄间距。
+ */
+check('词运算符排成算子，公式中间不再糊成一团', () => {
+  const raw = '答案为 res = ans(k_1) xor ans(k_2) xor … xor ans(k_q)。'
+  const html = render(raw, false)
+  assert.ok(!html.includes('katex-error'), '出现 katex-error')
+  assert.equal(auditMathRender(preprocessMath(raw)).length, 0, '有公式无法被 KaTeX 解析')
+  // \operatorname 在 KaTeX 里是 class="mop"，并在两侧插入 TeX 的薄间距（mspace）
+  assert.equal((html.match(/class="mop"/g) ?? []).length, 3, `三个 xor 都应排成算子: ${html.slice(0, 600)}`)
+  assert.ok((html.match(/mspace/g) ?? []).length >= 6, `算子两侧缺少 TeX 间距: ${html.slice(0, 600)}`)
+  // 内容一个字都不能少
+  const text = visibleText(html).replace(/\s+/g, '')
+  assert.ok(text.includes('ans(k1)') && text.includes('ans(kq)'), `公式内容丢了: ${text.slice(0, 200)}`)
+})
+
+check('红线：词运算符不侵入标识符与 \\text{}', () => {
+  // 完整边界覆盖在 markdownMath.test.ts；这里只兜渲染层不报错、不见 katex-error
+  for (const raw of ['$dp_xor = 1$', '$txorid = 2$', 'x = \\text{a or b}']) {
+    const html = render(raw, false)
+    assert.ok(!html.includes('katex-error'), `${raw} 渲染失败`)
   }
 })
 
@@ -609,6 +748,39 @@ check('index.css 括号配平，且章节/段落/代码卡间距已放宽', () =
   ]) {
     assert.ok(css.includes(decl), `缺少间距声明: ${decl}`)
   }
+})
+
+/* ---------------------------- [8] KaTeX 类名/样式表同版本 ---------------------------- */
+
+console.log('\n[8] KaTeX 渲染输出与自带样式表必须同版本（类名对得上）')
+
+/**
+ * 用户截图里"公式中间一条突兀竖线"就是这个不变量被打破的结果：
+ * rehype-katex 用的是它自己依赖的 katex（0.16.x，输出 class="stretchy"），
+ * 而组件里 `import 'katex/dist/katex.min.css'` 解析到顶层 katex（0.18.x，
+ * 样式表里只认 .katex-stretchy）。类名对不上 → \boxed 的盒子丢掉
+ * `.katex .stretchy { width: 100%; display: block }` 这条布局规则，
+ * 只剩 0.04em 的左右边框重合，塌成 2px 宽的一条竖线。
+ *
+ * 这里拿**渲染输出里的 class** 去**实际会被 import 的那份 CSS** 里找规则：
+ * 两个版本一旦漂移（升 katex 但不升 rehype-katex，或反过来）就会红。
+ */
+check('\\boxed 的容器 class 在自带样式表里有布局规则（不会塌成一条竖线）', () => {
+  const html = render('$\\boxed{+a_0}$', false)
+  const found = /<span class="([^"]*\b(?:stretchy|katex-stretchy)\b[^"]*)"/.exec(html)
+  assert.ok(found, `\\boxed 没有产出 stretchy 容器：${html.slice(0, 300)}`)
+  const classNames = found[1].split(/\s+/).filter(Boolean)
+  // 压缩空白后 katex.min.css 里是 `.katex .stretchy{width:100%;…}`，
+  // 断言要同时容忍压缩版（无空格）与源码版（有空格）
+  const css = readFileSync(katexCssPath, 'utf8')
+  const styled = classNames.filter((c) =>
+    new RegExp(`\\.katex\\s+\\.${c}\\s*\\{[^}]*width\\s*:\\s*100%`).test(css),
+  )
+  assert.ok(
+    styled.length > 0,
+    `渲染输出的 class「${found[1]}」在 ${katexCssPath} 里没有 width:100% 规则 —— ` +
+      'rehype-katex 用的 katex 与 import 的样式表版本漂了，\\boxed 会塌成一条竖线',
+  )
 })
 
 /* ---------------------------- 收尾 ---------------------------- */

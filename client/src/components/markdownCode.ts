@@ -19,14 +19,19 @@
  *     例如 `answer = Σ a[i] + (n-1) * min(a[i])`
  *   · Unicode 上下标字符（₀₁ᵢ ⁿ²，通常在管线入口已被归一化为 `_{}`/`^{}`）
  *
- * 刻意不含方括号/圆括号本身：`a[x] + a[x+1]`、`f(n)`、`O(n log n)` 这类纯括号 ASCII 记法
+ * 刻意不含方括号/圆括号本身：`a[x] + a[x+1]`、`f(n)` 这类纯括号 ASCII 记法
  * 既可能是代码也可能是数学，升级后会渲染成 `a` 下标 `[x+1]`（含义改变），因此保持原样。
+ *
+ * 唯一例外是**复杂度记号** `O(…)` / `Θ(…)` / `Ω(…)`：它由下面的 COMPLEXITY 单独认领，
+ * 不当作"函数调用"而当作公式（用户反馈"O((n+#events)logn+q⋅n) 没正确渲染"）。
+ * 理由是大 O 只有这一种含义 —— 它是记号而不是可调用的符号，写成 `O(n log n)`
+ * 就是"`n log n` 的同阶量"，不会有第二个解释。
  */
 const STRONG_MATH_SYMBOLS =
   /∑|Σ|∏|Π|√|⌊|⌋|⌈|⌉|←|→|↔|⇔|⇒|≤|≥|≠|∞|∂|∇|∈|∉|∪|∩|⊆|⊇|⊕|⊗|∀|∃|·|…|[₀-₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜᵢⱼᵣᵤᵥ]|[⁰-⁹⁺⁻⁼⁽⁾ⁿⁱ]|²|³/
 
 /** 复杂度记号：O(...) / Θ(...) / Ω(...)（注意不能匹配 C++ 的 operator() —— 那会先被 looksLikeCode 拦下） */
-const COMPLEXITY = /[OΘΩ]\s*\(/
+const COMPLEXITY = /(?<![A-Za-z])[OΘΩ]\s*\(/
 
 /**
  * LaTeX 语法特征：反斜杠命令（`\max`、`\frac`、`\le`）或花括号下标上标
@@ -187,13 +192,26 @@ const PSEUDO_CODE =
   /(?<![\\\w])(?:if|elif|elseif|else|for|foreach|while|switch|case|default|break|continue|return|then|do|end|def|function|procedure|repeat|until|begin)(?![\w])|\+\+|--|:=|(?:\w|\))\s*:\s*$/m
 
 /**
+ * **语句级**代码特征：出现这些就是真代码，**不论式子长得像不像公式**。
+ *
+ * 与 CODE_SHAPE 的关键区别：函数调用 `cnt(m)`、下标 `b_i(k)` 这类**弱**形态不算 ——
+ * 它们在数学公式里同样常见。用户截图里两张被误判成代码卡的"公式"正是栽在这点上：
+ *   `cnt(m) = #{ i | b_i(k) < m }`        ← `cnt(` 命中 CODE_SHAPE 就被否决
+ *   `= max(0, upper_bound(a, k-m) - …)`   ← 同上
+ * 所以判定顺序必须是：**先看语句级代码特征，再看关系符，最后才看弱形态**。
+ */
+const CODE_STATEMENT =
+  /;|::|->|\/\/|\/\*|#\s*(?:include|define|pragma|ifdef|ifndef)|\+\+|--|\.[A-Za-z_]\w*|\b(?:int|long|double|float|char|bool|void|unsigned|size_t|const|struct|class|namespace|typedef|using|return|def|if|else|for|while|switch|case|break|continue|new|delete|import|from|assert|sizeof|printf|scanf|cout|cin|endl|malloc|free|nullptr)\b/
+
+/**
  * 这段内容是**数学记号**还是**代码** —— 用于把「说明正文里的数学」从代码外观
  * （行内代码 span / 代码卡）里解放出来。
  *
  * 判定顺序与全项目一致：**默认是代码**，只有出现明确的数学结构才升级为数学。
  *   · 已经是 LaTeX 记法（`\cmd`、`_{}`、`^{}`）→ 数学
- *   · 明确的代码形态（分号、限定名、成员访问、函数调用、关键字…）→ 代码
+ *   · 语句级代码特征（分号、限定名、成员访问、控制流、声明…）→ 代码
  *   · 关系符/箭头/`mod`/极短数学符号/带下标的符号 → 数学
+ *   · 弱代码形态（函数调用 `f(x)`、`O(n log n)`）→ 代码
  *   · 整段就是一个下标记号（`a[offset]`）→ 数学；但同一行是代码语境时仍是代码
  *
  * @param content 片段内容（不含反引号）
@@ -204,9 +222,16 @@ export function looksLikeMathNotation(content: string, context = ''): boolean {
   if (!s) return false
   // 已是 LaTeX 记法：交给原有公式管线
   if (/\\[a-zA-Z]|_\{|\^\{/.test(s)) return true
-  // 明确的代码形态优先（`O(n log n)`、`g[prev].push_back(cur)`、`int x = 1;`）
-  if (CODE_SHAPE.test(s)) return false
+  // 语句级代码特征优先（`int x = 1;`、`g[prev].push_back(cur)`、`ios::sync_with_stdio(false)`）
+  if (CODE_STATEMENT.test(s)) return false
+  // 关系符/数学词/极短符号（`cnt(m) = #{ i | b_i(k) < m }`、`= max(0, …)` 都属于这里）
   if (MATH_RELATION.test(s) || MATH_MOD_WORD.test(s) || SHORT_MATH_SYMBOL.test(s)) return true
+  // 复杂度记号（`O(n log n)`、`O((n+#events)logn)`）：必须抢在下面的 CODE_SHAPE 之前 ——
+  // `O(` 长得跟函数调用一模一样，否则 `` `O(n²)` `` 这类会被判成代码。
+  // 与 looksStronglyMath 的口径保持一致（那里的 COMPLEXITY 也是这个意思）。
+  if (COMPLEXITY.test(s)) return true
+  // 弱代码形态（`O(n log n)`、`sort(a, a + n)`、`f(n)`）
+  if (CODE_SHAPE.test(s)) return false
   // 带下标的符号写法（`k−a_i`、`a_1`）
   if (SUBSCRIPT_NOTATION.test(s)) return true
   // 单个下标记号：说明正文里这是数学符号（`a[offset]`、`dp[i][j]`），
@@ -217,27 +242,35 @@ export function looksLikeMathNotation(content: string, context = ''): boolean {
 
 /**
  * 反引号里其实是**中文说明**而不是代码：`` `价值` ``、`` `未使用` ``。
- * AI 习惯用反引号引一个术语，渲染成等宽代码药丸很怪。要求不含任何代码语法特征，
- * 所以 `` `int x; // 计数` `` 这类仍然按代码。
+ * AI 习惯用反引号引一个术语，渲染成等宽代码药丸很怪。只认语句级代码特征，
+ * 所以 `` `int x; // 计数` `` 仍然按代码，而 `` `cnt(m) 的值` `` 会当成术语。
  */
 export function isQuotedChineseTerm(content: string): boolean {
   const s = content.trim()
-  return /[\u4e00-\u9fff]/.test(s) && !CODE_SHAPE.test(s)
+  return /[\u4e00-\u9fff]/.test(s) && !CODE_STATEMENT.test(s)
 }
 
 /**
- * 比 looksLikeMathNotation 更严：必须出现**关系符 / 数学词**（`=`、`←`、`mod` …），
- * 只有"单个下标记号"（`g[i][j]`）或"单个短符号"（`0`）不算数学。
+ * 比 looksLikeMathNotation 更严：必须出现**关系符 / 数学词**（`=`、`←`、`mod`…）
+ * 或强数学记号，只有"单个下标记号"（`g[i][j]`）或"单个短符号"（`0`）不算。
  *
  * 用于推翻围栏：围栏是 AI **显式写的代码块**，要改判成公式需要更强的证据；
  * 而正文里的反引号只是弱标注（AI 习惯用它包数学），所以那边可以放宽一档。
+ *
+ * 顺序同样关键：`f(n)`、`sort(a, a+n)` 这类**没有关系符**的弱代码形态仍是代码，
+ * 而 `cnt(m) = #{ … }`、`= max(0, upper_bound(…))` 这种带关系符的式子要认成公式。
  */
 export function looksLikeMathEquation(content: string): boolean {
   const s = content.trim()
   if (!s) return false
   if (/\\[a-zA-Z]|_\{|\^\{/.test(s)) return true
+  // 语句级代码特征与伪代码结构优先：`if c_j ≥ cur :` 含 `≥`，但它明显是代码
+  if (CODE_STATEMENT.test(s) || PSEUDO_CODE.test(s)) return false
+  // 强数学记号（`O(n log n)`、`Σ`、`≤`、Unicode 上下标…）无歧义
+  if (looksStronglyMath(s)) return true
+  if (MATH_RELATION.test(s) || MATH_MOD_WORD.test(s)) return true
   if (CODE_SHAPE.test(s)) return false
-  return MATH_RELATION.test(s) || MATH_MOD_WORD.test(s)
+  return false
 }
 
 /**
@@ -329,6 +362,8 @@ const SYMBOL_MAP: Array<[RegExp, string]> = [
   [/Σ/g, '\\sum '], [/∑/g, '\\sum '], [/∏/g, '\\prod '], [/√/g, '\\sqrt '],
   [/≤/g, '\\le '], [/≥/g, '\\ge '], [/≠/g, '\\ne '], [/·/g, '\\cdot '], [/×/g, '\\times '],
   [/∈/g, '\\in '], [/∪/g, '\\cup '], [/∩/g, '\\cap '], [/∞/g, '\\infty '], [/←/g, '\\leftarrow '],
+  // `⋅`(U+22C5) 与 `·`(U+00B7) 是同一种点乘运算符的两种写法，判定侧必须一并归一化
+  [/⋅/g, '\\cdot '], [/·/g, '\\cdot '],
   [/→/g, '\\to '], [/…/g, '\\dots '], [/−/g, '-'],
 ]
 
@@ -365,6 +400,39 @@ function isSingleWrappedExpression(lines: string[]): boolean {
   if (PSEUDO_CODE.test(body.replace(/\\text\{[^}]*\}/g, ''))) return false
   // 还要有"这是一条式子"的正面证据
   return MATH_RELATION.test(body) || MATH_MOD_WORD.test(body) || looksStronglyMath(body)
+}
+
+/**
+ * 关系式里主关系符的**左侧**：`value = k - a_i` → `value`。
+ *
+ * 取最靠左的那个关系符（与 `looksLikeMathEquation` 的口径一致：只要出现关系符就算式子），
+ * 用于判断若干行是不是在描述"同一个量"。
+ */
+function relationLead(line: string): string | null {
+  const m = MATH_RELATION.exec(line)
+  return m ? line.slice(0, m.index).trim() : null
+}
+
+/**
+ * 多行内容是不是「分段定义」：各行左侧完全相同、且每行都是一条明确的数学关系式。
+ *
+ * ```
+ * value = a_i          (不变)
+ * value = k - a_i      (变换)
+ * ```
+ * AI 常这样列举同一个量的几种取值 —— 它本质是数学，塞进代码卡里完全看不出是公式
+ * （用户反馈"中间有的数学公式被当成代码块了"，例子就是这个）。
+ *
+ * 判据要求**左侧相同**是刻意的：真正的一组独立语句
+ * （`dp[0] = 1` / `dp[i] = dp[i-1] + dp[i-2]`）每行左侧各不相同，
+ * 若一并放行，多行代码会被压成一条首尾相接的公式 —— 那比留在代码卡里糟得多。
+ * 含 `Σ`/`≤` 这类强数学记号的行早就由调用方的前置判定兜住了，这里只补 ASCII 记法的缺口。
+ */
+export function isPiecewiseDefinition(lines: string[]): boolean {
+  if (lines.length < 2) return false
+  const first = relationLead(lines[0]!)
+  if (!first) return false
+  return lines.every((l) => relationLead(l) === first && looksLikeMathEquation(l))
 }
 
 /**
@@ -413,6 +481,11 @@ export function shouldConvertFenceToMath(langRaw: string, body: string): boolean
   // 多行但是**一条被折行的式子**（`avail(i) = cnt[i]` / `  + (i != k-i ? cnt[k-i] : 0)`）→
   // 公式：折行只是排版，合并成一行才是正确结果（用户截图反馈的第二类"公式被当代码卡"）
   if (isSingleWrappedExpression(lines)) return true
+  // 多行「同一个量的几种取值」（分段定义）→ 公式。
+  // 放在"至少一行含强数学记号"那条之前：纯 ASCII 记法（`value = a_i` / `value = k - a_i`）
+  // 没有任何 Unicode/LaTeX 记号，到不了那条判断，就直接退回代码卡了 —— 而**同样内容只剩一行**
+  // 时是能正常渲染成公式的，多行反而更严，这个不一致正是那个 bug 的来源。
+  if (isPiecewiseDefinition(lines)) return true
   // 多行值表：从宽 —— 只要**至少一行**含强数学记号，且包含该记号的行里没有普通说明文字，
   // 就整块按公式渲染。像 `n = 1 : a[0]` / `n ≥ 3 : S + M` 这种值表，
   // 部分行（`a[0]`）没有强数学记号，但它明显是公式而不是代码。

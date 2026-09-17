@@ -19,7 +19,7 @@ import {
   normalizeMathDelimiters,
   wrapBareMath,
 } from '../src/components/markdownMath.ts'
-import { shouldConvertFenceToMath, looksLikeCode, normalizeLang, stripLineComments, looksLikeCodeReference } from '../src/components/markdownCode.ts'
+import { shouldConvertFenceToMath, looksLikeCode, normalizeLang, stripLineComments, looksLikeCodeReference, isPiecewiseDefinition } from '../src/components/markdownCode.ts'
 
 // ---------- stripOuterCodeFence ----------
 
@@ -329,7 +329,9 @@ describe('说明正文里的数学记号不再渲染成代码', () => {
     assert.ok(!out.includes('\\text{这里的 \\bmod'), out)
   })
   it('真代码仍然保持代码（红线）', () => {
-    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'O(n log n)', 'sort(a, a + n)']) {
+    // 注意：`O(n log n)` **已不在**这条红线里 —— 复杂度记号本轮按用户反馈翻面：
+    // 正文里的 `O(…)` 现在识别为公式（见下面那条专属用例）。
+    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'sort(a, a + n)']) {
       const out = preprocessMath(`前缀 \`${src}\` 后缀`)
       assert.ok(out.includes(`\`${src}\``), `${src} 被误转公式: ${out}`)
     }
@@ -339,6 +341,50 @@ describe('说明正文里的数学记号不再渲染成代码', () => {
   it('mod 只在独立成词时才转 \\bmod（标识符里的 mod 不动）', () => {
     assert.ok(preprocessMath('用 `dp_mod` 记录').includes('`dp_mod`'))
     assert.ok(preprocessMath('$model(x)$').includes('model(x)'))
+  })
+  it('标准数学函数名转 LaTeX 命令（`log n` → `\\log n`）', () => {
+    // KaTeX 在数学模式里忽略空格，`O(n log n)` 不转会排成 `O(nlogn)` 一串斜体字母
+    assert.ok(preprocessMath('复杂度 O(n log n)').includes('\\log n'), 'log 未转为 \\log')
+    // AI 常把乘法连写：`logn` / `logk` —— 只认「log + 单个字母 + 之后不再是字母」
+    assert.ok(preprocessMath('$O(nlogn)$').includes('\\log n'), 'logn 未转为 \\log n')
+    // 函数调用形态不应该凭空多出一个空格
+    assert.ok(preprocessMath('$max(0, x)$').includes('\\max(0, x)'), 'max(0 前多余空格')
+    for (const w of ['min', 'sin', 'cos', 'exp', 'ln', 'lg']) {
+      assert.ok(preprocessMath(`$a ${w} b$`).includes(`\\${w} `), `${w} 未转: ${preprocessMath(`$a ${w} b$`)}`)
+    }
+  })
+
+  it('函数名红线：logic / long / log_2 / log2(n) 不动', () => {
+    for (const s of ['$logic$', '$long$', '$log_2 n$', '$log2(n)$']) {
+      assert.equal(preprocessMath(s), s, `${s} 被误改`)
+    }
+    // 已有的 \log 不能被二次转换（幂等）
+    assert.equal(preprocessMath('$\\log n$'), '$\\log n$')
+  })
+
+  it('词运算符转 \\operatorname，让公式中间不再糊成一团（用户反馈）', () => {
+    // KaTeX 在数学模式里按 LaTeX 规则忽略空格，`xor` 会退化成一串挨个排的字母，
+    // 与相邻标识符连成 `ans(k1)xorans(k2)`。\operatorname 给直立字形 + 两侧薄间距。
+    const out = preprocessMath('res = ans(k_1) xor ans(k_2)')
+    assert.ok(out.includes('\\operatorname{xor}'), out)
+    // 其余词运算符同样升为算子
+    for (const word of ['lcm', 'gcd', 'shl', 'shr', 'div', 'and', 'or']) {
+      assert.ok(preprocessMath(`$a ${word} b$`).includes(`\\operatorname{${word}}`), `${word}: ${preprocessMath(`$a ${word} b$`)}`)
+    }
+  })
+  it('词运算符的红线：标识符内部 / \\text{} 内 / 文本区 / 已有 \\operatorname 都不改', () => {
+    // 下划线与字母前缀属于标识符的一部分
+    assert.ok(preprocessMath('$dp_xor = 1$').includes('dp_xor'), 'dp_xor 被改写')
+    assert.ok(preprocessMath('$txorid = 2$').includes('txorid'), 'txorid 被改写')
+    assert.ok(preprocessMath('$a\\_model + g_{sort}$').includes('model'), 'model 被改写')
+    // \text{} 里的字面文本不能被 LaTeX 化（KaTeX 文本模式下会报错）
+    assert.ok(preprocessMath('x = \\text{a or b}').includes('\\text{a or b}'), '\\text{} 被改写')
+    // 数学区之外的普通文本不是公式
+    assert.ok(!preprocessMath('我们先 A and B 再算 c_i').includes('operatorname'), '文本区被改写')
+    // 已经写好的 \operatorname 不能被二次包裹（否则预处理不幂等）
+    const given = '$a \\operatorname{xor} b$'
+    assert.equal(preprocessMath(given), given)
+    assert.equal(preprocessMath(preprocessMath(given)), given)
   })
   it('反引号里的中文术语去掉反引号（不是代码）', () => {
     const out = preprocessMath('使它的 `价值` 为 `0`，若不是则未使用')
@@ -422,6 +468,61 @@ describe('说明正文里的数学记号不再渲染成代码', () => {
   })
 })
 
+// ---------- 式子被误判成代码卡（截图回归） ----------
+
+/**
+ * 用户截图：这类**带函数调用写法的公式**被塞进了代码卡 ——
+ *   `cnt(m) = #{ i | b_i(k) < m }`（集合基数定义）
+ *   `= max(0, upper_bound(a, k-m) - lower_bound(a, t+1))`（上一条式子的续写）
+ * 根因：判定顺序把"弱代码形态（`name(` 函数调用）"排在"关系符"之前，
+ * `cnt(` / `max(` 一命中就被否决。正确顺序是**先语句级代码特征，再关系符，最后弱形态**。
+ */
+describe('带函数调用写法的公式不再被误判成代码卡', () => {
+  it('集合基数定义 cnt(m) = #{ i | … } 转成块级公式，集合括号保留', () => {
+    const out = preprocessMath('```\ncnt(m) = #{ i | b_i(k) < m }\n```')
+    assert.ok(out.includes('$$'), `没有转成块级公式: ${out}`)
+    assert.ok(!out.includes('```'), out)
+    // KaTeX 里裸花括号是"分组"（不显示），必须转成 \{ \} 才看得到集合括号
+    assert.ok(out.includes('\\#\\{ i | b_i(k) < m \\}'), out)
+  })
+  it('以关系符开头的续写式子（= max(0, upper_bound(…))）转成块级公式', () => {
+    const out = preprocessMath('```\n= max(0, upper_bound(a, k-m) - lower_bound(a, t+1))\n```')
+    assert.ok(out.includes('$$') && !out.includes('```'), out)
+    assert.ok(out.includes('max(0, upper_bound(a, k-m) - lower_bound(a, t+1))'), out)
+  })
+  it('列表项下的缩进续行：回接上一行合成一个公式，列表标记不被吞', () => {
+    const out = preprocessMath(
+      '- badR = #{ a_i > t and a_i ≤ k−m }\n      = max(0, upper_bound(a, k-m) - lower_bound(a, t+1))',
+    )
+    assert.ok(!out.includes('\n\n$$'), `列表标记被块级公式吞掉: ${out}`)
+    assert.ok(out.startsWith('- badR = $'), out)
+    assert.ok(out.trimEnd().endsWith('lower_bound(a, t+1))$'), out)
+    // 集合记号可见：`#` 必须转义，花括号也必须是 `\` 开头的 \{
+    // （这一行里有 `\max`，属高结构，\{…\} 会被 enhanceMathLayout 升级成 \left\{…\right\}）
+    assert.ok(out.includes('\\#'), out)
+    assert.ok(/\\(?:left)?\\{/.test(out) && /\\(?:right)?\\}/.test(out), `集合括号不可见: ${out}`)
+    // `max` 应升级为 LaTeX 函数名：`\max(0, …)` —— 直立，且右侧不凭空插空格
+    assert.ok(out.includes('\\max(0, upper_bound'), out)
+  })
+  it('红线：没有关系符的弱代码形态仍是代码', () => {
+    for (const body of ['f(n)', 'sort(a, a + n);', 'g[i][j]', 'push_back(x);']) {
+      const out = preprocessMath(`\`\`\`\n${body}\n\`\`\``)
+      assert.ok(out.includes('```'), `${body} 被误转公式: ${out}`)
+    }
+  })
+  it('红线：伪代码（控制流 + ≥ 这类强数学记号）仍是代码', () => {
+    const block = '```\nif c_j ≥ cur :    // 还能给出 cur\n    cur++\n```'
+    assert.equal(preprocessMath(block), block)
+  })
+  it('编程写法的 == 在公式里转成 =', () => {
+    assert.ok(preprocessMath('$x == y$').includes('x = y'))
+  })
+  it('LaTeX 分组花括号不被当成集合括号', () => {
+    const out = preprocessMath('$f_{i} = 2^{k}$')
+    assert.ok(out.includes('f_{i}') && out.includes('2^{k}'), out)
+  })
+})
+
 // ---------- 行内代码 / 数学围栏的身份判定 ----------
 
 describe('代码与公式的身份判定', () => {
@@ -431,8 +532,11 @@ describe('代码与公式的身份判定', () => {
     assert.ok(!out.includes('$dp_max$'), out)
   })
   it('行内代码一律保持代码（含纯公式写法，反引号是显式的代码标注）', () => {
-    const out = preprocessMath('复杂度 `O(n log n)` 可行')
-    assert.equal(out, '复杂度 `O(n log n)` 可行')
+    // 复杂度记号是本轮按用户反馈开的例外：`` `O(n log n)` `` 里的反引号是 AI 的手抖，
+    // 它是公式而不是代码。其余反引号内容一律保持代码。
+    const out = preprocessMath('额外的代价只剩一次 `a[x] + a[x+1]`。')
+    assert.ok(out.includes('`a[x] + a[x+1]`'), out)
+    assert.ok(preprocessMath('前缀 `sort(a, a + n)` 后缀').includes('`sort(a, a + n)`'))
   })
   it('行内代码里的 ASCII 下标访问不被渲染成 a 下标 [x+1]（截图乱码回归）', () => {
     const text = '额外的代价只剩一次 `a[x] + a[x+1]`（其余抵消）。'
@@ -498,6 +602,10 @@ describe('代码与公式的身份判定', () => {
     )
     // 但**两行独立语句**（都以标识符开头）仍留在代码卡里
     assert.equal(shouldConvertFenceToMath('', 'dp[0] = 1\ndp[i] = dp[i-1] + dp[i-2]'), false)
+    // 「同一个量的几种取值」= 分段定义 → 公式（用户反馈"中间有的数学公式被当成代码块了"）
+    assert.equal(shouldConvertFenceToMath('', 'value = a_i          (不变)\nvalue = k - a_i      (变换)'), true)
+    // 反例：左侧不同就是若干独立语句，仍留在代码卡里
+    assert.equal(shouldConvertFenceToMath('', 'value = a_i\nother = k - a_i'), false)
     // 有语句结束符 / 伪代码结构 → 代码
     assert.equal(shouldConvertFenceToMath('', 'avail(i) = cnt[i];\n  + cnt[k-i];'), false)
     // 真实 C++：关键字特征优先于数学记号
@@ -513,6 +621,112 @@ describe('代码与公式的身份判定', () => {
     assert.equal(normalizeLang('C++'), 'c++')
     assert.equal(normalizeLang('language-Python'), 'python')
     assert.equal(normalizeLang(' cpp '), 'cpp')
+  })
+})
+
+// ---------- 复杂度记号 ----------
+
+/**
+ * 用户反馈：`O((n+#events)logn+q⋅n)` 没正确渲染。
+ *
+ * 两个独立缺陷叠加：
+ *  1. `COMPLEXITY` 正则只存在于 markdownCode.ts 的 `looksStronglyMath`（服务于围栏 / 行内代码的
+ *     身份判定），`markdownMath.ts` 的 `MATH_SEED` 里没有它 —— 正文里的复杂度从来不被包进公式。
+ *     只有 `O(n²)` 这种恰好含 Unicode 记号的才行，这就是"时好时坏"的来源。
+ *  2. `#` 与 `⋅` 不是数学字符，一旦附近有别的种子，片段会在那里断开，
+ *     产出 `O((n+#$events)…)$` 这种半截定界符。
+ */
+describe('复杂度记号识别为公式', () => {
+  it('正文里的 O(…) / Θ(…) / Ω(…) 被包成公式', () => {
+    for (const s of ['复杂度为 O((n+#events)logn+q⋅n) 左右。', '总复杂度 O(n log n)', 'Θ(V+E) 与 Ω(2^k)']) {
+      assert.ok(preprocessMath(s).includes('$'), `${s} 没有被识别为公式: ${preprocessMath(s)}`)
+    }
+  })
+
+  it('独立一行的复杂度升级为块级公式', () => {
+    const out = preprocessMath('O((n+#events)logn+q⋅n)')
+    assert.ok(out.includes('$$'), out)
+    assert.ok(!out.includes('```'), out)
+  })
+
+  it('#events 不再把公式劈成两半（半截定界符回归）', () => {
+    const out = preprocessMath('复杂度为 O((n+#events)logn+q⋅n) 左右。')
+    assert.equal(out, '复杂度为 $O((n+\\#events)\\log n+q\\cdot n)$ 左右。')
+    // 关键：不能出现 `+#$` 这种"$ 被拼进正文中间"的形态
+    assert.ok(!out.includes('#$'), `出现了半截定界符: ${out}`)
+  })
+
+  it('⋅(U+22C5) 与 ·(U+00B7) 一样转成 \\cdot', () => {
+    assert.ok(preprocessMath('复杂度待梳 $q⋅n$').includes('\\cdot'))
+    assert.ok(preprocessMath('复杂度待梳 $q·n$').includes('\\cdot'))
+  })
+
+  it('红线：TODO( / INFO( 这类普通单词不会被当成大 O', () => {
+    const out = preprocessMath('参见 TODO(事项) 与 INFO(说明) 两节')
+    assert.ok(!out.includes('$'), `普通单词被当复杂度: ${out}`)
+  })
+
+  it('红线：Markdown 标题的 # 与正文里的 #1 不受影响', () => {
+    assert.ok(!preprocessMath('## 第二节').includes('$'))
+    assert.ok(!preprocessMath('排名 #1 的做法是 dp').includes('$'))
+  })
+})
+
+// ---------- 分段定义（同一量的几种取值）----------
+
+/**
+ * 用户报告的一段 mex 讲解（原文粘贴的渲染结果里，这两行被塞进了代码卡）。
+ *
+ * 它没有 LaTeX 命令、没有 Unicode 数学符号，只有普通的 ASCII `=`，
+ * 于是落在 `shouldConvertFenceToMath` 多行分支的最后一条（"至少一行含强数学记号"）之外，
+ * 整块退回代码卡 —— 而**同样内容只剩一行**时是能正常渲染成公式的。
+ * 这组用例锁住这个不一致。
+ */
+describe('分段定义：同一个量的几种取值不再被当成代码', () => {
+  const FENCE = '```\nvalue = a_i          (不变)\nvalue = k - a_i      (变换)\n```'
+
+  it('isPiecewiseDefinition 只看"关系符左侧是否一致"', () => {
+    assert.equal(isPiecewiseDefinition(['value = a_i', 'value = k - a_i']), true)
+    // 左侧不同 = 若干独立语句，绝不能放进来
+    assert.equal(isPiecewiseDefinition(['dp[0] = 1', 'dp[i] = dp[i-1] + dp[i-2]']), false)
+    // 没有关系符 / 少于两行 / 含伪代码结构 → 不是分段定义
+    assert.equal(isPiecewiseDefinition(['a_i', 'k - a_i']), false)
+    assert.equal(isPiecewiseDefinition(['x = 1']), false)
+    assert.equal(isPiecewiseDefinition(['if x = 1 : y', 'x = 2']), false)
+  })
+
+  it('空标记围栏里的分段定义不再保留围栏', () => {
+    const out = preprocessMath(FENCE)
+    assert.ok(!out.includes('```'), out)
+  })
+
+  it('每条取值各自排成一条块级公式（不合并成一行）', () => {
+    const out = preprocessMath(FENCE)
+    // 必须是两条独立的 $$…$$，而不是拼成 `value = a_i value = k - a_i`
+    assert.equal((out.match(/\$\$/g) ?? []).length, 4, out)
+    assert.ok(out.includes('$$\nvalue = a_i \\quad \\text{(不变)}\n$$'), out)
+    assert.ok(out.includes('$$\nvalue = k - a_i \\quad \\text{(变换)}\n$$'), out)
+  })
+
+  it('行尾中文小注保留括号原文，不被吞掉', () => {
+    const out = preprocessMath(FENCE)
+    assert.ok(out.includes('\\text{(不变)}'), out)
+    assert.ok(out.includes('\\text{(变换)}'), out)
+    // 小注不能留在公式外面（`\\quad` 之后必须是 text 盒子，否则中文缺字形出方框）
+    assert.ok(!/\\\$\$?\s*\(不变\)/.test(out), out)
+  })
+
+  it('缩进代码块里的分段定义同样逐行各排一条公式', () => {
+    const out = preprocessMath('    value = a_i          (不变)\n    value = k - a_i      (变换)')
+    assert.ok(out.includes('$$\nvalue = a_i \\quad \\text{(不变)}\n$$'), out)
+    assert.ok(out.includes('$$\nvalue = k - a_i \\quad \\text{(变换)}\n$$'), out)
+  })
+
+  it('红线：一组独立赋值语句仍留在代码卡里', () => {
+    const out = preprocessMath('```\ndp[0] = 1\ndp[i] = dp[i-1] + dp[i-2]\n```')
+    assert.ok(out.includes('```'), out)
+    assert.ok(out.includes('dp[0] = 1'), out)
+    assert.ok(!out.includes('$$'), out)
   })
 })
 
@@ -736,7 +950,7 @@ describe('行内代码里的数学被转回公式', () => {
     assert.ok(!out.includes('`dp'), out)
   })
   it('真代码的反引号内容保持代码', () => {
-    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'O(n log n)']) {
+    for (const src of ['push_back', 'vis_cnt', 'a[x] + a[x+1]', 'g[prev].push_back(cur)', 'sort(a, a + n)']) {
       const out = preprocessMath(`前缀 \`${src}\` 后缀`)
       assert.ok(out.includes(`\`${src}\``), `${src} 被误转公式: ${out}`)
     }

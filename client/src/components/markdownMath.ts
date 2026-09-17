@@ -15,6 +15,7 @@
 import {
   extractLineComments,
   isMarkdownishLang,
+  isPiecewiseDefinition,
   isQuotedChineseTerm,
   looksLikeCode,
   looksLikeCodeReference,
@@ -165,6 +166,9 @@ function protectFenceBlocks(text: string, ctx: ProtectionContext): string {
       // 已经是"文本 + 行内公式"混合内容：直接去围栏按普通 Markdown 渲染，
       // 套成 $$...$$ 会让内部 $ 造成嵌套截断
       if (/\$/.test(body)) return mark(ctx, body.trim())
+      // 分段定义逐行各自成一条块级公式：合并成一行会把两条式子接成不可读的一坨
+      const piecewise = piecewiseMathBlocks(body)
+      if (piecewise) return piecewise
       const normalized = normalizeFenceBody(body)
       if (!normalized) return mark(ctx, m)
       return `\n\n$$\n${normalized}\n$$\n\n`
@@ -172,16 +176,35 @@ function protectFenceBlocks(text: string, ctx: ProtectionContext): string {
   )
 }
 
+/** 续行标志：以关系符/运算符开头（`= max(0, …)`、`+ n * min(a)`、`≤ …`） */
+const CONTINUATION_START = /^[=+\-*/·×÷−<>≤≥≠≈&|^%\\]/
+
 /**
  * 缩进代码块（4+ 空格）：AI 偶尔用缩进而非围栏表示代码块。
- * 内容像数学且不像代码时按公式渲染（去掉缩进），否则整体保护为代码。
+ *
+ * 三种去向：
+ *   1. **续行**（块以关系符/运算符开头，如 `= max(0, upper_bound(…))`）：这是上一条式子的
+ *      续写（用户截图里 badR 的定义被硬塞进代码卡就是这个），去掉缩进回接上一行，
+ *      让它和前半段合成一个公式；
+ *   2. 内容像数学且不像代码 → 转成块级公式（去掉缩进）；
+ *   3. 其余 → 整体保护为代码（Markdown 的缩进代码块语义）。
  */
 function protectIndentedBlocks(text: string, ctx: ProtectionContext): string {
   return text.replace(
     /(?:^|\n)([ \t]{4,}[^\n]+(?:\n[ \t]{4,}[^\n]+)*)/g,
-    (match, block: string) => {
+    (match, block: string, offset: number) => {
+      // 去掉每行缩进后的内容（续行判定与公式判定都用它）
+      const stripped = stripLineComments(block)
+      const lines = stripped.split('\n').map((l) => l.trim()).filter(Boolean)
+      const raw = lines.join(' ')
+      // 续行：回接上一行（offset 为 0 时没有上一行，按普通块处理）
+      if (offset > 0 && raw && CONTINUATION_START.test(raw)) return ` ${raw}`
+      // 分段定义（`value = a_i` / `value = k - a_i`）：逐行各排一条块级公式
+      if (lines.length > 1 && isPiecewiseDefinition(lines)) {
+        return `\n\n${lines.map((l) => `$$\n${toSingleMathLine(l)}\n$$`).join('\n\n')}\n\n`
+      }
       const body = normalizeFenceBody(block)
-      if (body && looksStronglyMath(body) && !looksLikeCode(body)) {
+      if (body && (looksStronglyMath(body) || looksLikeMathNotation(body)) && !looksLikeCode(body)) {
         if (/\$/.test(body)) return `\n\n${body}\n\n`
         return `\n\n$$\n${body}\n$$\n\n`
       }
@@ -231,6 +254,9 @@ export function stripOuterCodeFence(text: string): string {
   if (body.includes('```') || body.includes('~~~')) return text
   // 判定为公式的围栏（```math / ```latex，或正文含明确 LaTeX 记号）：转成块级公式
   if (shouldConvertFenceToMath(info, body)) {
+    // 分段定义（`value = a_i` / `value = k - a_i`）：逐行各排一条块级公式
+    const piecewise = piecewiseMathBlocks(body)
+    if (piecewise) return piecewise
     const normalized = normalizeFenceBody(body)
     if (!normalized) return text
     return /\$/.test(normalized) ? `${normalized}\n` : `\n\n$$\n${normalized}\n$$\n\n`
@@ -430,6 +456,10 @@ export function wrapBareMath(text: string): string {
 function tryStandaloneDisplayMath(rawLine: string): string | null {
   const trimmed = rawLine.trim()
   if (!trimmed || trimmed.includes('$$') || trimmed.length > 400) return null
+  // 以 Markdown 块级记号开头的行不能整行升级：`- badR = … = max(…)` 里的 `- ` 是列表标记，
+  // 包进 `$$` 会把列表结构吞掉、渲染成一个以减号开头的公式。
+  // 这类行交给下面的行内包裹（列表项保留，数学部分各自成 `$…$`）。
+  if (/^(?:[-*+]|\d+[.)]|>|#{1,6}\s)/.test(trimmed)) return null
   if (!looksStronglyMath(trimmed) || looksLikeCode(trimmed)) return null
   // 整行已经是一个完整的行内公式（`$…$`，例如行内代码里的公式刚被剥掉反引号）：
   // 直接取内部源码升级为块级公式。否则下面会套成 `$$\n$…$\n$$` —— 嵌套定界符
@@ -497,7 +527,32 @@ function wrapMathInText(text: string, ctx: ProtectionContext, startsAfterMath = 
  * 限定名 `std::sort`、下标访问 `dp[i]` 也纳入种子：它们本身不是数学，但需要被捕获后
  * 判为「代码引用」并渲染成行内代码，否则会以普通文本混在数学公式之间，视觉上分不清。
  */
-const MATH_SEED = /(?:[a-zA-Z]+_\{[^}]*\}|[a-zA-Z]+_[a-zA-Z0-9]+|[0-9a-zA-Z]\^\{[^}]*\}|[0-9a-zA-Z]\^[0-9a-zA-Z]+|\b[a-zA-Z_]\w*(?:::\w+)+|\b[a-zA-Z_]\w*\s*[[{][^\]}]*[\]}]|\\[a-zA-Z]+\{?[^$\n]*|←|·|V²|V³|√|≤|≥|≠|∈|∉|∪|∩|⊕|⊗|∀|∃|Σ|Π|∑|∏|ℓ|\|(?=[^\s|]))/
+/**
+ * 复杂度记号：`O(n log n)` / `Θ(V+E)` / `Ω(2^k)`。
+ *
+ * 这是**正文里最常见的裸生物数学**，必须有自己的种子：`MATH_SEED` 其余分支都够不到它
+ * （没有下标、没有 `\cmd`、常不含 Unicode 符号），而圆括号本身是有意不当种子的
+ * （否则 `f(n)`、`if (…)` 全会被卷进来）。
+ *
+ * 左侧要求不是字母：`TODO(`、`INFO(` 这类普通单词不能被当成大 O 记号。
+ */
+const COMPLEXITY_SEED = /(?<![A-Za-z])[OΘΩ]\s*\(/
+
+const MATH_SEED = new RegExp(
+  [
+    COMPLEXITY_SEED.source,
+    '[a-zA-Z]+_\\{[^}]*\\}',
+    '[a-zA-Z]+_[a-zA-Z0-9]+',
+    '[0-9a-zA-Z]\\^\\{[^}]*\\}',
+    '[0-9a-zA-Z]\\^[0-9a-zA-Z]+',
+    '\\b[a-zA-Z_]\\w*(?:::\\w+)+',
+    '\\b[a-zA-Z_]\\w*\\s*[[{][^\\]}]*[\\]}]',
+    '\\\\[a-zA-Z]+\\{?[^$\\n]*',
+    '←|·|V²|V³|√|≤|≥|≠|∈|∉|∪|∩|⊕|⊗|∀|∃|Σ|Π|∑|∏|ℓ|\\|(?=[^\\s|])',
+  ].join('|'),
+  // 刻意不带 g：wrapMathInLine 用 exec 在循环里反复对不同的 remaining 调用，
+  // 带 g 会让 lastIndex 跨调用残留，直接漏掉后面的种子
+)
 
 /**
  * 判断字符是否可以纳入数学片段（向种子两侧扩展时用）。
@@ -509,9 +564,15 @@ const MATH_SEED = /(?:[a-zA-Z]+_\{[^}]*\}|[a-zA-Z]+_[a-zA-Z0-9]+|[0-9a-zA-Z]\^\{
  *
  * 还包含 `|`：公式里的绝对值需要它。表格的单元格分隔符会**提前**被
  * protectTablePipes 换成占位符，所以这里可以放心纳入。
+ *
+ * 还包含 `#` 与 `⋅`（U+22C5）：
+ *   · `#events`、`#{ i | … }` 这类集合/计数写法很常见，`#` 不是数学字符的话
+ *     片段会在它前面断掉，产出 `O((n+#$events)…)$` 这种半截定界符；
+ *   · `⋅` 与 `·`（U+00B7）本是同一种运算符的两种写法（后者早已在字符集里），
+ *     缺了它 `q⋅n` 会被拆成互不相干的两段。
  */
 function isMathChar(ch: string): boolean {
-  return /[a-zA-Z0-9+\-*/^_=<>{}[\]().,!\\|⇔⇒⇐∩∪⊕⊗⊆⊇∈∉≤≥≠√²³←→↔ℓΣΠ∑∏∀∃∂∇∞…−·x]/.test(ch)
+  return /[#a-zA-Z0-9+\-*/^_=<>{}[\]().,!\\|⇔⇒⇐∩∪⊕⊗⊆⊇∈∉≤≥≠√²³←→↔ℓΣΠ∑∏∀∃∂∇∞…−⋅x]/.test(ch)
 }
 
 /**
@@ -572,6 +633,13 @@ function wrapMathInLine(line: string, afterMath = false): string {
 
     // 向前只扩展连续数学字符（不含空格，避免吞掉太多普通文本）
     while (start > pos && isMathChar(line[start - 1]!)) start--
+    // 集合基数 `#{ … }` 的**开头**要单独捡回来：`#` 不是数学字符（行首 `#` 是标题记号）、
+    // 而 `{` 与标识符之间常有空格，贪婪扩展会停在空格处，渲染出 `#{ $…$}`。
+    // 只认 `#{` 这一对无歧义写法，标题（`# 标题`）不受影响。
+    if (start > pos) {
+      const brace = /#\{\s*$/.exec(line.slice(pos, start))
+      if (brace) start = pos + brace.index
+    }
 
     // 向后扩展：连续数学字符 + 受限空格（空格后必须跟数学字符）
     while (end < line.length) {
@@ -719,6 +787,39 @@ function normalizeFenceBody(body: string): string {
   return `${math} \\quad \\text{${escapeMathText(comments.join('；'))}}`
 }
 
+/**
+ * 行尾的**中文小注**：`value = a_i          (不变)` 里的 `(不变)`。
+ *
+ * 这类括号注是给这一行式子贴的标签。直接留在数学模式里会缺字形（渲染成方框），
+ * 必须转成 `\quad \text{…}`；要求括号内容含中文，避免误伤行尾的数学括号（`f(n)`）。
+ */
+const TRAILING_NOTE = /[ \t]*[（(][^（）()]*[\u4e00-\u9fff][^（）()]*[)）][ \t]*$/
+
+/** 单行公式：把行尾中文小注转写成 `\quad \text{…}`，余下的部分交给 normalizeFenceBody */
+function toSingleMathLine(line: string): string {
+  const note = TRAILING_NOTE.exec(line)
+  if (!note) return normalizeFenceBody(line)
+  const math = normalizeFenceBody(line.slice(0, note.index))
+  // 用整段匹配的原文（`note[0]`）而不是内层词组，把括号一起留在小注里
+  const text = escapeMathText(note[0].trim())
+  return math ? `${math} \\quad \\text{${text}}` : `\\text{${text}}`
+}
+
+/**
+ * 「分段定义」型围栏（`value = a_i` / `value = k - a_i`）→ 逐行各排成**一条块级公式**。
+ *
+ * 这里不能复用 normalizeFenceBody：它会把所有折行压成一行，
+ * 两条式子首尾相接变成 `value = a_i value = k - a_i` 这种完全不可读的东西。
+ * 逐行居中既保留了原文的行结构，也让每条取值各自成公式。
+ *
+ * @returns null 表示不是分段定义，调用方按原来的方式合并处理
+ */
+function piecewiseMathBlocks(body: string): string | null {
+  const lines = body.split('\n').map((l) => l.trim()).filter(Boolean)
+  if (!isPiecewiseDefinition(lines)) return null
+  return `\n\n${lines.map((l) => `$$\n${toSingleMathLine(l)}\n$$`).join('\n\n')}\n\n`
+}
+
 /** 需要"限制符在正下方"的大运算符：\max / \min / \lim / \sum … */
 const BIG_OPERATORS = ['max', 'min', 'lim', 'sup', 'inf', 'det', 'gcd']
 
@@ -791,12 +892,20 @@ export function normalizeMathSymbols(text: string): string {
       const body = isBlock ? seg.slice(2, -2) : seg.slice(1, -1)
       const converted = outsideMathText(body, (math) =>
         math
+          // 集合基数 `#{ … }` 与集合构造 `{ x | P(x) }`：KaTeX 里裸花括号是**分组**（不显示），
+          // 必须转成 `\{ \}` 才是可见的集合括号 —— 否则 `cnt(m) = #{ i | b_i(k) < m }`
+          // 渲染成 `cnt(m) = #i|b_i(k)<m`，把集合记号吃掉了。
+          // 只动这两种无歧义写法：`#` 紧跟的括号、括号内含 `|` 的集合构造；
+          // `_{…}`/`^{…}`/`\cmd{…}` 这些 LaTeX 分组一律不碰。
+          .replace(/#\s*\{([^{}]*)\}/g, '\\#\\{$1\\}')
+          .replace(/(?<![\^_\\])\{([^{}]*\|[^{}]*)\}/g, '\\{$1\\}')
           // 编程写法写成的关系符 → LaTeX（AI 常把公式写成 `i != k-i ? … : …`、`k-i >= 0`）：
           // 不转的话 KaTeX 会把 `!` 当阶乘记号排出 `a! = b`，`>=` 排成 `> =`。
           // 必须在 `&` 转义之前处理 `&&`，否则会被拆成 `\&\&`（对齐分隔符）。
           .replace(/!=/g, '\\ne ')
           .replace(/<=/g, '\\le ')
           .replace(/>=/g, '\\ge ')
+          .replace(/==/g, '=')
           .replace(/&&/g, '\\land ')
           // LaTeX 命令保护：不转换已存在的 \& \# \% 等
           .replace(/(?<!\\)&/g, '\\&')
@@ -806,6 +915,35 @@ export function normalizeMathSymbols(text: string): string {
           // 与 `(r - c) mod n` 的数学含义完全不是一回事。要求独立成词，
           // 避免误伤 `dp_mod`、`model` 这类标识符（不补尾空格：原文的空格就是分隔符）
           .replace(/(?<![\w\\])mod(?![\w])/g, '\\bmod')
+          // 标准数学函数名 → LaTeX 命令（`log n` → `\log n`）。两件事一起做：
+          //   1. 带空格的（`log n`、`max`、`min`、`sin x`）：同样是"空格被吃掉"的受害者 ——
+          //      `O(n log n)` 不转会排成 `O(nlogn)` 一串挨排的斜体字母，
+          //      与上一轮 `xor` 那个毛病同源。LaTeX 函数名自带右侧间距，转成命令后边界自动恢复。
+          //      后置 \w 断言很重要：`log_2` 后面紧跟下标时留给原有逻辑；
+          //      前置断言则放行已经写好的 `\log`（避免 `\log` → `\\log`）。
+          //      空白放进第二组原样回带：`log n` → `\log n`（间距由TeX补），
+          //      而 `max(0, …)` → `\max(0, …)` —— 后者本来就没空格，不能凭空插一个。
+          .replace(
+            /(?<![\\\w])(log|ln|lg|exp|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|max|min|sup|inf|det)(?![\w])([ \t]*)/g,
+            (_m, word: string, space: string) => `\\${word}${space}`,
+          )
+          //   2. AI 常把乘法连着写（`logn`、`logk`）。这里没有可以依赖的词边界，
+          //      只能补一条窄规则：只认「log + 单个字母 + 该字母之后不再是字母」，
+          //      于是 `logic`、`long`、`log_2`、`log2(n)` 都落不到它头上。
+          //      前置**不**要求词边界：`O(nlogn)`、`O(2logn)` 这种连写太常见了，
+          //      卡词边界会正好漏掉它们；这里只排除前导反斜杠（避免 `\log` → `\\log`）。
+          //      已知代价：数学区里 `logs`、`flogs` 这类"以 log+单字母结尾"的英文单词
+          //      会被拆开 —— 这条只作用于**已判定为数学**的区域，概率极低。
+          .replace(/(?<!\\)log([a-zA-Z])(?![a-zA-Z])/g, '\\log $1')
+          // 词运算符（`xor` / `and` / `or` / `div` …）→ \operatorname{…}。
+          // KaTeX 在数学模式里按 LaTeX 规则忽略空格，`ans(k_1) xor ans(k_2)` 会排成
+          // `ans(k1)xorans(k2)` —— 词运算符退化成一串挨个排的字母，与相邻标识符
+          // 糊成一团读不出单词边界（用户反馈"中间没有间隔看不清"）。
+          // \operatorname 给出直立字形，并按 \mathop 的规则在两侧补薄间距，
+          // 词的边界立刻可辨。这里**不**补尾空格：\mathop 的间距由 TeX 负责。
+          // 前后都用 \w 环绕断言：`ans_xor`、`txorid` 这类标识符不受影响；
+          // 再排除前导 `{`，避免把已经写好的 `\operatorname{xor}` 二次包裹（幂等性）。
+          .replace(/(?<![\\\w{])(?:lcm|gcd|shl|shr|xor|div|and|or)(?![\w])/g, '\\operatorname{$&}')
           // Unicode 数学符号 → LaTeX 命令
           .replace(/¬/g, '\\neg ')
           .replace(/⊕/g, '\\oplus ')
@@ -815,6 +953,7 @@ export function normalizeMathSymbols(text: string): string {
           .replace(/≥/g, '\\ge ')
           .replace(/≠/g, '\\ne ')
           .replace(/·/g, '\\cdot ')
+          .replace(/⋅/g, '\\cdot ')
           .replace(/×/g, '\\times ')
           .replace(/÷/g, '\\div ')
           .replace(/→/g, '\\to ')
