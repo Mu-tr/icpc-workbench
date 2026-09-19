@@ -82,6 +82,11 @@ interface CustomFormValues {
   code?: string
 }
 
+interface CategoryFormValues {
+  name: string
+  description?: string
+}
+
 /** 模板条目的有效内容：自建模板用自身字段，内置条目用用户写入的 content */
 function contentOf(t: TemplateItemInfo): TemplateContentInfo {
   if (t.custom) {
@@ -121,6 +126,8 @@ export default function Templates() {
   const [customOpen, setCustomOpen] = useState(false)
   const [editingCustom, setEditingCustom] = useState<TemplateItemInfo | null>(null)
   const [customForm] = Form.useForm<CustomFormValues>()
+  const [categoryOpen, setCategoryOpen] = useState(false)
+  const [categoryForm] = Form.useForm<CategoryFormValues>()
   const [contentEditing, setContentEditing] = useState<TemplateItemInfo | null>(null)
   const [contentDraft, setContentDraft] = useState<TemplateContentInfo>({ code: '', idea: '', complexity: '', url: '' })
   const [syncingId, setSyncingId] = useState<string>()
@@ -195,6 +202,25 @@ export default function Templates() {
   }
 
   // ---------- 自建模板 ----------
+
+  const openCategoryCreate = () => {
+    categoryForm.resetFields()
+    setCategoryOpen(true)
+  }
+
+  const submitCategory = async () => {
+    const values = await categoryForm.validateFields().catch(() => null)
+    if (!values) return
+    try {
+      const created = await post<{ key: string; name: string }>('/api/templates/categories', values)
+      message.success(`标签「${created.name}」已创建`)
+      setCategoryOpen(false)
+      setActiveCat(created.key)
+      load()
+    } catch (e) {
+      message.error((e as Error).message)
+    }
+  }
 
   const openCreate = (categoryKey?: string) => {
     setEditingCustom(null)
@@ -478,8 +504,8 @@ export default function Templates() {
             })}
           </div>
           <div className="taxonomy-footer">
-            <Button size="small" type="text" icon={<PlusOutlined />} onClick={() => openCreate()}>
-              新建模板
+            <Button size="small" type="text" icon={<PlusOutlined />} onClick={openCategoryCreate}>
+              新建标签
             </Button>
           </div>
         </aside>
@@ -788,6 +814,32 @@ export default function Templates() {
               height={320}
               maxLength={20000}
               placeholder="粘贴 / 编写你的 C++ 模板……（语法高亮，支持 Tab 缩进）"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+      {/* 模板分类新建弹窗 */}
+      <Modal
+        title="新建标签"
+        open={categoryOpen}
+        onCancel={() => setCategoryOpen(false)}
+        onOk={submitCategory}
+        okText="创建"
+        cancelText="取消"
+      >
+        <Form form={categoryForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="标签名称"
+            rules={[{ required: true, message: '填写标签名称' }]}
+          >
+            <Input placeholder="如：网络流" maxLength={30} />
+          </Form.Item>
+          <Form.Item name="description" label="说明（可选）">
+            <Input.TextArea
+              rows={3}
+              maxLength={200}
+              placeholder="这个标签下准备积累哪些模板"
             />
           </Form.Item>
         </Form>

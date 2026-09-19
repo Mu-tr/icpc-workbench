@@ -24,6 +24,70 @@ async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
 
+test('template categories: create custom category and use it for custom templates', async () => {
+  await withServer(async (base) => {
+    const created = await fetch(`${base}/categories`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ name: '网络流', description: '最大流、费用流与建模' }),
+    });
+    assert.equal(created.status, 200);
+    const category = (await created.json()) as {
+      ok: boolean;
+      key: string;
+      name: string;
+      description: string;
+      custom: boolean;
+    };
+    assert.equal(category.ok, true);
+    assert.ok(category.key);
+    assert.equal(category.name, '网络流');
+    assert.equal(category.description, '最大流、费用流与建模');
+    assert.equal(category.custom, true);
+
+    const list = (await (await fetch(base)).json()) as {
+      categories: Array<{
+        key: string;
+        name: string;
+        description: string;
+        custom?: boolean;
+        templates: Array<{ id: string; custom: boolean; name: string }>;
+      }>;
+    };
+    const customCategory = list.categories.find((item) => item.key === category.key)!;
+    assert.equal(customCategory.name, '网络流');
+    assert.equal(customCategory.description, '最大流、费用流与建模');
+    assert.equal(customCategory.custom, true);
+    assert.equal(customCategory.templates.length, 0);
+
+    const template = await fetch(`${base}/custom`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        categoryKey: category.key,
+        name: 'Dinic 最大流',
+        difficulty: 4,
+        tags: ['网络流'],
+        code: 'struct Dinic {};',
+      }),
+    });
+    assert.equal(template.status, 200);
+
+    const after = (await (await fetch(base)).json()) as typeof list;
+    assert.equal(
+      after.categories.find((item) => item.key === category.key)!.templates[0]!.name,
+      'Dinic 最大流',
+    );
+
+    const duplicate = await fetch(`${base}/categories`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ name: '网络流' }),
+    });
+    assert.equal(duplicate.status, 409);
+  });
+});
+
 test('custom templates: create → merged in list → status → edit → delete cleans progress', async () => {
   await withServer(async (base) => {
     // 创建
