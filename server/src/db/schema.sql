@@ -243,6 +243,18 @@ CREATE TABLE IF NOT EXISTS custom_templates (
   updated_at   TEXT
 );
 
+-- 用户自建模板分类（模板库左侧标签）；key 由服务端生成，name 在同一用户内唯一。
+CREATE TABLE IF NOT EXISTS template_categories (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     INTEGER NOT NULL REFERENCES users(id),
+  key         TEXT NOT NULL,
+  name        TEXT NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (user_id, key),
+  UNIQUE (user_id, name)
+);
+
 
 -- 题单整理（issue #4）：导入平台题单并按知识点分类
 CREATE TABLE IF NOT EXISTS problem_lists (

@@ -23,6 +23,7 @@ const TABLES = [
   'plan_tasks',
   'checkins',
   'settings',
+  'template_categories',
 ];
 
 test('schema creates all tables', () => {

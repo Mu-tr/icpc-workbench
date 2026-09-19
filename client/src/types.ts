@@ -219,6 +219,8 @@ export interface TemplateCategoryInfo {
   key: string
   name: string
   description: string
+  /** 用户自建分类 */
+  custom?: boolean
   templates: TemplateItemInfo[]
 }
 
