@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/index.ts';
 import { DEFAULT_USER_ID } from '../constants.ts';
 import { asyncHandler } from '../asyncHandler.ts';
@@ -54,6 +55,12 @@ interface CustomRow {
   idea: string | null;
   complexity: string | null;
   url: string | null;
+}
+
+interface CategoryRow {
+  key: string;
+  name: string;
+  description: string;
 }
 
 const loadProgress = (db: Db): Map<string, ProgressEntry> => {
@@ -150,6 +157,35 @@ const safeTags = (raw: string): string[] => {
   }
 };
 
+const loadCustomCategories = (db: Db): CategoryRow[] =>
+  db
+    .prepare('SELECT key, name, description FROM template_categories WHERE user_id = ? ORDER BY id')
+    .all(DEFAULT_USER_ID) as unknown as CategoryRow[];
+
+const categoryExists = (db: Db, key: string): boolean =>
+  CURRICULUM.some((category) => category.key === key) ||
+  !!db
+    .prepare('SELECT 1 FROM template_categories WHERE user_id = ? AND key = ?')
+    .get(DEFAULT_USER_ID, key);
+
+const mapCustomTemplate = (row: CustomRow, progress: Map<string, ProgressEntry>) => ({
+  custom: true,
+  id: customId(row.id),
+  name: row.name,
+  difficulty: Math.min(5, Math.max(1, row.difficulty)),
+  tags: safeTags(row.tags),
+  code: row.code,
+  idea: row.idea ?? '',
+  complexity: row.complexity ?? '',
+  useCases: '',
+  pitfalls: '',
+  url: row.url,
+  examples: [] as never[],
+  status: progress.get(customId(row.id))?.status ?? 'todo',
+  note: progress.get(customId(row.id))?.note ?? null,
+  content: null,
+});
+
 /** 导出用：学习状态中文标签 */
 const EXPORT_STATUS_LABEL: Record<string, string> = {
   todo: '未学',
@@ -216,14 +252,17 @@ function buildExportBundle(db: Db): ExportBundle {
   const customRows = db
     .prepare('SELECT * FROM custom_templates WHERE user_id = ? ORDER BY category_key, id')
     .all(DEFAULT_USER_ID) as unknown as CustomRow[];
-  const categoryName = (key: string): string => CURRICULUM.find((c) => c.key === key)?.name ?? key;
+  const categoryNames = new Map([
+    ...CURRICULUM.map((category) => [category.key, category.name] as const),
+    ...loadCustomCategories(db).map((category) => [category.key, category.name] as const),
+  ]);
 
   const customTemplates = customRows.map((row) => {
     const id = customId(row.id);
     const p = progress.get(id);
     return {
       id,
-      category: categoryName(row.category_key),
+      category: categoryNames.get(row.category_key) ?? row.category_key,
       name: row.name,
       difficulty: Math.min(5, Math.max(1, row.difficulty)),
       tags: safeTags(row.tags),
@@ -356,41 +395,37 @@ export function templatesRoutes(db: Db, options: TemplatesRouteOptions = {}): Ro
       customByCategory.set(row.category_key, list);
     }
 
-    const categories = CURRICULUM.map((cat) => ({
-      key: cat.key,
-      name: cat.name,
-      description: cat.description,
-      templates: [
-        ...cat.templates.map((t) => ({
-          custom: false,
-          ...t,
-          examples: t.examples.map((ex) => ({
-            ...ex,
-            ...(exampleStatus.get(`${ex.platform}:${ex.key}`) ?? { inBank: false, ac: false }),
+    const categories = [
+      ...CURRICULUM.map((cat) => ({
+        key: cat.key,
+        name: cat.name,
+        description: cat.description,
+        custom: false,
+        templates: [
+          ...cat.templates.map((t) => ({
+            custom: false,
+            ...t,
+            examples: t.examples.map((ex) => ({
+              ...ex,
+              ...(exampleStatus.get(`${ex.platform}:${ex.key}`) ?? { inBank: false, ac: false }),
+            })),
+            status: progress.get(t.id)?.status ?? 'todo',
+            note: progress.get(t.id)?.note ?? null,
+            content: contentMap.get(t.id) ?? null,
           })),
-          status: progress.get(t.id)?.status ?? 'todo',
-          note: progress.get(t.id)?.note ?? null,
-          content: contentMap.get(t.id) ?? null,
-        })),
-        ...(customByCategory.get(cat.key) ?? []).map((row) => ({
-          custom: true,
-          id: customId(row.id),
-          name: row.name,
-          difficulty: Math.min(5, Math.max(1, row.difficulty)),
-          tags: safeTags(row.tags),
-          code: row.code,
-          idea: row.idea ?? '',
-          complexity: row.complexity ?? '',
-          useCases: '',
-          pitfalls: '',
-          url: row.url,
-          examples: [] as never[],
-          status: progress.get(customId(row.id))?.status ?? 'todo',
-          note: progress.get(customId(row.id))?.note ?? null,
-          content: null,
-        })),
-      ],
-    }));
+          ...(customByCategory.get(cat.key) ?? []).map((row) => mapCustomTemplate(row, progress)),
+        ],
+      })),
+      ...loadCustomCategories(db).map((category) => ({
+        key: category.key,
+        name: category.name,
+        description: category.description,
+        custom: true,
+        templates: (customByCategory.get(category.key) ?? []).map((row) =>
+          mapCustomTemplate(row, progress),
+        ),
+      })),
+    ];
 
     let mastered = 0;
     let learning = 0;
@@ -427,12 +462,39 @@ export function templatesRoutes(db: Db, options: TemplatesRouteOptions = {}): Ro
 
   // ---------- 自建模板 CRUD ----------
 
+  // POST /api/templates/categories  body: { name, description? } → 新建模板分类
+  r.post('/categories', (req, res) => {
+    const body = req.body ?? {};
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name || name.length > 30) {
+      return res.status(400).json({ error: 'name 必填且不超过 30 字' });
+    }
+    const description =
+      typeof body.description === 'string' ? body.description.trim().slice(0, 200) : '';
+    const duplicateBuiltin = CURRICULUM.some(
+      (category) => category.name.toLowerCase() === name.toLowerCase(),
+    );
+    const duplicateCustom = db
+      .prepare(
+        'SELECT 1 FROM template_categories WHERE user_id = ? AND name = ? COLLATE NOCASE',
+      )
+      .get(DEFAULT_USER_ID, name);
+    if (duplicateBuiltin || duplicateCustom) {
+      return res.status(409).json({ error: '分类名称已存在' });
+    }
+    const key = `custom-${randomUUID()}`;
+    db.prepare(
+      'INSERT INTO template_categories (user_id, key, name, description) VALUES (?, ?, ?, ?)',
+    ).run(DEFAULT_USER_ID, key, name, description);
+    res.json({ ok: true, key, name, description, custom: true });
+  });
+
   const validateCustomBody = (body: Record<string, unknown>) => {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name || name.length > 100) return { error: 'name 必填且不超过 100 字' };
     const categoryKey = body.categoryKey;
-    if (typeof categoryKey !== 'string' || !CURRICULUM.some((c) => c.key === categoryKey)) {
-      return { error: 'categoryKey 需为课程分类之一' };
+    if (typeof categoryKey !== 'string' || !categoryExists(db, categoryKey)) {
+      return { error: 'categoryKey 需为有效分类' };
     }
     const difficulty = Number(body.difficulty);
     if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 5) {

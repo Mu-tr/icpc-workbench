@@ -1233,7 +1233,8 @@ body {
   }
 
   .taxonomy-footer {
-    display: none;
+    display: flex;
+    padding-top: 6px;
   }
 }
 
