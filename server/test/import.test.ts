@@ -72,6 +72,33 @@ test('parseCsvRows: missing column throws', () => {
   assert.throws(() => parseCsvRows('luogu', 'problemKey,title\nP1,T\n'), /缺少列/);
 });
 
+test('parseManualRow: JSON 里 language 传数字（平台 langId）不抛错，交由写入层归一', () => {
+  // 手动导入支持粘贴 JSON 数组，用户完全可能把洛谷的数字 langId 原样贴进来；
+  // row.language?.trim() 对 number 会抛 TypeError，整行被报成难懂的「导入失败」
+  const row = parseManualRow('luogu', { problemKey: 'P1001', verdict: 'AC', language: 34 } as never, 0);
+  assert.equal(String(row.language), '34');
+});
+
+test('insertNormalized: 纯数字 language 收成整数字符串，真实语言名不受影响', () => {
+  // 洛谷接口下发数字 langId、CSV/Excel 单元格带 ".0" 尾巴：原样绑进 TEXT 列会被
+  // SQLite 渲染成 "34.0"，界面把它当语言名展示（issue #19 复查发现的第二条写入路径）
+  const mkLang = (key: string, language: string) =>
+    parseManualRow('luogu', { problemKey: key, title: `T ${key}`, verdict: 'AC', language, externalId: `x-${key}` }, 0);
+  insertNormalized(db, 1, [
+    mkLang('P9001', '34.0'),
+    mkLang('P9002', '2'),
+    mkLang('P9003', 'C++23 (GCC 15.2.0)'),
+    mkLang('P9004', '  '),
+  ]);
+  const values = db
+    .prepare("SELECT language FROM submissions WHERE platform = 'luogu' ORDER BY id")
+    .all() as Array<{ language: string | null }>;
+  assert.deepEqual(
+    values.map((r) => r.language),
+    ['34', '2', 'C++23 (GCC 15.2.0)', null], // 空白语言归 null，带点号的真实语言名原样保留
+  );
+});
+
 test('insertNormalized: inserts problems+submissions, dedupes on rerun', () => {
   const mk = (key: string, externalId: string) =>
     parseManualRow(

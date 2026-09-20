@@ -72,6 +72,8 @@ function migrate(db: Db): void {
   mergeSlashedCfKeys(db);
   // v0.4.5 数据修复：洛谷秒级时间戳曾被按毫秒解析（见 fixLuoguTimestamps）
   fixLuoguTimestamps(db);
+  // v0.6.1 数据修复：洛谷 language 是数字 langId，曾被绑成 REAL 存成 "34.0"（见 fixLuoguLanguageIds）
+  fixLuoguLanguageIds(db);
 }
 
 /**
@@ -150,6 +152,35 @@ function fixLuoguTimestamps(db: Db): void {
     db.exec('ROLLBACK');
     throw e;
   }
+}
+
+/**
+ * v0.6.1 数据修复：洛谷接口下发的 language 是数字 langId（如 34），适配器原样传下时
+ * JS number 被 SQLite 按 REAL 写进 TEXT 列，落成 "34.0" 这种既非语言名又难看的值。
+ * 统一收成十进制整数字符串 "34"。幂等：已是 "34" 的行换算后不变，不写库。
+ * 语言名映射暂无公开来源（列表/题目页/记录详情实测均无字典），留待后续。
+ */
+function fixLuoguLanguageIds(db: Db): void {
+  const rows = db
+    .prepare("SELECT id, language FROM submissions WHERE platform = 'luogu' AND language IS NOT NULL")
+    .all() as Array<{ id: number; language: string }>;
+  const update = db.prepare('UPDATE submissions SET language = ? WHERE id = ?');
+  let fixed = 0;
+  db.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      if (!/^\d+(\.\d+)?$/.test(row.language)) continue;
+      const clean = String(Math.trunc(Number(row.language)));
+      if (clean === row.language) continue;
+      update.run(clean, row.id);
+      fixed += 1;
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  if (fixed > 0) console.log(`[migrate] 已归一 ${fixed} 条洛谷 language（数字 langId 去掉 ".0" 尾巴）`);
 }
 
 function seed(db: Db): void {

@@ -71,7 +71,8 @@ interface LuoguRecord {
   id: number;
   status: number;
   submitTime: number;
-  language?: string;
+  /** 平台内部 langId（JSON number，如 34），不是语言名——实测列表/题目页/记录详情三处均无 ID→名称字典 */
+  language?: string | number;
   problem?: LuoguProblem;
 }
 
@@ -96,6 +97,18 @@ function toIso(ts: number | string | undefined): string {
   let ms = typeof ts === 'number' ? ts : Date.parse(String(ts ?? ''));
   if (Number.isFinite(ms) && ms > 0 && ms < 1e12) ms *= 1000;
   return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : new Date().toISOString();
+}
+
+/**
+ * 归一 language：洛谷下发的是数字 langId（如 34），把它原样绑进 TEXT 列会被 SQLite
+ * 按 REAL 渲染成 "34.0"——既不是语言名又难看。这里统一收成十进制整数字符串 "34"，
+ * 真正的语言名映射待平台给出字典后再补（见 db/index.ts fixLuoguLanguageIds）。
+ */
+function normalizeLang(v: string | number | undefined): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  const s = String(v).trim();
+  if (s === '') return undefined;
+  return /^\d+(\.\d+)?$/.test(s) ? String(Math.trunc(Number(s))) : s;
 }
 
 function requestHeaders(cookie: string, csrf?: string): Record<string, string> {
@@ -377,6 +390,7 @@ export function createLuoguAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
         const recDiff = rec.problem?.difficulty;
         const rawDifficulty =
           recDiff !== undefined && recDiff > 0 ? recDiff : info.difficulty;
+        const language = normalizeLang(rec.language);
         return {
           problem: {
             platform: 'luogu' as PlatformId,
@@ -390,7 +404,7 @@ export function createLuoguAdapter(fetchFn: HttpInit = fetch): PlatformAdapter {
             tags: info.tags,
           },
           verdict: STATUS_MAP[rec.status] ?? 'SKIPPED',
-          ...(rec.language ? { language: rec.language } : {}),
+          ...(language ? { language } : {}),
           submittedAt: toIso(rec.submitTime),
           externalId: String(rec.id),
         };
