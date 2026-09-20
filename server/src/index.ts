@@ -14,6 +14,7 @@ import { checkinsRoutes } from './routes/checkins.ts';
 import { contestsRoutes } from './routes/contests.ts';
 import { aiRoutes } from './routes/ai.ts';
 import { exportRoutes } from './routes/export.ts';
+import { historyRoutes } from './routes/history.ts';
 import { importRoutes } from './routes/import.ts';
 import { knowledgeRoutes } from './routes/knowledge.ts';
 import { listsRoutes } from './routes/lists.ts';
@@ -63,6 +64,7 @@ app.use('/api/lists', listsRoutes(db, () => aiConfigFromDb(db, config)));
 app.use('/api/knowledge', knowledgeRoutes(db));
 app.use('/api/export', exportRoutes(db));
 app.use('/api/problems', problemsRoutes(db));
+app.use('/api/history', historyRoutes(db));
 app.use('/api/reviews', reviewsRoutes(db));
 // 笔记图片：上传与静态服务封装在同一 Router（GET 服务 /api/uploads/xxx，POST 上传）
 app.use('/api/uploads', uploadsRoutes({ uploadsDir: path.join(config.dataDir, 'uploads') }));

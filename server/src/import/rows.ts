@@ -54,7 +54,9 @@ export function parseManualRow(
       tags,
     },
     verdict: verdictRaw as Verdict,
-    ...(row.language?.trim() ? { language: row.language.trim() } : {}),
+    // 手动导入可粘贴 JSON，language 可能是数字（洛谷 langId）：?.trim() 对 number 会抛
+    // TypeError，把整行报成难懂的导入失败。统一先 String()，具体归一交给写入层守卫。
+    ...(String(row.language ?? '').trim() ? { language: String(row.language).trim() } : {}),
     submittedAt,
     externalId,
   };

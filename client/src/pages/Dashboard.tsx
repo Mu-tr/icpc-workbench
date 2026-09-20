@@ -24,6 +24,7 @@ import {
 import type { DifficultyStat, OverallStats, PlatformStat, TrendPoint, WeaknessProfile } from '../types'
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
+import HistoryPanel from '../components/HistoryPanel'
 import StatStrip from '../components/StatStrip'
 import SyncStatusCard from '../components/SyncStatusCard'
 import SyncProgressHint from '../components/SyncProgressHint'
@@ -456,6 +457,11 @@ export default function Dashboard() {
           </Card>
         </Col>
       </Row>
+
+      {/* 写题历史查询（issue #19）：概览页内直接查「我在哪些平台写过哪些题」，不另开板块 */}
+      <Card title="写题历史" size="small" style={{ marginTop: 16 }}>
+        <HistoryPanel />
+      </Card>
     </div>
   )
 }

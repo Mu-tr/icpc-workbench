@@ -127,8 +127,10 @@ test('luogu: with cookie normalizes records and problem info', async () => {
         currentData: {
           records: {
             result: [
-              { id: 9001, status: 12, submitTime: 1700000000000, language: 'C++17', problem: { pid: 'P1001', title: 'A+B Problem', difficulty: 2 } },
-              { id: 9002, status: 14, submitTime: 1700000100000, language: 'Python3', problem: { pid: 'P1002' } },
+              // language 线上真实形态是数字 langId（洛谷不给名称字典）：夹具必须照实写，
+              // 早先写成 'C++17' 字符串让「数字被存成 "34.0"」的 bug 一路漏测
+              { id: 9001, status: 12, submitTime: 1700000000000, language: 34, problem: { pid: 'P1001', title: 'A+B Problem', difficulty: 2 } },
+              { id: 9002, status: 14, submitTime: 1700000100000, language: 2, problem: { pid: 'P1002' } },
               { id: 9003, status: 11, submitTime: 1700000200000, problem: { pid: 'P1003' } },
               { id: 9004, status: 1, submitTime: 1700000300000, problem: { pid: 'P1004' } }, // 评测中：应被过滤
             ],
@@ -172,6 +174,10 @@ test('luogu: with cookie normalizes records and problem info', async () => {
   assert.equal(r0.problem.difficultyScale, 'luogu-2026-06');
   assert.deepEqual(r0.problem.tags, ['入门', '模拟']);
   assert.equal(r0.problem.url, 'https://www.luogu.com.cn/problem/P1001');
+  // 数字 langId 归一为整数字符串（不得出现 "34.0"），缺失语言的行不下发该键
+  assert.equal(r0.language, '34');
+  assert.equal(rows[1].language, '2');
+  assert.equal('language' in rows[2], false);
   assert.equal(r0.externalId, '9001');
   assert.equal(new Date(r0.submittedAt).toISOString(), new Date(1700000000000).toISOString());
   assert.equal(rows[1].verdict, 'WA'); // status 14 = Unaccepted → WA
@@ -315,7 +321,7 @@ test('luogu: 分页可超过 100 页（>2000 条提交的首次全量同步不�
             records: {
               result: [
                 // 同一题目的多条提交（题目信息走缓存，避免逐题抓取拖慢测试）
-                { id: 1000 + page, status: 12, submitTime: 1700000000000 + page, language: 'C++17', problem: { pid: 'P1001', title: 'A+B Problem', difficulty: 2 } },
+                { id: 1000 + page, status: 12, submitTime: 1700000000000 + page, language: 28, problem: { pid: 'P1001', title: 'A+B Problem', difficulty: 2 } },
               ],
             },
           },
@@ -345,7 +351,7 @@ test('luogu: 7000+ 提交分批拉取防封号（首刷截断 + 补全续拉 + �
         id: (page - 1) * PAGE_SIZE + i + 1,
         status: 12,
         submitTime: 1700000000 + (TOTAL_PAGES - page) * 100 + i,
-        language: 'C++17',
+        language: 28,
         problem: { pid: 'P1001', title: 'A+B', difficulty: 2 },
       }));
       return { code: 200, currentData: { records: { result } } };

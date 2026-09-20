@@ -9,6 +9,20 @@ export interface InsertResult {
 }
 
 /**
+ * language 列兜底守卫（同步与导入共用此写入路径）：
+ * 平台把语言下发成数字（洛谷的 langId）或 CSV/Excel 单元格带 ".0" 尾巴时，原样绑进
+ * TEXT 列会被 SQLite 按 REAL 渲染成 "34.0"——既不是语言名，又会被界面当成名字展示。
+ * 纯数字统一收成整数字符串；真实语言名（含 "C++23 (GCC 15.2.0)" 这类带点号的）原样保留。
+ * 注：非整数数字（如 "34.5"）按截断取整——平台 langId 恒为整数，此处不为不可能的形态加分支。
+ */
+export function normalizeLanguageCell(v: string | number | null | undefined): string | null {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (s === '') return null;
+  return /^\d+(\.\d+)?$/.test(s) ? String(Math.trunc(Number(s))) : s;
+}
+
+/**
  * 将统一 Submission 结构写入数据库（单事务）：
  * - problems 按 (platform, problem_key) upsert（标题/难度/链接/tags 更新）
  * - submissions 按 (user_id, platform, external_id) INSERT OR IGNORE 去重
@@ -98,7 +112,7 @@ export function insertNormalized(
         s.problem.platform,
         s.problem.problemKey,
         s.verdict,
-        s.language ?? null,
+        normalizeLanguageCell(s.language),
         s.submittedAt,
         s.externalId,
       );
