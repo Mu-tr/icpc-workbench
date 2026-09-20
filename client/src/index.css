@@ -2822,3 +2822,31 @@ body {
   border: none;
   cursor: pointer;
 }
+
+/* ---------- 写题历史面板（issue #19，嵌在数据概览的卡片内） ---------- */
+
+.history-platform-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.history-platform-chip {
+  cursor: pointer;
+  user-select: none;
+}
+
+.history-platform-chip.is-active {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+
+.history-panel .filter-row {
+  padding-inline: 0;
+}
+
+.history-panel .ant-table-wrapper {
+  padding-inline: 12px;
+}

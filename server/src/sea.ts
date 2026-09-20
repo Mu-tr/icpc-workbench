@@ -28,6 +28,7 @@ import { errorHandler, securityHeaders } from './middleware.ts';
 import { checkinsRoutes } from './routes/checkins.ts';
 import { contestsRoutes } from './routes/contests.ts';
 import { exportRoutes } from './routes/export.ts';
+import { historyRoutes } from './routes/history.ts';
 import { importRoutes } from './routes/import.ts';
 import { knowledgeRoutes } from './routes/knowledge.ts';
 import { listsRoutes } from './routes/lists.ts';
@@ -106,6 +107,7 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   app.use('/api/knowledge', knowledgeRoutes(db));
   app.use('/api/export', exportRoutes(db));
   app.use('/api/problems', problemsRoutes(db));
+  app.use('/api/history', historyRoutes(db));
   app.use('/api/reviews', reviewsRoutes(db));
   app.use('/api/uploads', uploadsRoutes({ uploadsDir: path.join(config.dataDir, 'uploads') }));
   app.use('/api/today', todayRoutes(db));
