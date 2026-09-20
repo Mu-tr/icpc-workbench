@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, Empty, Input, Modal, Popconfirm, Space, Spin, Tag, Tooltip, App as AntdApp } from 'antd'
+import { Button, Card, Empty, Modal, Popconfirm, Space, Spin, Tag, Tooltip, App as AntdApp } from 'antd'
 import { DeleteOutlined, EditOutlined, ReadOutlined } from '@ant-design/icons'
 import PageHeader from '../components/PageHeader'
 import PlatformTag from '../components/PlatformTag'
+import NoteEditor from '../components/NoteEditor'
+import NotePreview from '../components/NotePreview'
 import { difficultyColor } from '../ui'
 import { del, get, patch, post } from '../api'
 import type { ReviewFeedback, ReviewItem } from '../types'
@@ -132,7 +134,7 @@ export default function Reviews() {
                       [{item.problemKey}] {item.title}
                     </span>
                   )}
-                  {item.note && <p className="task-note">{item.note}</p>}
+                  {item.note && <NotePreview text={item.note} />}
                 </div>
                 <div className="review-item-actions">
                   <Space size={6} wrap>
@@ -178,13 +180,19 @@ export default function Reviews() {
         onOk={saveNote}
         okText="保存"
         cancelText="取消"
+        width={880}
       >
-        <Input.TextArea
-          rows={4}
-          value={noteDraft}
-          onChange={(e) => setNoteDraft(e.target.value)}
-          placeholder="关键观察、易错点、下次复习先看什么……"
-        />
+        {editing && (
+          /* key 换条目时重挂编辑器：预览模式等界面状态回到默认，光标清零 */
+          <NoteEditor
+            key={editing.id}
+            value={noteDraft}
+            onChange={setNoteDraft}
+            height={420}
+            maxLength={20000}
+            placeholder="关键观察、易错点、下次复习先看什么……（Markdown 语法，可直接粘贴 / 拖入截图）"
+          />
+        )}
       </Modal>
     </div>
   )

@@ -1,4 +1,5 @@
 import express from 'express';
+import path from 'node:path';
 import type { Server } from 'node:http';
 import { aiConfigFromDb, loadConfig } from './config.ts';
 import { createDb } from './db/index.ts';
@@ -25,6 +26,7 @@ import { syncRoutes } from './routes/sync.ts';
 import { templatesRoutes } from './routes/templates.ts';
 import { todayRoutes } from './routes/today.ts';
 import { updateRoutes, APP_VERSION } from './routes/update.ts';
+import { uploadsRoutes } from './routes/uploads.ts';
 import { widgetRoutes } from './routes/widget.ts';
 import { PLATFORMS } from '../../shared/src/index.ts';
 import { initKnowledgeStore, loadAnnotationsIntoDb, purgeAiAnnotations } from './knowledge/store.ts';
@@ -62,6 +64,8 @@ app.use('/api/knowledge', knowledgeRoutes(db));
 app.use('/api/export', exportRoutes(db));
 app.use('/api/problems', problemsRoutes(db));
 app.use('/api/reviews', reviewsRoutes(db));
+// 笔记图片：上传与静态服务封装在同一 Router（GET 服务 /api/uploads/xxx，POST 上传）
+app.use('/api/uploads', uploadsRoutes({ uploadsDir: path.join(config.dataDir, 'uploads') }));
 app.use('/api/today', todayRoutes(db));
 app.use('/api/templates', templatesRoutes(db, { dataDir: config.dataDir }));
 app.use('/api/contests', contestsRoutes());

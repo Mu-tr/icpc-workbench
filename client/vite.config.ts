@@ -63,6 +63,22 @@ export function apiStartupGate(host: string, port: number, waitMs = 20000): Plug
         if (await probe()) {
           ready = true
           log(`后端 ${host}:${port} 已就绪（探测 ${probes} 次），放行 ${pending.size} 个等待中的请求`)
+          // 端口通了 ≠ 通的是开发后端：已安装的桌面版（SEA）同样默认监听 3001，
+          // 而 dev 后端会因 EADDRINUSE 直接退出 —— 此时这里探测到的是桌面版，
+          // /api 被静默代理到旧应用，新接口全部 404 且极难排查。health 里的
+          // sea 标记能区分两者，发现即大声警告（仍放行，不阻塞使用）。
+          try {
+            const res = await fetch(`http://${host}:${port}/api/health`, { signal: AbortSignal.timeout(1500) })
+            const info = (await res.json()) as { sea?: boolean; version?: string }
+            if (info.sea) {
+              log(
+                `\x1b[33m⚠ 端口 ${port} 上是「已安装的桌面版」（v${info.version ?? '?'}），不是本仓库开发后端：` +
+                  `/api 将代理到桌面版，新增接口会 404。请关闭桌面版后重新运行 npm run dev。\x1b[0m`,
+              )
+            }
+          } catch {
+            /* health 探测失败不影响放行 */
+          }
           release()
           return
         }
