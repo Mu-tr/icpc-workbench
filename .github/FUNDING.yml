@@ -1,0 +1,13 @@
+# GitHub 赞助栏：仓库首页右侧的「Sponsor this project」按钮由本文件驱动。
+# 语法与支持的平台见：
+# https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+# 每个平台最多可填 4 个账号；不需要展示的平台保持注释即可。改动推送到默认分支后几分钟内生效。
+
+github: ZF3373
+
+# 其他平台示例——取消注释并替换成自己的账号 / 链接即可生效：
+# ko-fi: yourname              # https://ko-fi.com
+# patreon: yourname            # https://www.patreon.com
+# open_collective: yourproject # https://opencollective.com
+# buy_me_a_coffee: yourname    # https://buymeacoffee.com
+# custom: ["https://afdian.net/a/yourname"]  # 爱发电等任意自定义链接（最多 4 个，注意方括号写法）

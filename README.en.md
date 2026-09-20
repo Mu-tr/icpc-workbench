@@ -285,7 +285,15 @@ npm run typecheck   # Type check (server + client)
 
 Test coverage: database schema and constraints, config validation, CF/AtCoder/Nowcoder contest adapter normalization (mock + real network verification), CSV parsing, import dedup, incremental sync, stats/weakness/trends consistency with manual calculation, AI generation three paths (success/failure/unconfigured), update dual-channel logic and SHA256 verification parsing, document converters (Word/Excel/PPT/HTML/CSV/JSON/XML/EPub), Markdown math formula preprocessing pipeline, session-level attachment content caching.
 
+## Sponsor
+
+If this project helps your contest prep, buying the author a coffee is much appreciated ❤
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-❤-EA4AAA?style=for-the-badge&logo=githubsponsors)](https://github.com/sponsors/ZF3373)
+
+You can also use the "Sponsor this project" button on the repository homepage (sponsor channels are configured in [.github/FUNDING.yml](./.github/FUNDING.yml)).
+
 ## License
 
-This project's code is released under the [MIT License](./LICENSE).
+This project's code is released under the [GPL-3.0 License](./LICENSE) (GNU General Public License v3.0): redistribution and modified versions of the project must likewise be licensed under GPL-3.0 with copyright notices retained.
 Third-party dependencies and their licenses are listed in [CREDITS.md](./CREDITS.md); please report security issues through the private channel described in [SECURITY.md](./SECURITY.md)—do not file public Issues.

@@ -291,7 +291,15 @@ npm run typecheck   # 双端类型检查
 
 测试覆盖：数据库 schema 与约束、配置校验、CF/AtCoder/牛客赛事适配器归一化（mock + 真实网络验证）、CSV 解析、导入去重、增量同步、统计/弱项/趋势与手工计算一致性、AI 生成三路径（成功/失败/未配置）、更新双通道判定与 SHA256 校验解析、文档转换器（Word/Excel/PPT/HTML/CSV/JSON/XML/EPub）、Markdown 数学公式预处理管线、会话级附件内容缓存。
 
+## 赞助
+
+如果这个项目对你的备赛有帮助，欢迎请作者喝杯咖啡 ❤
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-❤-EA4AAA?style=for-the-badge&logo=githubsponsors)](https://github.com/sponsors/ZF3373)
+
+也支持在仓库首页右侧点击「Sponsor this project」按钮赞助（赞助渠道配置见 [.github/FUNDING.yml](./.github/FUNDING.yml)）。
+
 ## 许可证
 
-本项目代码以 [MIT License](./LICENSE) 发布。
+本项目代码以 [GPL-3.0 License](./LICENSE)（GNU 通用公共许可证 v3.0）发布：对项目的再分发与修改版同样须以 GPL-3.0 开源并保留版权声明。
 第三方依赖及其许可证见 [CREDITS.md](./CREDITS.md)；安全问题请通过 [SECURITY.md](./SECURITY.md) 的私密渠道报告，勿公开发 Issue。
