@@ -1105,6 +1105,60 @@ describe('表格中的数学公式', () => {
     assert.equal(out.split('\n').length, 3, out)
     assert.ok(out.includes('$a \\| b$'), out)
   })
+
+  it('单元格内公式里的裸竖线转写成 \\vert（绝对值不再拆烂表格）', () => {
+    const text = '| 情况 | 公式 |\n| --- | --- |\n| 距离 | $|l - r|$ |'
+    const out = preprocessMath(text)
+    // 行数不变（表格结构完整），公式内的竖线不再是裸竖线
+    assert.equal(out.split('\n').length, 3, out)
+    assert.ok(out.includes('$\\vert l - r\\vert$'), out)
+    // 公式区域里不允许再出现裸竖线（否则 remark-gfm 会按它切单元格）
+    const dataRow = out.split('\n')[2]!
+    const mathRegion = /\$[^$]+\$/.exec(dataRow)![0]
+    assert.ok(!mathRegion.includes('|'), mathRegion)
+  })
+
+  it('单元格内集合构造经 \\vert 转写后仍升级为 \\{ \\mid \\}', () => {
+    // 裸花括号 + 裸竖线：竖线转 \vert 后，集合构造升级路径要照常识别
+    // （\vert 转写会留一个空格，\mid 替换后可能是 \mid  双空格，KaTeX 排版等价）
+    const text = '| 集合 | 说明 |\n| --- | --- |\n| $A = {x | x > 0}$ | 正数集 |'
+    const out = preprocessMath(text)
+    assert.ok(/\\{x \\mid\s+x > 0\\}/.test(out), out)
+    assert.equal(out.split('\n').length, 3, out)
+  })
+
+  it('已转义花括号里的竖线转 \\vert 后保持原样（KaTeX 直接渲染为 |）', () => {
+    const text = '| 集合 | 说明 |\n| --- | --- |\n| $A = \\{x | x > 0\\}$ | 正数集 |'
+    const out = preprocessMath(text)
+    assert.ok(out.includes('\\{x \\vert'), out)
+    assert.ok(!/\|[^|\n]*\vert/.test(out.split('\n')[2]!), out)
+  })
+
+  it('表格行里 \\(...\\) 形式的公式竖线同样转写', () => {
+    const text = '| f | 说明 |\n| --- | --- |\n| \\(|x|\\) | 绝对值 |'
+    const out = preprocessMath(text)
+    assert.ok(out.includes('$\\vert x\\vert$'), out)
+  })
+
+  it('非公式的伪数学区域（$ | b$）不转写，表格文本不受污染', () => {
+    const text = '| a$ | b$ | 帐单 |\n| --- | --- |\n| 1 | 2 | 3 |'
+    const out = preprocessMath(text)
+    // `$ | b$` 开 $ 后紧跟空白，remark-math 不认为它是公式 —— 必须原样保留
+    assert.ok(out.includes('$ | b$') || !out.includes('\\vert'), out)
+  })
+
+  it('带语言标记围栏里的 ASCII 表格不被竖线转写误伤', () => {
+    // 空标记围栏装表格会被当 Markdown 正文剥掉围栏（stripOuterCodeFence 既有行为），
+    // 这里用显式代码语言的围栏守住「代码内容绝不被改写」
+    const text = '```cpp\n| a | b |\n| 1 | 2 |\n```'
+    assert.equal(preprocessMath(text), text)
+  })
+
+  it('表格外的公式竖线保持原样（绝对值照常渲染）', () => {
+    const text = '区间公式 $|l - r|$ 求最大距离'
+    const out = preprocessMath(text)
+    assert.ok(out.includes('$|l - r|$'), out)
+  })
 })
 
 // ---------- 外层围栏剥离的边界 ----------

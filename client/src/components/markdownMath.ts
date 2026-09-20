@@ -261,8 +261,12 @@ export function stripOuterCodeFence(text: string): string {
     if (!normalized) return text
     return /\$/.test(normalized) ? `${normalized}\n` : `\n\n$$\n${normalized}\n$$\n\n`
   }
-  // 只有"明确是 Markdown"的围栏才剥掉：显式 markdown 标记，或正文确实含 Markdown 语法
+  // 只有"明确是 Markdown"的围栏才剥掉：显式 markdown 标记，或正文确实含 Markdown 语法。
+  // 显式**代码**语言（cpp/py/…）必须整段保留 —— 哪怕内容里碰巧有表格等 Markdown
+  // 形状的行（AI 贴的 ASCII 表格），剥掉会把代码变裸文本再被公式逻辑污染。
   const explicitMarkdown = normalizeLang(info) !== '' && isMarkdownishLang(info)
+  const explicitCodeLang = normalizeLang(info) !== '' && !explicitMarkdown
+  if (explicitCodeLang) return text
   if (!explicitMarkdown && !looksLikeMarkdownBody(body)) return text
   return `${body}\n`
 }
@@ -586,8 +590,14 @@ function isMathChar(ch: string): boolean {
  * 单元格内部的数学照常在后面被包裹（因为它已经不含竖线了）。
  * 表格之外的竖线保持原样，绝对值仍会正常进公式。
  */
-function protectTablePipes(text: string, ctx: ProtectionContext): string {
-  const lines = text.split('\n')
+/**
+ * 结构化判定哪些行属于 Markdown 表格：识别出「表头行 + `---` 分隔行 + 数据行」
+ * 后，这些行里的竖线全部按单元格分隔符对待。
+ *
+ * 供 protectTablePipes（包裹裸数学时保护表格结构）与 escapePipesInTableMath
+ * （渲染前转写公式内竖线）共用 —— 两处对「什么是一张表」的认定必须完全一致。
+ */
+function computeTableRowFlags(lines: string[]): boolean[] {
   const isDelimiterRow = (l: string) =>
     /^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/.test(l) && l.includes('-')
   // 先确定哪些行属于表格：分隔行的上一行是表头、下一行起是数据行
@@ -606,7 +616,71 @@ function protectTablePipes(text: string, ctx: ProtectionContext): string {
       for (let j = i + 1; j < lines.length && lines[j]!.includes('|'); j++) inTable[j] = true
     }
   }
+  return inTable
+}
+
+function protectTablePipes(text: string, ctx: ProtectionContext): string {
+  const lines = text.split('\n')
+  const inTable = computeTableRowFlags(lines)
   return lines.map((line, i) => (inTable[i] ? line.replace(/\|/g, () => mark(ctx, '|')) : line)).join('\n')
+}
+
+/* ============================ 表格行内公式的竖线转写 ============================ */
+
+/**
+ * 表格行里的数学区域：`$...$`、`$$...$$`（单行）与尚未归一化的 `\(...\)`、`\[...\]`。
+ * 只在这些区域内转写竖线；区域外的竖线是单元格分隔符，绝不能动。
+ */
+const TABLE_MATH_REGION = /(\$\$[^$\n]*\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\)|\\\[[^\n]*?\\\])/g
+
+/**
+ * 是否满足 remark-math 对行内公式的可渲染条件：
+ * 开 `$` 后不能紧跟空白、闭 `$` 前不能是空白、内容非空。
+ * 不满足的「伪公式」（`| a$ | b$ |` 里的 `$ | b$`）不是数学，转写会污染正文文本。
+ */
+function isRenderableInlineMath(seg: string): boolean {
+  const body = seg.slice(1, -1)
+  return body.trim().length > 0 && !/^\s/.test(body) && !/\s$/.test(body)
+}
+
+/**
+ * 把表格行内公式里的裸竖线转写成 `\vert`（KaTeX 渲染出完全相同的单竖线 |）。
+ *
+ * 竖线在表格行里是单元格分隔符，GFM 先按它切单元格、再看行内语法 ——
+ * 于是 `$|l - r|$` 这类含绝对值/集合构造的公式会把整行拆烂、公式消失
+ * （Obsidian 的表格切分器是数学感知的所以没这个问题，remark-gfm 不是）。
+ * `\vert` 不含竖线字符，切分与公式渲染互不干扰，视觉结果不变。
+ *
+ * 已转义的 `\|` 不动：它本就是 LaTeX 的 ‖，且不会被表格切分误伤
+ * （既有用例「单元格内的转义竖线不破坏表格结构」守住这条）。
+ * 围栏代码块里的 ASCII 表格整体被保护，不会误转写。
+ */
+export function escapePipesInTableMath(text: string): string {
+  if (!text.includes('|')) return text
+  const ctx = newContext()
+  // 围栏与行内代码先保护：代码里的 ASCII 表格、`a|b` 之类绝不能被改写
+  const afterFence = protectFenceBlocks(text, ctx)
+  const afterInline = protectInlineCode(afterFence, ctx)
+  const lines = afterInline.split('\n')
+  const inTable = computeTableRowFlags(lines)
+  const out = lines.map((line, i) => {
+    if (!inTable[i]) return line
+    return line
+      .split(TABLE_MATH_REGION)
+      .map((seg, j) => {
+        if (j % 2 === 0) return seg // 文本区：竖线是单元格分隔符
+        const isDisplay = seg.startsWith('$$')
+        if (!isDisplay && !isRenderableInlineMath(seg)) return seg
+        // \vert 后必须补空格：紧贴字母会连成一个非法命令（\vertl），
+        // KaTeX 数学模式忽略空格，排版不变。收尾 \vert 后的空格要在
+        // 闭 $ 前清掉（remark-math 不允许闭定界符前是空白）。
+        return seg
+          .replace(/(?<!\\)\|/g, '\\vert ')
+          .replace(/\\vert[ \t]+\$/g, '\\vert$')
+      })
+      .join('')
+  })
+  return restoreAll(out.join('\n'), ctx)
 }
 
 /**
@@ -875,9 +949,10 @@ function outsideMathText(src: string, fn: (s: string) => string): string {
     .join('')
 }
 
-/** 集合构造 `{ x | P(x) }`：ASCII 竖线要写成 `\mid` 才有关系符间距。 */
+/** 集合构造 `{ x | P(x) }`：ASCII 竖线要写成 `\mid` 才有关系符间距。
+ *  表格行里的竖线已被 escapePipesInTableMath 转写成 `\vert`，这里一并识别（同是集合分隔符语义） */
 function midSetBuilder(body: string): string {
-  return body.replace(/(?<!\\)\|/, '\\mid')
+  return body.replace(/(?<!\\)\||(?<!\\)\\vert(?![a-zA-Z])/, '\\mid')
 }
 
 /**
@@ -904,7 +979,7 @@ export function normalizeMathSymbols(text: string): string {
           // `_{…}`/`^{…}`/`\cmd{…}` 这些 LaTeX 分组一律不碰。
           .replace(/#\s*\{([^{}]*)\}/g, (_m, body: string) => `\\#\\{${midSetBuilder(body)}\\}`)
           .replace(
-            /(?<![\^_\\])\{([^{}]*\|[^{}]*)\}/g,
+            /(?<![\^_\\])\{([^{}]*(?:\||\\vert)[^{}]*)\}/g,
             (_m, body: string) => `\\{${midSetBuilder(body)}\\}`,
           )
           // 编程写法写成的关系符 → LaTeX（AI 常把公式写成 `i != k-i ? … : …`、`k-i >= 0`）：
@@ -1055,7 +1130,10 @@ export function preprocessMath(text: string): string {
     // LaTeX 间距命令里的分号/冒号会被裸数学的片段扩展当作"非数学字符"而截断公式
     // （`\max_{0 \le j < i,\; Y_j …}` 会在 `\;` 处裂开）。统一成等价的 `\,`。
     .replace(/\\[;:]/g, '\\,')
-  const normalized = normalizeMathSymbols(wrapBareMath(normalizeMathDelimiters(stripOuterCodeFence(cleaned))))
+  // 表格行内公式的竖线先转写成 \vert：越早转写，后续所有步骤（定界符归一化、
+  // 裸数学包裹、符号归一化）看到的都是不含竖线的公式，表格结构全程安全
+  const tableSafe = escapePipesInTableMath(cleaned)
+  const normalized = normalizeMathSymbols(wrapBareMath(normalizeMathDelimiters(stripOuterCodeFence(tableSafe))))
   return enhanceMathLayoutInText(normalized)
 }
 
