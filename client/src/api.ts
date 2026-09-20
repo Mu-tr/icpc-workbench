@@ -44,6 +44,38 @@ export const put = <T>(path: string, body?: unknown): Promise<T> =>
 
 export const del = <T>(path: string): Promise<T> => api<T>(path, { method: 'DELETE' });
 
+// ---------- 笔记图片上传（Markdown 编辑器粘贴/拖拽图片用） ----------
+
+export interface UploadedImage {
+  url: string
+}
+
+/** 图片单文件上限 5 MiB（服务端 /api/uploads 同限额） */
+export const MAX_NOTE_IMAGE_BYTES = 5 * 1024 * 1024
+
+/**
+ * 上传图片到本地服务（服务端落 <data>/uploads/，返回 /api/uploads/xxx 引用）。
+ * Content-Type 必须是图片自身类型：服务端按它做格式白名单与扩展名映射。
+ */
+export async function uploadImage(file: Blob, signal?: AbortSignal): Promise<UploadedImage> {
+  if (file.size > MAX_NOTE_IMAGE_BYTES) throw new Error('图片超过 5 MiB 上限')
+  const res = await fetch('/api/uploads', {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+    signal,
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const errBody = (await res.json()) as { error?: string }
+      if (errBody.error) msg = errBody.error
+    } catch { /* 非 JSON 响应，保留默认消息 */ }
+    throw new Error(msg)
+  }
+  return (await res.json()) as UploadedImage
+}
+
 // ---------- AI 助手（全局，含训练计划讨论/修改） ----------
 
 export interface PlanChatTurn {

@@ -40,6 +40,7 @@ import { syncRoutes } from './routes/sync.ts';
 import { templatesRoutes } from './routes/templates.ts';
 import { todayRoutes } from './routes/today.ts';
 import { updateRoutes, APP_VERSION } from './routes/update.ts';
+import { uploadsRoutes } from './routes/uploads.ts';
 import { widgetRoutes, setWidgetPublicDir } from './routes/widget.ts';
 import { setSchemaSql } from './db/index.ts';
 import { setBuiltinBankJson, seedBuiltinBank } from './db/builtinBank.ts';
@@ -106,6 +107,7 @@ export function startServer(): { app: Express; port: number; config: AppConfig }
   app.use('/api/export', exportRoutes(db));
   app.use('/api/problems', problemsRoutes(db));
   app.use('/api/reviews', reviewsRoutes(db));
+  app.use('/api/uploads', uploadsRoutes({ uploadsDir: path.join(config.dataDir, 'uploads') }));
   app.use('/api/today', todayRoutes(db));
   app.use('/api/templates', templatesRoutes(db, { dataDir: config.dataDir }));
   app.use('/api/contests', contestsRoutes());

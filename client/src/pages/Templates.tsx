@@ -40,6 +40,8 @@ import PageHeader from '../components/PageHeader'
 import StatStrip from '../components/StatStrip'
 import Markdown from '../components/Markdown'
 import CodeEditor from '../components/CodeEditor'
+import NoteEditor from '../components/NoteEditor'
+import NotePreview from '../components/NotePreview'
 import IndentSwitch from '../components/IndentSwitch'
 import { tagColor } from '../ui'
 import { saveUrlAsFile } from '../download'
@@ -735,7 +737,7 @@ export default function Templates() {
                                 </Link>
                               )}
                             </Space>
-                            {t.note && <p className="task-note">📒 {t.note}</p>}
+                            {t.note && <NotePreview text={t.note} />}
                           </div>
                         </div>
                       )}
@@ -748,7 +750,7 @@ export default function Templates() {
         </section>
       </div>
 
-      {/* 学习笔记弹窗 */}
+      {/* 学习笔记弹窗：与复习笔记同款编辑器（Markdown 工具栏 + 粘贴图片 + 预览） */}
       <Modal
         title={`学习笔记 · ${noteEditing?.name ?? ''}`}
         open={noteEditing !== null}
@@ -756,13 +758,18 @@ export default function Templates() {
         onOk={saveNote}
         okText="保存"
         cancelText="取消"
+        width={880}
       >
-        <Input.TextArea
-          rows={4}
-          value={noteDraft}
-          onChange={(e) => setNoteDraft(e.target.value)}
-          placeholder="自己的理解、踩过的坑、与哪些题联系紧密……"
-        />
+        {noteEditing && (
+          <NoteEditor
+            key={noteEditing.id}
+            value={noteDraft}
+            onChange={setNoteDraft}
+            height={420}
+            maxLength={20000}
+            placeholder="自己的理解、踩过的坑、与哪些题联系紧密……（Markdown 语法，可直接粘贴 / 拖入截图）"
+          />
+        )}
       </Modal>
 
       {/* 自建模板新建 / 编辑弹窗 */}

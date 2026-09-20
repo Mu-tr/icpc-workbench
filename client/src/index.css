@@ -2683,3 +2683,142 @@ body {
 .list-item-row.is-drag-over-after {
   box-shadow: inset 0 -2px 0 var(--brand);
 }
+
+/* ---------- 笔记编辑器（复习笔记 / 学习笔记，洛谷题解式排版） ----------
+   外框与 CodeEditor 同一设计语言：var(--line) 描边 + var(--surface-inset) 底 */
+.note-editor {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.note-editor .code-editor {
+  border: none;
+  border-radius: 0;
+}
+
+.note-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.note-editor-toolbar .note-tool-btn {
+  padding: 0 7px;
+  color: var(--text-2);
+}
+
+.note-editor-toolbar .note-tool-btn:hover {
+  color: var(--brand);
+}
+
+.note-tool-glyph {
+  font-family: 'Cascadia Code', ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.note-tool-divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 5px;
+  background: var(--line);
+}
+
+.note-editor-spacer {
+  flex: 1;
+}
+
+.note-editor-body {
+  display: flex;
+  align-items: stretch;
+}
+
+.note-editor-pane {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+
+.note-editor-preview {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow: auto;
+  padding: 8px 14px;
+  border-left: 1px solid var(--line);
+}
+
+.note-editor-preview-full {
+  flex: 1 1 100%;
+  border-left: none;
+}
+
+/* 预览/卡片里的笔记图片：限制宽度并加淡描边，避免大图撑爆面板 */
+.note-editor-preview img,
+.note-preview-md img {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--line-soft);
+}
+
+/* ---------- 卡片里的笔记预览（NotePreview）：限高折叠 + 展开/收起 ---------- */
+.note-preview {
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.note-preview-md {
+  max-height: 220px;
+  overflow: hidden;
+  position: relative;
+  font-size: 12.5px;
+}
+
+.note-preview-md .markdown-body {
+  font-size: 12.5px;
+}
+
+.note-preview-md .markdown-body h1 {
+  font-size: 15px;
+}
+
+.note-preview-md .markdown-body h2 {
+  font-size: 14px;
+  margin-top: 14px;
+}
+
+.note-preview-md .markdown-body h3,
+.note-preview-md .markdown-body h4 {
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+.note-preview-md[data-clipped]::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 44px;
+  background: linear-gradient(transparent, var(--surface, #fff));
+  pointer-events: none;
+}
+
+.note-preview[data-expanded] .note-preview-md {
+  max-height: none;
+}
+
+.note-preview[data-expanded] .note-preview-md[data-clipped]::after {
+  content: none;
+}
+
+.note-preview-toggle {
+  margin-top: 2px;
+  padding: 0;
+  font-size: 12px;
+  color: var(--brand);
+  background: none;
+  border: none;
+  cursor: pointer;
+}

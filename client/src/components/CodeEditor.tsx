@@ -4,6 +4,7 @@ import { cpp } from '@codemirror/lang-cpp'
 import { markdown as markdownLang } from '@codemirror/lang-markdown'
 import { HighlightStyle, indentUnit, syntaxHighlighting } from '@codemirror/language'
 import { EditorView, keymap } from '@codemirror/view'
+import type { Extension } from '@codemirror/state'
 import { tags as t } from '@lezer/highlight'
 import { useMemo } from 'react'
 import { useIndentSize } from '../editorSettings'
@@ -21,6 +22,10 @@ interface CodeEditorProps {
   maxLength?: number
   /** 只读模式：隐藏光标、禁用编辑，用于代码展示 */
   readOnly?: boolean
+  /** 编辑器创建后的回调：拿到 EditorView 引用（NoteEditor 工具栏插入语法用） */
+  onCreateEditor?: (view: EditorView) => void
+  /** 额外扩展（粘贴/拖拽图片等 DOM 事件处理）：调用方用 useMemo/ref 保持引用稳定 */
+  extraExtensions?: Extension[]
 }
 
 /**
@@ -78,6 +83,8 @@ export default function CodeEditor({
   placeholder,
   maxLength,
   readOnly = false,
+  onCreateEditor,
+  extraExtensions,
 }: CodeEditorProps) {
   const indentSize = useIndentSize()
   const extensions = useMemo(
@@ -87,6 +94,7 @@ export default function CodeEditor({
       indentUnit.of(' '.repeat(indentSize)),
       appTheme,
       syntaxHighlighting(highlight),
+      ...(extraExtensions ?? []),
       ...(readOnly
         ? [
             EditorView.editable.of(false),
@@ -102,7 +110,7 @@ export default function CodeEditor({
         : [keymap.of([indentWithTab])]),
       EditorView.lineWrapping,
     ],
-    [language, indentSize, readOnly],
+    [language, indentSize, readOnly, extraExtensions],
   )
   return (
     <div className="code-editor">
@@ -111,6 +119,7 @@ export default function CodeEditor({
         height={`${height}px`}
         theme={appTheme}
         extensions={extensions}
+        onCreateEditor={(view) => onCreateEditor?.(view)}
         basicSetup={{
           foldGutter: false,
           searchKeymap: false,
