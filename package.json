@@ -2,7 +2,7 @@
   "name": "icpc-workbench",
   "version": "0.5.1",
   "private": true,
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "type": "module",
   "workspaces": [
     "server",

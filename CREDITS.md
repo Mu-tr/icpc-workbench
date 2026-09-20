@@ -1,6 +1,6 @@
 # CREDITS · 第三方依赖与声明
 
-ICPC 备赛工作台 的原创代码、界面设计与品牌图标以 [MIT License](./LICENSE) 发布。
+ICPC 备赛工作台 的原创代码、界面设计与品牌图标以 [GPL-3.0 License](./LICENSE)（GNU 通用公共许可证 v3.0）发布。
 软件构建依赖大量优秀的开源项目，主要直接依赖如下（传递依赖以各自包内声明的许可证为准，
 完整清单可在仓库根目录执行 `npx license-checker --summary` 查看）。
 
