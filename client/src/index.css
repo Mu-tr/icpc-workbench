@@ -2823,6 +2823,22 @@ body {
   cursor: pointer;
 }
 
+/* hidden 形态（复习库）：折叠时不露出笔记内容，「展开/收起」按钮由操作列渲染 */
+.note-preview--hidden .note-preview-toggle {
+  display: block;
+  margin-left: auto;
+  margin-top: 2px;
+}
+
+/* 操作列里的笔记展开/收起按钮：对齐到编辑图标按钮的正下方——
+   右侧让出「移除按钮 24px + Space 间距 6px」，避免盖在删除按钮下方造成误触 */
+.review-item-actions .note-preview-toggle {
+  display: block;
+  margin-left: auto;
+  margin-right: calc(24px + 6px);
+  margin-top: 2px;
+}
+
 /* ---------- 写题历史面板（issue #19，嵌在数据概览的卡片内） ---------- */
 
 .history-platform-bar {

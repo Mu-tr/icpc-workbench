@@ -72,6 +72,32 @@ CREATE TABLE IF NOT EXISTS problems (
 -- 难度过滤/排序（题库页 ORDER BY difficulty、stats 难度分布）在 2 万题规模上依赖此索引
 CREATE INDEX IF NOT EXISTS idx_problems_difficulty ON problems(difficulty);
 
+-- 题目删除墓碑（issue #27 审查反馈）：DELETE /api/problems/:id 与 clean-tags 去重删掉的题号记录在此，
+-- 题库拉取（upsertBankProblems，含每次启动的内置题库播种）与提交同步（insertNormalized 的 sync 来源）
+-- 一律跳过——否则下次同步会把刚删的题目连提交一起重建，删除入口对题库来源的重复行永远清理不掉。
+-- 两个放行口：账号换绑全量重置（clearPlatform）连同该平台墓碑一起清掉，避免新账号提交被静默丢弃；
+-- 手动 CSV 导入（manual 来源）视为用户显式找回，清墓碑后照常入库。
+-- 同时保存删除时刻的题目快照：回收站（POST /api/problems/deleted/restore）据此原样重建题目行；
+-- 快照列之前的旧墓碑行为 NULL（当时无回收站），恢复时退化为「题号即标题」的最小重建。
+-- normalized_key = 去空格、忽略大小写的题号，与 clean-tags 判重（NORMALIZED_KEY_SQL）同一口径：
+-- 墓碑匹配按归一化键而非原始键，否则删掉 '1a' 后题库下发 '1A' 会绕过墓碑再造第三行重复。
+CREATE TABLE IF NOT EXISTS deleted_problems (
+  platform    TEXT NOT NULL,
+  problem_key TEXT NOT NULL,
+  normalized_key TEXT NOT NULL,
+  deleted_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  title            TEXT,
+  difficulty       INTEGER,
+  url              TEXT,
+  tags             TEXT,
+  difficulty_source TEXT,
+  native_difficulty TEXT,
+  difficulty_scale  TEXT,
+  PRIMARY KEY (platform, problem_key)
+);
+-- (platform, normalized_key) 索引由 db/index.ts migrate 创建：老库补 normalized_key 列之前，
+-- 在 schema 里建索引会因列不存在而启动报错。
+
 -- 自建知识点管线（v2）：结构化知识点标注。JSONL（dataDir/knowledge/annotations.jsonl）
 -- 为源真相，本表是启动时幂等重建的查询索引。code 锚定 taxonomy.json（稳定不可改）；
 -- name 为展示名（重载时按当前 taxonomy 刷新）。source: tag / rule / ai / manual，

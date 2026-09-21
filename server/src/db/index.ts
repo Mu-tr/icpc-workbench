@@ -69,6 +69,18 @@ function migrate(db: Db): void {
   // v0.6: 难度双标度——保留平台原生难度原文与所属标度（便于平台改档后重算 + UI 展示）
   if (!problemCols.has('native_difficulty')) db.exec('ALTER TABLE problems ADD COLUMN native_difficulty TEXT');
   if (!problemCols.has('difficulty_scale')) db.exec('ALTER TABLE problems ADD COLUMN difficulty_scale TEXT');
+  // 题目删除墓碑的题目快照列（回收站恢复依据）；无表则 schema.sql 已建全列，这里只补老表
+  const tombstoneCols = columnsOf('deleted_problems');
+  for (const col of ['title', 'url', 'tags', 'difficulty_source', 'native_difficulty', 'difficulty_scale']) {
+    if (tombstoneCols.size > 0 && !tombstoneCols.has(col)) db.exec(`ALTER TABLE deleted_problems ADD COLUMN ${col} TEXT`);
+  }
+  if (tombstoneCols.size > 0 && !tombstoneCols.has('difficulty')) db.exec('ALTER TABLE deleted_problems ADD COLUMN difficulty INTEGER');
+  // 墓碑归一化键（与 clean-tags NORMALIZED_KEY_SQL 同口径）：老行回填一次即可
+  if (tombstoneCols.size > 0 && !tombstoneCols.has('normalized_key')) {
+    db.exec('ALTER TABLE deleted_problems ADD COLUMN normalized_key TEXT');
+    db.exec("UPDATE deleted_problems SET normalized_key = LOWER(REPLACE(problem_key, ' ', '')) WHERE normalized_key IS NULL");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_deleted_problems_norm ON deleted_problems(platform, normalized_key)');
   mergeSlashedCfKeys(db);
   // v0.4.5 数据修复：洛谷秒级时间戳曾被按毫秒解析（见 fixLuoguTimestamps）
   fixLuoguTimestamps(db);

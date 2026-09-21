@@ -11,8 +11,9 @@ import { backfillDifficulties } from '../analysis/difficultyBackfill.ts';
 import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBank, fetchAtcoderBank, fetchDaimayuanBank, fetchJisuankeBank } from '../adapters/problemBank.ts';
 import type { LuoguProblemType } from '../adapters/problemBank.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
-import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr } from '../knowledge/store.ts';
+import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr, appendAnnotations, effectiveDataDir, tombstoneLine } from '../knowledge/store.ts';
 import { isValidCode } from '../knowledge/taxonomy.ts';
+import { annotateProblemsL1 } from '../knowledge/pipeline.ts';
 import { throttledFetch } from '../net/hostThrottle.ts';
 
 interface ProblemRow {
@@ -30,6 +31,20 @@ interface ProblemRow {
   attempts: number;
   ac_count: number;
   last_ac_at: string | null;
+}
+
+/** deleted_problems 墓碑行（含删除时刻的题目快照，回收站恢复依据；快照列对旧墓碑可为 null） */
+interface ProblemSnapshot {
+  platform: string;
+  problem_key: string;
+  deleted_at: string;
+  title: string | null;
+  difficulty: number | null;
+  url: string | null;
+  tags: string | null;
+  difficulty_source: string | null;
+  native_difficulty: string | null;
+  difficulty_scale: string | null;
 }
 
 /** 难度分桶（与客户端 DIFF_BUCKETS / analysis/stats.bucketForDifficulty 同口径） */
@@ -436,10 +451,23 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
     }
   }));
 
+  // GET /api/problems/duplicates → 「平台 + 标题 + 归一化题号完全相同」的重复题分组预览
+  // 供「合并与过滤」确认弹窗展示将要删除的组（与 clean-tags 的去重共用 findDuplicateGroups 的
+  // 保留策略：每组保留有提交记录且 id 最老的行）。
+  r.get('/duplicates', (_req, res) => {
+    res.json(findDuplicateGroups(db));
+  });
+
   // POST /api/problems/clean-tags
   // 物理清洗库内所有题目的标签（历史数据修复操作）：
   // - 归并：英文别名 → 规范名（dp → 动态规划、binary search → 二分查找），并去重
   // - 过滤：噪声标签（年份/赛事/地区/题型事务等非算法维度）
+  // - 去重（issue #27 讨论）：「平台 + 标题 + 归一化题号完全相同」的重复题每组保留 1 条
+  //   （优先保留有提交记录的行——用户刷题记录锚在上面，再取 id 最老的），
+  //   其余删除并把提交/卡点/计划任务并入保留行；复习条目同题同用户唯一，
+  //   保留行已有则丢弃重复行的；知识点标注随行删除（JSONL 补墓碑防复活）；
+  //   被删题号记入 deleted_problems 墓碑，防题库重拉复活（见 schema.sql 该表注释）。
+  //   只按「平台 + 标题」判重会误删跨轮次撞名的不同题（实测 403 组 / 621 道），故加题号归一化。
   // 注：新写入路径已「写入即净化」（见 import/problemWritePolicy.ts purifyTags），
   // 新入库的题再跑本接口结果不变（幂等）；保留它只为修复引入净化前遗留的历史数据。
   r.post('/clean-tags', asyncHandler(async (_req, res) => {
@@ -463,7 +491,76 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
       db.exec('ROLLBACK');
       throw e;
     }
-    res.json({ ok: true, total: rows.length, problemsCleaned, tagsRemoved });
+
+    // 标签清洗后跑去重：每组「平台 + 标题 + 归一化题号完全相同」只留一条，引用并入保留行
+    const duplicateGroups = findDuplicateGroups(db);
+    let duplicatesRemoved = 0;
+    const tombstones: Array<{ platform: string; problemKey: string }> = [];
+    const markDeleted = db.prepare(
+      `INSERT OR REPLACE INTO deleted_problems
+         (platform, problem_key, normalized_key, title, difficulty, url, tags,
+          difficulty_source, native_difficulty, difficulty_scale)
+       VALUES (?, ?, LOWER(REPLACE(?, ' ', '')), ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const problemById = db.prepare(
+      `SELECT platform, problem_key, title, difficulty, url, tags,
+              difficulty_source, native_difficulty, difficulty_scale
+         FROM problems WHERE id = ?`,
+    );
+    db.exec('BEGIN');
+    try {
+      for (const g of duplicateGroups) {
+        for (const dup of g.remove) {
+          db.prepare('UPDATE submissions SET problem_id = ? WHERE problem_id = ?').run(g.keep.id, dup.id);
+          db.prepare('UPDATE submission_intents SET problem_id = ? WHERE problem_id = ?').run(g.keep.id, dup.id);
+          db.prepare('UPDATE plan_tasks SET problem_id = ? WHERE problem_id = ?').run(g.keep.id, dup.id);
+          // 复习条目 (user_id, problem_id) 唯一：保留行已有同一用户的复习条目时丢弃重复行的
+          db.prepare(
+            `UPDATE review_items SET problem_id = ? WHERE problem_id = ?
+               AND NOT EXISTS (SELECT 1 FROM review_items r WHERE r.user_id = review_items.user_id AND r.problem_id = ?)`,
+          ).run(g.keep.id, dup.id, g.keep.id);
+          db.prepare('DELETE FROM review_items WHERE problem_id = ?').run(dup.id);
+          db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(g.platform, dup.problemKey);
+          db.prepare('DELETE FROM knowledge_queue WHERE platform = ? AND problem_key = ?').run(g.platform, dup.problemKey);
+          const dupRow = problemById.get(dup.id) as NonNullable<ReturnType<typeof problemById.get>>;
+          db.prepare('DELETE FROM problems WHERE id = ?').run(dup.id);
+          // 重复行多来自题库（如带空格的脏题号），不记墓碑则下次拉题库/播种原样复活；
+          // 墓碑带快照，回收站可原样找回
+          markDeleted.run(
+            g.platform,
+            dup.problemKey,
+            dup.problemKey,
+            dupRow.title,
+            dupRow.difficulty,
+            dupRow.url,
+            dupRow.tags,
+            dupRow.difficulty_source,
+            dupRow.native_difficulty,
+            dupRow.difficulty_scale,
+          );
+          tombstones.push({ platform: g.platform, problemKey: dup.problemKey });
+          duplicatesRemoved += 1;
+        }
+      }
+      // JSONL 墓碑在事务 COMMIT 前追加（与 DELETE /:id 同款时序），防止重启重放复活被删行的标注
+      const dataDir = effectiveDataDir();
+      if (dataDir && tombstones.length > 0) {
+        appendAnnotations(
+          dataDir,
+          tombstones.flatMap((t) => [
+            tombstoneLine(t.platform, t.problemKey, 'rule'),
+            tombstoneLine(t.platform, t.problemKey, 'tag'),
+            tombstoneLine(t.platform, t.problemKey, 'ai'),
+            tombstoneLine(t.platform, t.problemKey, 'manual'),
+          ]),
+        );
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    res.json({ ok: true, total: rows.length, problemsCleaned, tagsRemoved, duplicatesRemoved });
   }));
 
   // POST /api/problems/backfill-difficulty
@@ -537,6 +634,166 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
     res.json({ items: rows });
   });
 
+  // DELETE /api/problems/:id → 删除题目（issue #27：题库重复题目没有删除入口）。
+  // UNIQUE(platform, problem_key) 挡住同库重复行，但跨平台镜像（洛谷 AT ↔ AtCoder 原题）
+  // 与误导入仍会产生用户想清掉的行 —— 行留着会持续污染难度分布、标签分面与待选题池。
+  // 题目行是提交/复习/卡点/知识点标注的锚，删除必须连带清理（外键已开启，漏一处即报错）；
+  // 训练计划任务保留（标题/链接冗余在任务行上），只解除题目引用。
+  // 知识点标注的源真相在 JSONL，删除前必须各来源补一行墓碑，防止下次启动重放时复活。
+  // 题目行本身还记一道 deleted_problems 墓碑：题库拉取与提交同步都走 (platform, problem_key)
+  // upsert，不记墓碑则下次同步连提交一起重建（清理永远不生效），语义见 schema.sql 该表注释。
+  r.delete('/:id', (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
+    const problem = db
+      .prepare(
+        `SELECT id, platform, problem_key, title, difficulty, url, tags,
+                difficulty_source, native_difficulty, difficulty_scale
+           FROM problems WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          id: number;
+          platform: string;
+          problem_key: string;
+          title: string;
+          difficulty: number | null;
+          url: string | null;
+          tags: string;
+          difficulty_source: string | null;
+          native_difficulty: string | null;
+          difficulty_scale: string | null;
+        }
+      | undefined;
+    if (!problem) return res.status(404).json({ error: '题目不存在（可能已被删除）' });
+
+    const deletedSubmissions = (
+      db.prepare('SELECT COUNT(*) AS c FROM submissions WHERE problem_id = ?').get(id) as { c: number }
+    ).c;
+    const deletedReviewItems = (
+      db.prepare('SELECT COUNT(*) AS c FROM review_items WHERE problem_id = ?').get(id) as { c: number }
+    ).c;
+
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM submission_intents WHERE problem_id = ?').run(id);
+      db.prepare('DELETE FROM submissions WHERE problem_id = ?').run(id);
+      db.prepare('DELETE FROM review_items WHERE problem_id = ?').run(id);
+      db.prepare('UPDATE plan_tasks SET problem_id = NULL WHERE problem_id = ?').run(id);
+      db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(
+        problem.platform,
+        problem.problem_key,
+      );
+      // 历史遗留表无读取方，但主键同为 (platform, problem_key)，一并清掉避免残留
+      db.prepare('DELETE FROM knowledge_queue WHERE platform = ? AND problem_key = ?').run(
+        problem.platform,
+        problem.problem_key,
+      );
+      db.prepare('DELETE FROM problems WHERE id = ?').run(id);
+      // 快照随墓碑一起落库：回收站恢复题目行靠它原样重建（提交/复习/卡点仍不可恢复）
+      db.prepare(
+        `INSERT OR REPLACE INTO deleted_problems
+           (platform, problem_key, normalized_key, title, difficulty, url, tags,
+            difficulty_source, native_difficulty, difficulty_scale)
+         VALUES (?, ?, LOWER(REPLACE(?, ' ', '')), ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        problem.platform,
+        problem.problem_key,
+        problem.problem_key,
+        problem.title,
+        problem.difficulty,
+        problem.url,
+        problem.tags,
+        problem.difficulty_source,
+        problem.native_difficulty,
+        problem.difficulty_scale,
+      );
+      // JSONL 墓碑在事务 COMMIT 前追加（与 setManualKeypoints 同款时序）：
+      // 崩溃时 JSONL 多出的墓碑行在下次启动重放自愈，不会留下半删状态
+      const dataDir = effectiveDataDir();
+      if (dataDir) {
+        appendAnnotations(dataDir, [
+          tombstoneLine(problem.platform, problem.problem_key, 'rule'),
+          tombstoneLine(problem.platform, problem.problem_key, 'tag'),
+          tombstoneLine(problem.platform, problem.problem_key, 'ai'),
+          tombstoneLine(problem.platform, problem.problem_key, 'manual'),
+        ]);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    res.json({ ok: true, deletedSubmissions, deletedReviewItems });
+  });
+
+  // GET /api/problems/deleted → 回收站：被删除题目的墓碑清单（带删除时刻快照）
+  r.get('/deleted', (_req, res) => {
+    const rows = db
+      .prepare(
+        `SELECT platform, problem_key, title, difficulty, deleted_at
+           FROM deleted_problems ORDER BY deleted_at DESC, ROWID DESC`,
+      )
+      .all();
+    res.json(rows);
+  });
+
+  // POST /api/problems/deleted/restore  body: { platform, problemKey } → 误删恢复（issue #27 补充）。
+  // 只重建题目行本身（墓碑快照原样落回，含难度/标签；无快照的旧墓碑退化为「题号即标题」），
+  // 并清掉墓碑恢复同步/题库对该题号的正常收录。提交、复习、卡点与人工知识点标注
+  // 在删除时已不可逆清除（JSONL 墓碑防重放复活），这里如实不找回，只重跑 L1 规则/tag 标注。
+  r.post('/deleted/restore', (req, res) => {
+    const { platform, problemKey } = req.body ?? {};
+    if (typeof platform !== 'string' || typeof problemKey !== 'string' || !problemKey.trim()) {
+      return res.status(400).json({ error: 'platform 与 problemKey 必填' });
+    }
+    const tomb = db
+      .prepare('SELECT * FROM deleted_problems WHERE platform = ? AND problem_key = ?')
+      .get(platform, problemKey) as ProblemSnapshot | undefined;
+    if (!tomb) return res.status(404).json({ error: '回收站中没有该题（可能已恢复）' });
+
+    const existing = db
+      .prepare('SELECT id FROM problems WHERE platform = ? AND problem_key = ?')
+      .get(platform, problemKey) as { id: number } | undefined;
+    if (existing) {
+      // 手动导入等路径已重建过题目：只清墓碑，不碰现有行（它携带更近期的数据）
+      db.prepare('DELETE FROM deleted_problems WHERE platform = ? AND problem_key = ?').run(platform, problemKey);
+      return res.json({ ok: true, recreated: false });
+    }
+    db.exec('BEGIN');
+    try {
+      db.prepare(
+        `INSERT INTO problems
+           (platform, problem_key, title, difficulty, url, tags,
+            difficulty_source, native_difficulty, difficulty_scale)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        platform,
+        problemKey,
+        tomb.title ?? problemKey,
+        tomb.difficulty ?? null,
+        tomb.url ?? null,
+        tomb.tags ?? '[]',
+        tomb.difficulty_source ?? null,
+        tomb.native_difficulty ?? null,
+        tomb.difficulty_scale ?? null,
+      );
+      db.prepare('DELETE FROM deleted_problems WHERE platform = ? AND problem_key = ?').run(platform, problemKey);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    try {
+      annotateProblemsL1(db, [
+        { platform, problemKey, title: tomb.title ?? problemKey, tags: tomb.tags ?? '[]' },
+      ]);
+    } catch (e) {
+      console.error(`[knowledge] 恢复题目后 L1 标注失败（不影响恢复）: ${(e as Error).message}`);
+    }
+    res.json({ ok: true, recreated: true });
+  });
+
   return r;
 }
 
@@ -549,6 +806,56 @@ function bucketName(difficulty: number | null): string {
   if (difficulty < 1900) return '1600-1899';
   if (difficulty < 2200) return '1900-2199';
   return '2200+';
+}
+
+/** 「平台 + 标题 + 归一化题号完全相同」的重复题分组（issue #27：合并与过滤顺带去重）。
+ * 归一化题号 = 去空格、忽略大小写：'1234A' / '1234a' / ' 1234A' 视为同一题号。
+ * 只有三者都相同才算重复——题库里存在大量跨轮次撞名的**不同题**（CF 11D 与 558E 都叫
+ * “A Simple Task”），仅按「平台 + 标题」判重会一次误删几百道真实题目（实测 403 组）。
+ * 保留策略：优先保留有提交记录的行（用户刷题记录锚在上面），再取 id 最老的；
+ * GET /duplicates 预览与 clean-tags 的去重执行共用本函数，保证口径一致。 */
+interface DuplicateGroup {
+  platform: string;
+  title: string;
+  keep: { id: number; problemKey: string; attempts: number };
+  remove: Array<{ id: number; problemKey: string; attempts: number }>;
+}
+
+const NORMALIZED_KEY_SQL = "LOWER(REPLACE(problem_key, ' ', ''))";
+
+function findDuplicateGroups(db: Db): DuplicateGroup[] {
+  const groups = db
+    .prepare(
+      `SELECT platform, title, ${NORMALIZED_KEY_SQL} AS normalizedKey
+       FROM problems
+       GROUP BY platform, title, ${NORMALIZED_KEY_SQL}
+       HAVING COUNT(*) > 1`,
+    )
+    .all() as Array<{ platform: string; title: string; normalizedKey: string }>;
+  const rowsOf = db.prepare(
+    `SELECT p.id, p.problem_key AS problemKey,
+            (SELECT COUNT(*) FROM submissions s WHERE s.problem_id = p.id) AS attempts
+       FROM problems p
+      WHERE p.platform = ? AND p.title = ? AND ${NORMALIZED_KEY_SQL} = ?
+      ORDER BY attempts DESC, p.id ASC`,
+  );
+  const out: DuplicateGroup[] = [];
+  for (const g of groups) {
+    const rows = rowsOf.all(g.platform, g.title, g.normalizedKey) as Array<{
+      id: number;
+      problemKey: string;
+      attempts: number;
+    }>;
+    const keep = rows[0];
+    if (!keep || rows.length < 2) continue;
+    out.push({
+      platform: g.platform,
+      title: g.title,
+      keep: { id: keep.id, problemKey: keep.problemKey, attempts: keep.attempts },
+      remove: rows.slice(1).map((r) => ({ id: r.id, problemKey: r.problemKey, attempts: r.attempts })),
+    });
+  }
+  return out;
 }
 
 /**

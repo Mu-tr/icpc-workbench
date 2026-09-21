@@ -19,7 +19,7 @@ import {
   Upload,
 } from 'antd'
 import type { TreeSelectProps } from 'antd'
-import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
+import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, RestOutlined, TagsOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useSearchParams } from 'react-router-dom'
 import SyncProgressHint from '../components/SyncProgressHint'
@@ -33,7 +33,7 @@ import PlatformTag from '../components/PlatformTag'
 import { difficultyColor, formatDifficulty, PLATFORM_COLOR, platformName, tagColor } from '../ui'
 import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
 import { codeOptionsFromTags } from '../intentOptions'
-import { get, post, put } from '../api'
+import { del, get, post, put } from '../api'
 
 /** GET /api/knowledge/taxonomy 响应（服务端 taxonomy.json 结构） */
 interface TaxonomyDoc {
@@ -66,6 +66,23 @@ interface ImportPreviewResp {
     problemCreates: number
     problemUpdates: number
   }
+}
+
+/** GET /api/problems/duplicates 条目：「平台 + 标题 + 归一化题号（去空格、忽略大小写）完全相同」的重复题分组（合并与过滤的预览） */
+interface DuplicateGroup {
+  platform: string
+  title: string
+  keep: { id: number; problemKey: string; attempts: number }
+  remove: Array<{ id: number; problemKey: string; attempts: number }>
+}
+
+/** GET /api/problems/deleted 条目：删除墓碑（回收站），title/difficulty 为删除时刻快照，旧墓碑可为 null */
+interface DeletedRow {
+  platform: string
+  problem_key: string
+  title: string | null
+  difficulty: number | null
+  deleted_at: string
 }
 
 interface ProblemRow {
@@ -157,6 +174,9 @@ export default function Problems() {
   /** 「导入刷题记录」弹窗当前页签（受控：SyncTab 用它判断自己是否活跃，从而刷新/轮询续拉状态） */
   const [importTab, setImportTab] = useState('sync')
   const [cleaning, setCleaning] = useState(false)
+  // 回收站（issue #27 误删恢复）：null = 旧服务端无此接口 → 隐藏入口；否则为墓碑清单
+  const [trash, setTrash] = useState<DeletedRow[] | null>(null)
+  const [trashOpen, setTrashOpen] = useState(false)
   const [manualForm] = Form.useForm()
   // 知识点管线（P4）：覆盖率 + 批跑/无 Key 导出入口
   const [pipelineOpen, setPipelineOpen] = useState(false)
@@ -234,11 +254,27 @@ export default function Problems() {
   // 右侧分布图用「不带筛选、但同样遵守『含题库未做题』开关」的口径。
   // 必须与列表的候选集一致：服务端缺省只显示做过的题，若这里漏掉 bank=1，
   // 分布合计会与「共 N 题」对不上（默认 includeBank=true，差异约 1.8 万）。
-  useEffect(() => {
+  // 提取成函数：删除/清洗会改变全库口径的计数，须与 reloadFacets 一并刷新
+  const reloadUnfilteredFacets = useCallback(() => {
     get<ProblemsFacets>(`/api/problems/facets${includeBank ? '?bank=1' : ''}`)
       .then(setUnfilteredFacets)
       .catch(() => { /* 同上 */ })
   }, [includeBank])
+
+  useEffect(() => {
+    reloadUnfilteredFacets()
+  }, [reloadUnfilteredFacets])
+
+  // 回收站墓碑清单：旧服务端 GET /deleted 404 → 置 null 隐藏入口（与分面同口径静默降级）
+  const loadTrash = useCallback(() => {
+    get<DeletedRow[]>('/api/problems/deleted')
+      .then(setTrash)
+      .catch(() => setTrash(null))
+  }, [])
+
+  useEffect(() => {
+    loadTrash()
+  }, [loadTrash])
 
   // ---------- 知识点管线 ----------
 
@@ -338,27 +374,69 @@ export default function Problems() {
     }
   }
 
-  // 一键标签清洗：归并英文别名为中文规范名 + 清除噪声标签（写入数据库，全站生效）
-  const cleanTags = () => {
+  // 一键清洗：归并英文别名为中文规范名 + 清除噪声标签 + 删除「平台 + 标题 + 归一化题号完全
+  // 相同」的重复题（issue #27，写入数据库，全站生效）。先取重复题分组做确认预览；
+  // 旧版服务端没有预览接口时静默按「无重复」处理，只做标签清洗。
+  const cleanTags = async () => {
+    setCleaning(true)
+    let dupes: DuplicateGroup[] = []
+    try {
+      dupes = await get<DuplicateGroup[]>('/api/problems/duplicates')
+    } catch {
+      dupes = []
+    }
+    setCleaning(false)
     modal.confirm({
-      title: '合并与过滤所有标签？',
-      content:
-        '将把库内全部题目的英文别名归并为中文规范名（dp → 动态规划、binary search → 二分），并清除年份、赛事、地区等噪声标签。掌握度地图、数据概览、弱项分析会自动同步。',
-      okText: '开始清洗',
+      title: dupes.length > 0 ? '合并标签并删除重复题目？' : '合并与过滤所有标签？',
+      width: 520,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ margin: '4px 0' }}>
+            将把库内全部题目的英文别名归并为中文规范名（dp → 动态规划、binary search → 二分），
+            并清除年份、赛事、地区等噪声标签。掌握度地图、数据概览、弱项分析会自动同步。
+          </p>
+          {dupes.length > 0 && (
+            <>
+              <p style={{ margin: '4px 0' }}>
+                另发现 <b>{dupes.length}</b> 组「平台 + 标题 + 题号（忽略空格与大小写）完全相同」的重复题目：
+                每组保留 1 条（优先保留有提交记录的），其余删除——提交 / 卡点 / 计划任务并入保留题，
+                复习条目与保留题冲突时丢弃重复行的。同标题但题号不同的题（CF 各轮撞名）不算重复，不会被动。
+              </p>
+              <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                {dupes.slice(0, 5).map((g) => (
+                  <li key={`${g.platform}/${g.title}/${g.keep.problemKey}`}>
+                    {platformName(g.platform as PlatformId)}「{g.title}」：保留 {g.keep.problemKey}，删除{' '}
+                    {g.remove.map((d) => d.problemKey).join('、')}
+                  </li>
+                ))}
+              </ul>
+              {dupes.length > 5 && <span style={{ color: '#8993a2' }}>… 共 {dupes.length} 组</span>}
+            </>
+          )}
+        </div>
+      ),
+      okText: dupes.length > 0 ? `开始清洗（去重 ${dupes.length} 组）` : '开始清洗',
       cancelText: '取消',
       onOk: async () => {
         setCleaning(true)
         try {
-          const r = await post<{ total: number; problemsCleaned: number; tagsRemoved: number }>(
+          const r = await post<{ total: number; problemsCleaned: number; tagsRemoved: number; duplicatesRemoved: number }>(
             '/api/problems/clean-tags',
             {},
           )
+          const parts: string[] = []
+          if (r.problemsCleaned > 0) parts.push(`${r.problemsCleaned} 道题的标签已更新，共清除/归并 ${r.tagsRemoved} 个标签`)
+          // 旧版服务端无 duplicatesRemoved 字段（undefined），不会误报 0
+          if (r.duplicatesRemoved > 0) parts.push(`删除重复题目 ${r.duplicatesRemoved} 道（引用已并入保留题）`)
           message.success(
-            r.problemsCleaned > 0
-              ? `清洗完成：${r.problemsCleaned} 道题的标签已更新，共清除/归并 ${r.tagsRemoved} 个标签`
-              : `所有 ${r.total} 道题的标签已经是干净的，无需清洗`,
+            parts.length > 0
+              ? `清洗完成：${parts.join('；')}`
+              : `所有 ${r.total} 道题的标签已经是干净的，也没有重复题目`,
           )
           loadRef.current()
+          reloadFacets()
+          // 去重会改变全库题数：右侧分布图（无筛选口径）也要刷新
+          reloadUnfilteredFacets()
         } catch (e) {
           message.error((e as Error).message)
         } finally {
@@ -489,6 +567,80 @@ export default function Problems() {
     }
   }
 
+  // 删除题目（issue #27：题库重复题目没有删除入口）。用于清理跨平台镜像/误导入的行；
+  // 服务端连带删除该题的提交、复习条目、卡点与知识点标注，此处把代价讲清楚再让用户确认。
+  const removeProblem = (r: ProblemRow) => {
+    modal.confirm({
+      title: `删除题目 ${r.problem_key}？`,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ margin: '4px 0' }}>
+            将一并删除该题的提交记录（{r.attempts} 条）、复习条目、
+            卡点与知识点标注，相关统计同步减少且<b>不可恢复</b>；训练计划里引用该题的任务仅解除关联。
+          </p>
+          <p style={{ margin: '4px 0', color: '#8993a2' }}>
+            仅用于清理重复 / 误导入的题目；如需隐藏题库未做题，关掉「含题库未做题」即可。
+            删除后同步与题库拉取不再重建该题；题目行可在工具栏「回收站」恢复（提交 / 复习 /
+            卡点 / 人工知识点标注不会找回）。
+          </p>
+        </div>
+      ),
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await del<{ ok: boolean; deletedSubmissions: number; deletedReviewItems: number }>(
+            `/api/problems/${r.id}`,
+          )
+          message.success(
+            `已删除 ${r.problem_key}（含提交 ${res.deletedSubmissions} 条、复习条目 ${res.deletedReviewItems} 条）`,
+          )
+          loadRef.current()
+          reloadFacets()
+          reloadUnfilteredFacets()
+          loadTrash()
+        } catch (e) {
+          message.error((e as Error).message)
+        }
+      },
+    })
+  }
+
+  // 回收站恢复：服务端按墓碑快照重建题目行并清墓碑；提交/复习/卡点不复活，弹窗里再确认一次
+  const restoreProblem = (t: DeletedRow) => {
+    modal.confirm({
+      title: `恢复题目 ${t.problem_key}？`,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ margin: '4px 0' }}>
+            将按删除时刻的快照重建题目行（标题 / 难度 / 标签），此后同步与题库拉取恢复正常收录。
+          </p>
+          <p style={{ margin: '4px 0', color: '#8993a2' }}>
+            删除时清掉的提交、复习条目、卡点与人工知识点标注不会找回；同步平台题目下次同步会拉回提交记录。
+          </p>
+        </div>
+      ),
+      okText: '恢复',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await post<{ ok: boolean; recreated: boolean }>(
+            '/api/problems/deleted/restore',
+            { platform: t.platform, problemKey: t.problem_key },
+          )
+          message.success(res.recreated ? `已恢复 ${t.problem_key}` : `${t.problem_key} 已在库中（墓碑已清除）`)
+          loadTrash()
+          loadRef.current()
+          reloadFacets()
+          reloadUnfilteredFacets()
+        } catch (e) {
+          message.error((e as Error).message)
+        }
+      },
+    })
+  }
+
   const uploadProps = {
     beforeUpload: (file: File) => {
       if (!platform) {
@@ -601,8 +753,8 @@ export default function Problems() {
     { title: '提交', dataIndex: 'attempts', width: 70, align: 'right' },
     {
       title: '操作',
-      // 4 个按钮最小内容宽约 182px + 单元格内边距，150 会把「卡在哪」裁出列外
-      width: 200,
+      // 5 个按钮最小内容宽约 214px + 单元格内边距，150 会把「卡在哪」裁出列外
+      width: 232,
       fixed: 'right',
       render: (_v, r) => (
         <Space size={4}>
@@ -628,6 +780,9 @@ export default function Problems() {
               />
             </span>
           </Tooltip>
+          <Tooltip title="删除题目（清理重复 / 误导入；连带删除其提交与复习记录）">
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeProblem(r)} />
+          </Tooltip>
         </Space>
       ),
     },
@@ -648,11 +803,18 @@ export default function Problems() {
                 知识点管线
               </Button>
             </Tooltip>
-            <Tooltip title="归并英文别名为中文规范名，清除噪声标签（写入数据库）">
+            <Tooltip title="归并英文别名为中文规范名、清除噪声标签，并删除平台 + 标题 + 题号（忽略空格与大小写）相同的重复题（写入数据库）">
               <Button icon={<TagsOutlined />} loading={cleaning} onClick={cleanTags}>
                 合并与过滤
               </Button>
             </Tooltip>
+            {trash !== null && trash.length > 0 && (
+              <Tooltip title="回收站：误删的题目可在此恢复题目行（提交/复习/卡点不找回）">
+                <Button icon={<RestOutlined />} onClick={() => setTrashOpen(true)}>
+                  回收站 · {trash.length}
+                </Button>
+              </Tooltip>
+            )}
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setImportOpen(true)}>
               导入题目
             </Button>
@@ -837,8 +999,8 @@ export default function Problems() {
               loading={loading}
               columns={cols}
               dataSource={rows}
-              // 固定列宽合计 818px；容器更窄时出横向滚动条，操作列吸附右缘始终可见
-              scroll={{ x: 940 }}
+              // 固定列宽合计 850px；容器更窄时出横向滚动条，操作列吸附右缘始终可见
+              scroll={{ x: 970 }}
               // 服务端分页：当前页 50 行由后端过滤 + LIMIT 得出，前端不再持有全量数据
               pagination={{
                 current: page,
@@ -1084,6 +1246,61 @@ export default function Problems() {
           style={{ width: '100%' }}
           maxTagCount={8}
           filterTreeNode={(input, node) => String(node?.title ?? '').toLowerCase().includes(input.toLowerCase())}
+        />
+      </Modal>
+
+      {/* 回收站（issue #27 误删恢复）：列出带快照的墓碑，恢复仅重建题目行 */}
+      <Modal
+        title="回收站"
+        open={trashOpen}
+        onCancel={() => setTrashOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <p style={{ color: '#8993a2', fontSize: 12 }}>
+          恢复只按删除时刻的快照重建题目行；其提交、复习条目、卡点与人工知识点标注不会找回。
+          题目行留在回收站不会污染统计，不恢复可放着不管。
+        </p>
+        <Table<DeletedRow>
+          size="small"
+          rowKey={(t) => `${t.platform}/${t.problem_key}`}
+          dataSource={trash ?? []}
+          pagination={false}
+          scroll={{ y: 360 }}
+          columns={[
+            {
+              title: '题目',
+              render: (_v, t) => (
+                <Space size={6}>
+                  <PlatformTag id={t.platform as PlatformId} />
+                  <span className="mono">{t.problem_key}</span>
+                  <span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t.title ?? '（无快照）'}
+                  </span>
+                  {t.difficulty != null && (
+                    <span className="rating-pill mono" style={{ color: difficultyColor(t.difficulty) }}>
+                      {t.difficulty}
+                    </span>
+                  )}
+                </Space>
+              ),
+            },
+            {
+              title: '删除时间',
+              dataIndex: 'deleted_at',
+              width: 150,
+              render: (v: string) => <span style={{ fontSize: 12, color: '#8993a2' }}>{v}</span>,
+            },
+            {
+              title: '操作',
+              width: 80,
+              render: (_v, t) => (
+                <Button size="small" type="link" onClick={() => restoreProblem(t)}>
+                  恢复
+                </Button>
+              ),
+            },
+          ]}
         />
       </Modal>
     </div>

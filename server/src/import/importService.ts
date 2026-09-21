@@ -29,6 +29,10 @@ export function normalizeLanguageCell(v: string | number | null | undefined): st
  * - opts.clearPlatform：先删除该平台旧提交再插入（换账号场景，保证原子性）
  * 供平台同步与手动导入共用。
  *
+ * 删除墓碑（deleted_problems，见 schema.sql）：同步来源命中墓碑 → 题目与提交一起跳过，
+ * 被用户删掉的题不会被下次同步原样复活；手动导入（externalId manual:）视为显式找回，
+ * 清墓碑后照常入库；clearPlatform 换账号重置连同该平台墓碑一起清空。
+ *
  * 难度与标签的统一策略见 problemWritePolicy.ts：
  * - 难度按来源优先级（manual > backfill > sync > bank）覆盖，手动导入(manual:)标记为 manual 来源
  * - 标签**写入即净化**（噪声过滤 + 同义词归并），non-empty 覆盖空值；适配器拿不到标签时保留库内已有
@@ -47,6 +51,14 @@ export function insertNormalized(
      VALUES (?, ?, (SELECT id FROM problems WHERE platform = ? AND problem_key = ?), ?, ?, ?, ?)`,
   );
   const findProblem = db.prepare('SELECT id, title, tags FROM problems WHERE platform = ? AND problem_key = ?');
+  // 墓碑按归一化题号匹配（与 clean-tags 判重的 NORMALIZED_KEY_SQL 同口径）：
+  // 删掉 '1a' 行后，同步下发变体键 '1A' 也必须被挡住，否则会重建同一等价类的第三行
+  const isDeleted = db.prepare(
+    "SELECT 1 AS x FROM deleted_problems WHERE platform = ? AND normalized_key = LOWER(REPLACE(?, ' ', ''))",
+  );
+  const clearDeletedMark = db.prepare(
+    "DELETE FROM deleted_problems WHERE platform = ? AND normalized_key = LOWER(REPLACE(?, ' ', ''))",
+  );
   // 手动导入（externalId 以 manual: 开头）与平台同步数据协调：
   // 同平台同题同结果已存在（无论来源是同步还是手动）→ 跳过，避免重复计数
   const manualDup = db.prepare(
@@ -65,9 +77,18 @@ export function insertNormalized(
         userId,
         opts.clearPlatform,
       );
+      // 换账号是全平台重置：旧账号留下的删除墓碑一并清空，否则新账号的提交会被静默丢弃
+      db.prepare('DELETE FROM deleted_problems WHERE platform = ?').run(opts.clearPlatform);
     }
     for (const s of subs) {
       const isManual = String(s.externalId).startsWith('manual:');
+      if (isDeleted.get(s.problem.platform, s.problem.problemKey)) {
+        if (isManual) clearDeletedMark.run(s.problem.platform, s.problem.problemKey);
+        else {
+          skipped += 1;
+          continue;
+        }
+      }
       const source = isManual ? 'manual' : 'sync';
       (isManual ? upsertManual : upsertSync).run(
         s.problem.platform,
