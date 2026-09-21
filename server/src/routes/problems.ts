@@ -436,10 +436,22 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
     }
   }));
 
+  // GET /api/problems/duplicates → 「平台 + 标题 + 归一化题号完全相同」的重复题分组预览
+  // 供「合并与过滤」确认弹窗展示将要删除的组（与 clean-tags 的去重共用 findDuplicateGroups 的
+  // 保留策略：每组保留有提交记录且 id 最老的行）。
+  r.get('/duplicates', (_req, res) => {
+    res.json(findDuplicateGroups(db));
+  });
+
   // POST /api/problems/clean-tags
   // 物理清洗库内所有题目的标签（历史数据修复操作）：
   // - 归并：英文别名 → 规范名（dp → 动态规划、binary search → 二分查找），并去重
   // - 过滤：噪声标签（年份/赛事/地区/题型事务等非算法维度）
+  // - 去重（issue #27 讨论）：「平台 + 标题 + 归一化题号完全相同」的重复题每组保留 1 条
+  //   （优先保留有提交记录的行——用户刷题记录锚在上面，再取 id 最老的），
+  //   其余删除并把提交/卡点/计划任务并入保留行；复习条目同题同用户唯一，
+  //   保留行已有则丢弃重复行的；知识点标注随行删除（JSONL 补墓碑防复活）。
+  //   只按「平台 + 标题」判重会误删跨轮次撞名的不同题（实测 403 组 / 621 道），故加题号归一化。
   // 注：新写入路径已「写入即净化」（见 import/problemWritePolicy.ts purifyTags），
   // 新入库的题再跑本接口结果不变（幂等）；保留它只为修复引入净化前遗留的历史数据。
   r.post('/clean-tags', asyncHandler(async (_req, res) => {
@@ -463,7 +475,50 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
       db.exec('ROLLBACK');
       throw e;
     }
-    res.json({ ok: true, total: rows.length, problemsCleaned, tagsRemoved });
+
+    // 标签清洗后跑去重：每组「平台 + 标题 + 归一化题号完全相同」只留一条，引用并入保留行
+    const duplicateGroups = findDuplicateGroups(db);
+    let duplicatesRemoved = 0;
+    const tombstones: Array<{ platform: string; problemKey: string }> = [];
+    db.exec('BEGIN');
+    try {
+      for (const g of duplicateGroups) {
+        for (const dup of g.remove) {
+          db.prepare('UPDATE submissions SET problem_id = ? WHERE problem_id = ?').run(g.keep.id, dup.id);
+          db.prepare('UPDATE submission_intents SET problem_id = ? WHERE problem_id = ?').run(g.keep.id, dup.id);
+          db.prepare('UPDATE plan_tasks SET problem_id = ? WHERE problem_id = ?').run(g.keep.id, dup.id);
+          // 复习条目 (user_id, problem_id) 唯一：保留行已有同一用户的复习条目时丢弃重复行的
+          db.prepare(
+            `UPDATE review_items SET problem_id = ? WHERE problem_id = ?
+               AND NOT EXISTS (SELECT 1 FROM review_items r WHERE r.user_id = review_items.user_id AND r.problem_id = ?)`,
+          ).run(g.keep.id, dup.id, g.keep.id);
+          db.prepare('DELETE FROM review_items WHERE problem_id = ?').run(dup.id);
+          db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(g.platform, dup.problemKey);
+          db.prepare('DELETE FROM knowledge_queue WHERE platform = ? AND problem_key = ?').run(g.platform, dup.problemKey);
+          db.prepare('DELETE FROM problems WHERE id = ?').run(dup.id);
+          tombstones.push({ platform: g.platform, problemKey: dup.problemKey });
+          duplicatesRemoved += 1;
+        }
+      }
+      // JSONL 墓碑在事务 COMMIT 前追加（与 DELETE /:id 同款时序），防止重启重放复活被删行的标注
+      const dataDir = effectiveDataDir();
+      if (dataDir && tombstones.length > 0) {
+        appendAnnotations(
+          dataDir,
+          tombstones.flatMap((t) => [
+            tombstoneLine(t.platform, t.problemKey, 'rule'),
+            tombstoneLine(t.platform, t.problemKey, 'tag'),
+            tombstoneLine(t.platform, t.problemKey, 'ai'),
+            tombstoneLine(t.platform, t.problemKey, 'manual'),
+          ]),
+        );
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    res.json({ ok: true, total: rows.length, problemsCleaned, tagsRemoved, duplicatesRemoved });
   }));
 
   // POST /api/problems/backfill-difficulty
@@ -605,6 +660,56 @@ function bucketName(difficulty: number | null): string {
   if (difficulty < 1900) return '1600-1899';
   if (difficulty < 2200) return '1900-2199';
   return '2200+';
+}
+
+/** 「平台 + 标题 + 归一化题号完全相同」的重复题分组（issue #27：合并与过滤顺带去重）。
+ * 归一化题号 = 去空格、忽略大小写：'1234A' / '1234a' / ' 1234A' 视为同一题号。
+ * 只有三者都相同才算重复——题库里存在大量跨轮次撞名的**不同题**（CF 11D 与 558E 都叫
+ * “A Simple Task”），仅按「平台 + 标题」判重会一次误删几百道真实题目（实测 403 组）。
+ * 保留策略：优先保留有提交记录的行（用户刷题记录锚在上面），再取 id 最老的；
+ * GET /duplicates 预览与 clean-tags 的去重执行共用本函数，保证口径一致。 */
+interface DuplicateGroup {
+  platform: string;
+  title: string;
+  keep: { id: number; problemKey: string; attempts: number };
+  remove: Array<{ id: number; problemKey: string; attempts: number }>;
+}
+
+const NORMALIZED_KEY_SQL = "LOWER(REPLACE(problem_key, ' ', ''))";
+
+function findDuplicateGroups(db: Db): DuplicateGroup[] {
+  const groups = db
+    .prepare(
+      `SELECT platform, title, ${NORMALIZED_KEY_SQL} AS normalizedKey
+       FROM problems
+       GROUP BY platform, title, ${NORMALIZED_KEY_SQL}
+       HAVING COUNT(*) > 1`,
+    )
+    .all() as Array<{ platform: string; title: string; normalizedKey: string }>;
+  const rowsOf = db.prepare(
+    `SELECT p.id, p.problem_key AS problemKey,
+            (SELECT COUNT(*) FROM submissions s WHERE s.problem_id = p.id) AS attempts
+       FROM problems p
+      WHERE p.platform = ? AND p.title = ? AND ${NORMALIZED_KEY_SQL} = ?
+      ORDER BY attempts DESC, p.id ASC`,
+  );
+  const out: DuplicateGroup[] = [];
+  for (const g of groups) {
+    const rows = rowsOf.all(g.platform, g.title, g.normalizedKey) as Array<{
+      id: number;
+      problemKey: string;
+      attempts: number;
+    }>;
+    const keep = rows[0];
+    if (!keep || rows.length < 2) continue;
+    out.push({
+      platform: g.platform,
+      title: g.title,
+      keep: { id: keep.id, problemKey: keep.problemKey, attempts: keep.attempts },
+      remove: rows.slice(1).map((r) => ({ id: r.id, problemKey: r.problemKey, attempts: r.attempts })),
+    });
+  }
+  return out;
 }
 
 /**

@@ -68,6 +68,14 @@ interface ImportPreviewResp {
   }
 }
 
+/** GET /api/problems/duplicates 条目：「平台 + 标题 + 归一化题号（去空格、忽略大小写）完全相同」的重复题分组（合并与过滤的预览） */
+interface DuplicateGroup {
+  platform: string
+  title: string
+  keep: { id: number; problemKey: string; attempts: number }
+  remove: Array<{ id: number; problemKey: string; attempts: number }>
+}
+
 interface ProblemRow {
   id: number
   platform: PlatformId
@@ -338,27 +346,67 @@ export default function Problems() {
     }
   }
 
-  // 一键标签清洗：归并英文别名为中文规范名 + 清除噪声标签（写入数据库，全站生效）
-  const cleanTags = () => {
+  // 一键清洗：归并英文别名为中文规范名 + 清除噪声标签 + 删除「平台 + 标题 + 归一化题号完全
+  // 相同」的重复题（issue #27，写入数据库，全站生效）。先取重复题分组做确认预览；
+  // 旧版服务端没有预览接口时静默按「无重复」处理，只做标签清洗。
+  const cleanTags = async () => {
+    setCleaning(true)
+    let dupes: DuplicateGroup[] = []
+    try {
+      dupes = await get<DuplicateGroup[]>('/api/problems/duplicates')
+    } catch {
+      dupes = []
+    }
+    setCleaning(false)
     modal.confirm({
-      title: '合并与过滤所有标签？',
-      content:
-        '将把库内全部题目的英文别名归并为中文规范名（dp → 动态规划、binary search → 二分），并清除年份、赛事、地区等噪声标签。掌握度地图、数据概览、弱项分析会自动同步。',
-      okText: '开始清洗',
+      title: dupes.length > 0 ? '合并标签并删除重复题目？' : '合并与过滤所有标签？',
+      width: 520,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ margin: '4px 0' }}>
+            将把库内全部题目的英文别名归并为中文规范名（dp → 动态规划、binary search → 二分），
+            并清除年份、赛事、地区等噪声标签。掌握度地图、数据概览、弱项分析会自动同步。
+          </p>
+          {dupes.length > 0 && (
+            <>
+              <p style={{ margin: '4px 0' }}>
+                另发现 <b>{dupes.length}</b> 组「平台 + 标题 + 题号（忽略空格与大小写）完全相同」的重复题目：
+                每组保留 1 条（优先保留有提交记录的），其余删除——提交 / 卡点 / 计划任务并入保留题，
+                复习条目与保留题冲突时丢弃重复行的。同标题但题号不同的题（CF 各轮撞名）不算重复，不会被动。
+              </p>
+              <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                {dupes.slice(0, 5).map((g) => (
+                  <li key={`${g.platform}/${g.title}/${g.keep.problemKey}`}>
+                    {platformName(g.platform as PlatformId)}「{g.title}」：保留 {g.keep.problemKey}，删除{' '}
+                    {g.remove.map((d) => d.problemKey).join('、')}
+                  </li>
+                ))}
+              </ul>
+              {dupes.length > 5 && <span style={{ color: '#8993a2' }}>… 共 {dupes.length} 组</span>}
+            </>
+          )}
+        </div>
+      ),
+      okText: dupes.length > 0 ? `开始清洗（去重 ${dupes.length} 组）` : '开始清洗',
       cancelText: '取消',
       onOk: async () => {
         setCleaning(true)
         try {
-          const r = await post<{ total: number; problemsCleaned: number; tagsRemoved: number }>(
+          const r = await post<{ total: number; problemsCleaned: number; tagsRemoved: number; duplicatesRemoved: number }>(
             '/api/problems/clean-tags',
             {},
           )
+          const parts: string[] = []
+          if (r.problemsCleaned > 0) parts.push(`${r.problemsCleaned} 道题的标签已更新，共清除/归并 ${r.tagsRemoved} 个标签`)
+          // 旧版服务端无 duplicatesRemoved 字段（undefined），不会误报 0
+          if (r.duplicatesRemoved > 0) parts.push(`删除重复题目 ${r.duplicatesRemoved} 道（引用已并入保留题）`)
           message.success(
-            r.problemsCleaned > 0
-              ? `清洗完成：${r.problemsCleaned} 道题的标签已更新，共清除/归并 ${r.tagsRemoved} 个标签`
-              : `所有 ${r.total} 道题的标签已经是干净的，无需清洗`,
+            parts.length > 0
+              ? `清洗完成：${parts.join('；')}`
+              : `所有 ${r.total} 道题的标签已经是干净的，也没有重复题目`,
           )
           loadRef.current()
+          reloadFacets()
         } catch (e) {
           message.error((e as Error).message)
         } finally {
@@ -687,7 +735,7 @@ export default function Problems() {
                 知识点管线
               </Button>
             </Tooltip>
-            <Tooltip title="归并英文别名为中文规范名，清除噪声标签（写入数据库）">
+            <Tooltip title="归并英文别名为中文规范名、清除噪声标签，并删除平台 + 标题 + 题号（忽略空格与大小写）相同的重复题（写入数据库）">
               <Button icon={<TagsOutlined />} loading={cleaning} onClick={cleanTags}>
                 合并与过滤
               </Button>
