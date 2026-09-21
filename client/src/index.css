@@ -2823,6 +2823,13 @@ body {
   cursor: pointer;
 }
 
+/* hidden 形态（复习库）：折叠时不露出笔记内容，只在卡片右下角留「展开」按钮 */
+.note-preview--hidden .note-preview-toggle {
+  display: block;
+  margin-left: auto;
+  margin-top: 2px;
+}
+
 /* ---------- 写题历史面板（issue #19，嵌在数据概览的卡片内） ---------- */
 
 .history-platform-bar {

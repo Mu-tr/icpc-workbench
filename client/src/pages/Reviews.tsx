@@ -134,7 +134,8 @@ export default function Reviews() {
                       [{item.problemKey}] {item.title}
                     </span>
                   )}
-                  {item.note && <NotePreview text={item.note} />}
+                  {/* issue #27：折叠时整段隐藏，只在右下角留「展开」，进入页面默认收起 */}
+                  {item.note && <NotePreview text={item.note} collapseMode="hidden" />}
                 </div>
                 <div className="review-item-actions">
                   <Space size={6} wrap>
