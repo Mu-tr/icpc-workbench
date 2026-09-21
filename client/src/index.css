@@ -2830,10 +2830,12 @@ body {
   margin-top: 2px;
 }
 
-/* 操作列里的笔记展开/收起按钮：右对齐，落在编辑/移除图标按钮的正下方 */
+/* 操作列里的笔记展开/收起按钮：对齐到编辑图标按钮的正下方——
+   右侧让出「移除按钮 24px + Space 间距 6px」，避免盖在删除按钮下方造成误触 */
 .review-item-actions .note-preview-toggle {
   display: block;
   margin-left: auto;
+  margin-right: calc(24px + 6px);
   margin-top: 2px;
 }
 
