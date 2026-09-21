@@ -148,6 +148,13 @@ test('DELETE: 题号记入墓碑后，同步与题库拉取不再重建；手动
     ]);
     assert.equal(countOf(d, "SELECT COUNT(*) c FROM problems WHERE platform = 'codeforces' AND problem_key = '1A'"), 0);
 
+    // 归一化等价类的变体键同样被挡：同步下发 ' 1A' 也不得重建（PR 审查反馈）
+    const variant = insertNormalized(d, 1, [
+      { ...sub1A('s1b'), problem: { ...sub1A('s1b').problem, problemKey: ' 1A' } },
+    ]);
+    assert.equal(variant.imported, 0);
+    assert.equal(countOf(d, "SELECT COUNT(*) c FROM problems WHERE platform = 'codeforces' AND problem_key = ' 1A'"), 0);
+
     // 手动导入 = 用户显式找回：清墓碑、重建题目、提交入库
     const manual = insertNormalized(d, 1, [sub1A('manual:1')]);
     assert.equal(manual.imported, 1);
@@ -256,8 +263,8 @@ test('回收站：删除带快照入列表，恢复原样重建题目并清墓�
 test('回收站：旧墓碑无快照按题号兜底重建；题目已存在时只清墓碑不覆盖', async () => {
   await withServer(async (base) => {
     const d = db!;
-    // 模拟补快照列之前写入的裸墓碑
-    d.prepare("INSERT INTO deleted_problems (platform, problem_key) VALUES ('codeforces', 'ZZ9')").run();
+    // 模拟补快照列之前写入的裸墓碑（normalized_key 由 migrate 回填，这里直接给出）
+    d.prepare("INSERT INTO deleted_problems (platform, problem_key, normalized_key) VALUES ('codeforces', 'ZZ9', 'zz9')").run();
     const r = await fetch(`${base}/deleted/restore`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -269,7 +276,7 @@ test('回收站：旧墓碑无快照按题号兜底重建；题目已存在时�
     assert.equal(row.title, 'ZZ9', '无快照时退化为「题号即标题」');
 
     // 墓碑与现存题目并存（如手动导入未清墓碑的历史态）：只清墓碑，现有行原样保留
-    d.prepare("INSERT INTO deleted_problems (platform, problem_key, title) VALUES ('codeforces', '1A', '陈旧快照')").run();
+    d.prepare("INSERT INTO deleted_problems (platform, problem_key, normalized_key, title) VALUES ('codeforces', '1A', '1a', '陈旧快照')").run();
     const keep = d.prepare("SELECT id FROM problems WHERE problem_key = '1A'").get() as { id: number };
     const r2 = await fetch(`${base}/deleted/restore`, {
       method: 'POST',

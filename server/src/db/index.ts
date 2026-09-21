@@ -75,6 +75,12 @@ function migrate(db: Db): void {
     if (tombstoneCols.size > 0 && !tombstoneCols.has(col)) db.exec(`ALTER TABLE deleted_problems ADD COLUMN ${col} TEXT`);
   }
   if (tombstoneCols.size > 0 && !tombstoneCols.has('difficulty')) db.exec('ALTER TABLE deleted_problems ADD COLUMN difficulty INTEGER');
+  // 墓碑归一化键（与 clean-tags NORMALIZED_KEY_SQL 同口径）：老行回填一次即可
+  if (tombstoneCols.size > 0 && !tombstoneCols.has('normalized_key')) {
+    db.exec('ALTER TABLE deleted_problems ADD COLUMN normalized_key TEXT');
+    db.exec("UPDATE deleted_problems SET normalized_key = LOWER(REPLACE(problem_key, ' ', '')) WHERE normalized_key IS NULL");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_deleted_problems_norm ON deleted_problems(platform, normalized_key)');
   mergeSlashedCfKeys(db);
   // v0.4.5 数据修复：洛谷秒级时间戳曾被按毫秒解析（见 fixLuoguTimestamps）
   fixLuoguTimestamps(db);

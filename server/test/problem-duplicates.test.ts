@@ -124,11 +124,22 @@ test('clean-tags: 删除重复题并把提交/计划任务并入保留行，复�
         url: null,
         tags: [],
       },
+      // 归一化等价类的规范键变体：题库版本更新后下发 '1A'/' 1A' 同样不得绕过墓碑（PR 审查反馈）
+      {
+        platform: 'codeforces',
+        problemKey: '1A',
+        title: 'Two Sum',
+        difficulty: null,
+        nativeDifficulty: null,
+        difficultyScale: null,
+        url: null,
+        tags: [],
+      },
     ]);
     assert.equal(
-      (d.prepare("SELECT COUNT(*) c FROM problems WHERE problem_key = '1a'").get() as { c: number }).c,
+      (d.prepare("SELECT COUNT(*) c FROM problems WHERE problem_key IN ('1a', '1A')").get() as { c: number }).c,
       0,
-      '墓碑题号不应被题库重建',
+      '墓碑按归一化题号匹配，任何原始键变体都不应被题库重建',
     );
   });
 });

@@ -51,8 +51,14 @@ export function insertNormalized(
      VALUES (?, ?, (SELECT id FROM problems WHERE platform = ? AND problem_key = ?), ?, ?, ?, ?)`,
   );
   const findProblem = db.prepare('SELECT id, title, tags FROM problems WHERE platform = ? AND problem_key = ?');
-  const isDeleted = db.prepare('SELECT 1 AS x FROM deleted_problems WHERE platform = ? AND problem_key = ?');
-  const clearDeletedMark = db.prepare('DELETE FROM deleted_problems WHERE platform = ? AND problem_key = ?');
+  // 墓碑按归一化题号匹配（与 clean-tags 判重的 NORMALIZED_KEY_SQL 同口径）：
+  // 删掉 '1a' 行后，同步下发变体键 '1A' 也必须被挡住，否则会重建同一等价类的第三行
+  const isDeleted = db.prepare(
+    "SELECT 1 AS x FROM deleted_problems WHERE platform = ? AND normalized_key = LOWER(REPLACE(?, ' ', ''))",
+  );
+  const clearDeletedMark = db.prepare(
+    "DELETE FROM deleted_problems WHERE platform = ? AND normalized_key = LOWER(REPLACE(?, ' ', ''))",
+  );
   // 手动导入（externalId 以 manual: 开头）与平台同步数据协调：
   // 同平台同题同结果已存在（无论来源是同步还是手动）→ 跳过，避免重复计数
   const manualDup = db.prepare(

@@ -79,9 +79,12 @@ CREATE INDEX IF NOT EXISTS idx_problems_difficulty ON problems(difficulty);
 -- 手动 CSV 导入（manual 来源）视为用户显式找回，清墓碑后照常入库。
 -- 同时保存删除时刻的题目快照：回收站（POST /api/problems/deleted/restore）据此原样重建题目行；
 -- 快照列之前的旧墓碑行为 NULL（当时无回收站），恢复时退化为「题号即标题」的最小重建。
+-- normalized_key = 去空格、忽略大小写的题号，与 clean-tags 判重（NORMALIZED_KEY_SQL）同一口径：
+-- 墓碑匹配按归一化键而非原始键，否则删掉 '1a' 后题库下发 '1A' 会绕过墓碑再造第三行重复。
 CREATE TABLE IF NOT EXISTS deleted_problems (
   platform    TEXT NOT NULL,
   problem_key TEXT NOT NULL,
+  normalized_key TEXT NOT NULL,
   deleted_at  TEXT NOT NULL DEFAULT (datetime('now')),
   title            TEXT,
   difficulty       INTEGER,
@@ -92,6 +95,8 @@ CREATE TABLE IF NOT EXISTS deleted_problems (
   difficulty_scale  TEXT,
   PRIMARY KEY (platform, problem_key)
 );
+-- (platform, normalized_key) 索引由 db/index.ts migrate 创建：老库补 normalized_key 列之前，
+-- 在 schema 里建索引会因列不存在而启动报错。
 
 -- 自建知识点管线（v2）：结构化知识点标注。JSONL（dataDir/knowledge/annotations.jsonl）
 -- 为源真相，本表是启动时幂等重建的查询索引。code 锚定 taxonomy.json（稳定不可改）；

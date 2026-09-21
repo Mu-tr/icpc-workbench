@@ -39,17 +39,14 @@ export function upsertBankProblems(
     tags: string[];
   }>,
 ): BankImportResult[] {
-  const deletedKeys = new Set(
-    (
-      db.prepare('SELECT platform, problem_key FROM deleted_problems').all() as Array<{
-        platform: string;
-        problem_key: string;
-      }>
-    ).map((d) => `${d.platform}|${d.problem_key}`),
+  // 墓碑按归一化题号匹配（与 clean-tags 判重同口径）：题库下发的变体键（'1A'/'1a'/' 1A'）
+  // 不得绕过墓碑重建等价类的重复行
+  const isDeletedKey = db.prepare(
+    "SELECT 1 AS x FROM deleted_problems WHERE platform = ? AND normalized_key = LOWER(REPLACE(?, ' ', ''))",
   );
   // 结果仍覆盖入参出现过的全部平台（全被墓碑跳过时如实报 0/0，而不是整平台消失）
   const platforms = [...new Set(rows.map((r) => r.platform))];
-  const alive = deletedKeys.size === 0 ? rows : rows.filter((r) => !deletedKeys.has(`${r.platform}|${r.problemKey}`));
+  const alive = rows.filter((r) => !isDeletedKey.get(r.platform, r.problemKey));
   const byPlatform = new Map<PlatformId, string[]>();
   for (const r of alive) {
     const keys = byPlatform.get(r.platform) ?? [];

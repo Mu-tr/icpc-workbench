@@ -498,9 +498,9 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
     const tombstones: Array<{ platform: string; problemKey: string }> = [];
     const markDeleted = db.prepare(
       `INSERT OR REPLACE INTO deleted_problems
-         (platform, problem_key, title, difficulty, url, tags,
+         (platform, problem_key, normalized_key, title, difficulty, url, tags,
           difficulty_source, native_difficulty, difficulty_scale)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, LOWER(REPLACE(?, ' ', '')), ?, ?, ?, ?, ?, ?, ?)`,
     );
     const problemById = db.prepare(
       `SELECT platform, problem_key, title, difficulty, url, tags,
@@ -528,6 +528,7 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
           // 墓碑带快照，回收站可原样找回
           markDeleted.run(
             g.platform,
+            dup.problemKey,
             dup.problemKey,
             dupRow.title,
             dupRow.difficulty,
@@ -692,11 +693,12 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
       // 快照随墓碑一起落库：回收站恢复题目行靠它原样重建（提交/复习/卡点仍不可恢复）
       db.prepare(
         `INSERT OR REPLACE INTO deleted_problems
-           (platform, problem_key, title, difficulty, url, tags,
+           (platform, problem_key, normalized_key, title, difficulty, url, tags,
             difficulty_source, native_difficulty, difficulty_scale)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, LOWER(REPLACE(?, ' ', '')), ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         problem.platform,
+        problem.problem_key,
         problem.problem_key,
         problem.title,
         problem.difficulty,
