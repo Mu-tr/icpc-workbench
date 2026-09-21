@@ -11,7 +11,7 @@ import { backfillDifficulties } from '../analysis/difficultyBackfill.ts';
 import { fetchLuoguBank, fetchNowcoderBank, fetchCodeforcesBank, fetchLeetcodeBank, fetchAtcoderBank, fetchDaimayuanBank, fetchJisuankeBank } from '../adapters/problemBank.ts';
 import type { LuoguProblemType } from '../adapters/problemBank.ts';
 import { upsertBankProblems } from '../import/bankService.ts';
-import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr } from '../knowledge/store.ts';
+import { problemKeypointsCte, knowledgeTagsJoinSql, knowledgeTagsCoalesceSql, knowledgeTagsExpr, appendAnnotations, effectiveDataDir, tombstoneLine } from '../knowledge/store.ts';
 import { isValidCode } from '../knowledge/taxonomy.ts';
 import { throttledFetch } from '../net/hostThrottle.ts';
 
@@ -535,6 +535,62 @@ export function problemsRoutes(db: Db, fetchFn: typeof fetch = throttledFetch): 
       )
       .all(DEFAULT_USER_ID, platform, key);
     res.json({ items: rows });
+  });
+
+  // DELETE /api/problems/:id → 删除题目（issue #27：题库重复题目没有删除入口）。
+  // UNIQUE(platform, problem_key) 挡住同库重复行，但跨平台镜像（洛谷 AT ↔ AtCoder 原题）
+  // 与误导入仍会产生用户想清掉的行 —— 行留着会持续污染难度分布、标签分面与待选题池。
+  // 题目行是提交/复习/卡点/知识点标注的锚，删除必须连带清理（外键已开启，漏一处即报错）；
+  // 训练计划任务保留（标题/链接冗余在任务行上），只解除题目引用。
+  // 知识点标注的源真相在 JSONL，删除前必须各来源补一行墓碑，防止下次启动重放时复活。
+  r.delete('/:id', (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
+    const problem = db
+      .prepare('SELECT id, platform, problem_key FROM problems WHERE id = ?')
+      .get(id) as { id: number; platform: string; problem_key: string } | undefined;
+    if (!problem) return res.status(404).json({ error: '题目不存在（可能已被删除）' });
+
+    const deletedSubmissions = (
+      db.prepare('SELECT COUNT(*) AS c FROM submissions WHERE problem_id = ?').get(id) as { c: number }
+    ).c;
+    const deletedReviewItems = (
+      db.prepare('SELECT COUNT(*) AS c FROM review_items WHERE problem_id = ?').get(id) as { c: number }
+    ).c;
+
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM submission_intents WHERE problem_id = ?').run(id);
+      db.prepare('DELETE FROM submissions WHERE problem_id = ?').run(id);
+      db.prepare('DELETE FROM review_items WHERE problem_id = ?').run(id);
+      db.prepare('UPDATE plan_tasks SET problem_id = NULL WHERE problem_id = ?').run(id);
+      db.prepare('DELETE FROM problem_keypoints WHERE platform = ? AND problem_key = ?').run(
+        problem.platform,
+        problem.problem_key,
+      );
+      // 历史遗留表无读取方，但主键同为 (platform, problem_key)，一并清掉避免残留
+      db.prepare('DELETE FROM knowledge_queue WHERE platform = ? AND problem_key = ?').run(
+        problem.platform,
+        problem.problem_key,
+      );
+      db.prepare('DELETE FROM problems WHERE id = ?').run(id);
+      // JSONL 墓碑在事务 COMMIT 前追加（与 setManualKeypoints 同款时序）：
+      // 崩溃时 JSONL 多出的墓碑行在下次启动重放自愈，不会留下半删状态
+      const dataDir = effectiveDataDir();
+      if (dataDir) {
+        appendAnnotations(dataDir, [
+          tombstoneLine(problem.platform, problem.problem_key, 'rule'),
+          tombstoneLine(problem.platform, problem.problem_key, 'tag'),
+          tombstoneLine(problem.platform, problem.problem_key, 'ai'),
+          tombstoneLine(problem.platform, problem.problem_key, 'manual'),
+        ]);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    res.json({ ok: true, deletedSubmissions, deletedReviewItems });
   });
 
   return r;

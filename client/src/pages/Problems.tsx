@@ -19,7 +19,7 @@ import {
   Upload,
 } from 'antd'
 import type { TreeSelectProps } from 'antd'
-import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
+import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useSearchParams } from 'react-router-dom'
 import SyncProgressHint from '../components/SyncProgressHint'
@@ -33,7 +33,7 @@ import PlatformTag from '../components/PlatformTag'
 import { difficultyColor, formatDifficulty, PLATFORM_COLOR, platformName, tagColor } from '../ui'
 import { DIFFICULTY_BUCKETS as DIFF_BUCKETS, type DifficultyBucket } from '../problemFilter'
 import { codeOptionsFromTags } from '../intentOptions'
-import { get, post, put } from '../api'
+import { del, get, post, put } from '../api'
 
 /** GET /api/knowledge/taxonomy 响应（服务端 taxonomy.json 结构） */
 interface TaxonomyDoc {
@@ -489,6 +489,42 @@ export default function Problems() {
     }
   }
 
+  // 删除题目（issue #27：题库重复题目没有删除入口）。用于清理跨平台镜像/误导入的行；
+  // 服务端连带删除该题的提交、复习条目、卡点与知识点标注，此处把代价讲清楚再让用户确认。
+  const removeProblem = (r: ProblemRow) => {
+    modal.confirm({
+      title: `删除题目 ${r.problem_key}？`,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ margin: '4px 0' }}>
+            将一并删除该题的提交记录（{r.attempts} 条）、复习条目、
+            卡点与知识点标注，相关统计同步减少且<b>不可恢复</b>；训练计划里引用该题的任务仅解除关联。
+          </p>
+          <p style={{ margin: '4px 0', color: '#8993a2' }}>
+            仅用于清理重复 / 误导入的题目；如需隐藏题库未做题，关掉「含题库未做题」即可。
+          </p>
+        </div>
+      ),
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await del<{ ok: boolean; deletedSubmissions: number; deletedReviewItems: number }>(
+            `/api/problems/${r.id}`,
+          )
+          message.success(
+            `已删除 ${r.problem_key}（含提交 ${res.deletedSubmissions} 条、复习条目 ${res.deletedReviewItems} 条）`,
+          )
+          loadRef.current()
+          reloadFacets()
+        } catch (e) {
+          message.error((e as Error).message)
+        }
+      },
+    })
+  }
+
   const uploadProps = {
     beforeUpload: (file: File) => {
       if (!platform) {
@@ -601,8 +637,8 @@ export default function Problems() {
     { title: '提交', dataIndex: 'attempts', width: 70, align: 'right' },
     {
       title: '操作',
-      // 4 个按钮最小内容宽约 182px + 单元格内边距，150 会把「卡在哪」裁出列外
-      width: 200,
+      // 5 个按钮最小内容宽约 214px + 单元格内边距，150 会把「卡在哪」裁出列外
+      width: 232,
       fixed: 'right',
       render: (_v, r) => (
         <Space size={4}>
@@ -627,6 +663,9 @@ export default function Problems() {
                 onError={(m) => message.error(m)}
               />
             </span>
+          </Tooltip>
+          <Tooltip title="删除题目（清理重复 / 误导入；连带删除其提交与复习记录）">
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeProblem(r)} />
           </Tooltip>
         </Space>
       ),
@@ -837,8 +876,8 @@ export default function Problems() {
               loading={loading}
               columns={cols}
               dataSource={rows}
-              // 固定列宽合计 818px；容器更窄时出横向滚动条，操作列吸附右缘始终可见
-              scroll={{ x: 940 }}
+              // 固定列宽合计 850px；容器更窄时出横向滚动条，操作列吸附右缘始终可见
+              scroll={{ x: 970 }}
               // 服务端分页：当前页 50 行由后端过滤 + LIMIT 得出，前端不再持有全量数据
               pagination={{
                 current: page,
