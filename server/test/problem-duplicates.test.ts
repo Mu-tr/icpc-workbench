@@ -4,6 +4,7 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { createDb, type Db } from '../src/db/index.ts';
 import { problemsRoutes } from '../src/routes/problems.ts';
+import { upsertBankProblems } from '../src/import/bankService.ts';
 
 let db: Db | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -106,6 +107,29 @@ test('clean-tags: 删除重复题并把提交/计划任务并入保留行，复�
     assert.equal(reviews.length, 1);
     assert.equal(reviews[0].problem_id, 2);
     assert.equal(reviews[0].note, '保留行的笔记');
+
+    // 被删的重复题号记入 deleted_problems，题库重拉不得复活（保留行不动）
+    assert.equal(
+      (d.prepare("SELECT COUNT(*) c FROM deleted_problems WHERE platform = 'codeforces' AND problem_key = '1a'").get() as { c: number }).c,
+      1,
+    );
+    upsertBankProblems(d, [
+      {
+        platform: 'codeforces',
+        problemKey: '1a',
+        title: 'Two Sum',
+        difficulty: null,
+        nativeDifficulty: null,
+        difficultyScale: null,
+        url: null,
+        tags: [],
+      },
+    ]);
+    assert.equal(
+      (d.prepare("SELECT COUNT(*) c FROM problems WHERE problem_key = '1a'").get() as { c: number }).c,
+      0,
+      '墓碑题号不应被题库重建',
+    );
   });
 });
 

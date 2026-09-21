@@ -19,7 +19,7 @@ import {
   Upload,
 } from 'antd'
 import type { TreeSelectProps } from 'antd'
-import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, TagsOutlined } from '@ant-design/icons'
+import { ApartmentOutlined, ClearOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, ReadOutlined, RestOutlined, TagsOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useSearchParams } from 'react-router-dom'
 import SyncProgressHint from '../components/SyncProgressHint'
@@ -74,6 +74,15 @@ interface DuplicateGroup {
   title: string
   keep: { id: number; problemKey: string; attempts: number }
   remove: Array<{ id: number; problemKey: string; attempts: number }>
+}
+
+/** GET /api/problems/deleted 条目：删除墓碑（回收站），title/difficulty 为删除时刻快照，旧墓碑可为 null */
+interface DeletedRow {
+  platform: string
+  problem_key: string
+  title: string | null
+  difficulty: number | null
+  deleted_at: string
 }
 
 interface ProblemRow {
@@ -165,6 +174,9 @@ export default function Problems() {
   /** 「导入刷题记录」弹窗当前页签（受控：SyncTab 用它判断自己是否活跃，从而刷新/轮询续拉状态） */
   const [importTab, setImportTab] = useState('sync')
   const [cleaning, setCleaning] = useState(false)
+  // 回收站（issue #27 误删恢复）：null = 旧服务端无此接口 → 隐藏入口；否则为墓碑清单
+  const [trash, setTrash] = useState<DeletedRow[] | null>(null)
+  const [trashOpen, setTrashOpen] = useState(false)
   const [manualForm] = Form.useForm()
   // 知识点管线（P4）：覆盖率 + 批跑/无 Key 导出入口
   const [pipelineOpen, setPipelineOpen] = useState(false)
@@ -242,11 +254,27 @@ export default function Problems() {
   // 右侧分布图用「不带筛选、但同样遵守『含题库未做题』开关」的口径。
   // 必须与列表的候选集一致：服务端缺省只显示做过的题，若这里漏掉 bank=1，
   // 分布合计会与「共 N 题」对不上（默认 includeBank=true，差异约 1.8 万）。
-  useEffect(() => {
+  // 提取成函数：删除/清洗会改变全库口径的计数，须与 reloadFacets 一并刷新
+  const reloadUnfilteredFacets = useCallback(() => {
     get<ProblemsFacets>(`/api/problems/facets${includeBank ? '?bank=1' : ''}`)
       .then(setUnfilteredFacets)
       .catch(() => { /* 同上 */ })
   }, [includeBank])
+
+  useEffect(() => {
+    reloadUnfilteredFacets()
+  }, [reloadUnfilteredFacets])
+
+  // 回收站墓碑清单：旧服务端 GET /deleted 404 → 置 null 隐藏入口（与分面同口径静默降级）
+  const loadTrash = useCallback(() => {
+    get<DeletedRow[]>('/api/problems/deleted')
+      .then(setTrash)
+      .catch(() => setTrash(null))
+  }, [])
+
+  useEffect(() => {
+    loadTrash()
+  }, [loadTrash])
 
   // ---------- 知识点管线 ----------
 
@@ -407,6 +435,8 @@ export default function Problems() {
           )
           loadRef.current()
           reloadFacets()
+          // 去重会改变全库题数：右侧分布图（无筛选口径）也要刷新
+          reloadUnfilteredFacets()
         } catch (e) {
           message.error((e as Error).message)
         } finally {
@@ -550,6 +580,8 @@ export default function Problems() {
           </p>
           <p style={{ margin: '4px 0', color: '#8993a2' }}>
             仅用于清理重复 / 误导入的题目；如需隐藏题库未做题，关掉「含题库未做题」即可。
+            删除后同步与题库拉取不再重建该题；题目行可在工具栏「回收站」恢复（提交 / 复习 /
+            卡点 / 人工知识点标注不会找回）。
           </p>
         </div>
       ),
@@ -566,6 +598,42 @@ export default function Problems() {
           )
           loadRef.current()
           reloadFacets()
+          reloadUnfilteredFacets()
+          loadTrash()
+        } catch (e) {
+          message.error((e as Error).message)
+        }
+      },
+    })
+  }
+
+  // 回收站恢复：服务端按墓碑快照重建题目行并清墓碑；提交/复习/卡点不复活，弹窗里再确认一次
+  const restoreProblem = (t: DeletedRow) => {
+    modal.confirm({
+      title: `恢复题目 ${t.problem_key}？`,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ margin: '4px 0' }}>
+            将按删除时刻的快照重建题目行（标题 / 难度 / 标签），此后同步与题库拉取恢复正常收录。
+          </p>
+          <p style={{ margin: '4px 0', color: '#8993a2' }}>
+            删除时清掉的提交、复习条目、卡点与人工知识点标注不会找回；同步平台题目下次同步会拉回提交记录。
+          </p>
+        </div>
+      ),
+      okText: '恢复',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await post<{ ok: boolean; recreated: boolean }>(
+            '/api/problems/deleted/restore',
+            { platform: t.platform, problemKey: t.problem_key },
+          )
+          message.success(res.recreated ? `已恢复 ${t.problem_key}` : `${t.problem_key} 已在库中（墓碑已清除）`)
+          loadTrash()
+          loadRef.current()
+          reloadFacets()
+          reloadUnfilteredFacets()
         } catch (e) {
           message.error((e as Error).message)
         }
@@ -740,6 +808,13 @@ export default function Problems() {
                 合并与过滤
               </Button>
             </Tooltip>
+            {trash !== null && trash.length > 0 && (
+              <Tooltip title="回收站：误删的题目可在此恢复题目行（提交/复习/卡点不找回）">
+                <Button icon={<RestOutlined />} onClick={() => setTrashOpen(true)}>
+                  回收站 · {trash.length}
+                </Button>
+              </Tooltip>
+            )}
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setImportOpen(true)}>
               导入题目
             </Button>
@@ -1171,6 +1246,61 @@ export default function Problems() {
           style={{ width: '100%' }}
           maxTagCount={8}
           filterTreeNode={(input, node) => String(node?.title ?? '').toLowerCase().includes(input.toLowerCase())}
+        />
+      </Modal>
+
+      {/* 回收站（issue #27 误删恢复）：列出带快照的墓碑，恢复仅重建题目行 */}
+      <Modal
+        title="回收站"
+        open={trashOpen}
+        onCancel={() => setTrashOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <p style={{ color: '#8993a2', fontSize: 12 }}>
+          恢复只按删除时刻的快照重建题目行；其提交、复习条目、卡点与人工知识点标注不会找回。
+          题目行留在回收站不会污染统计，不恢复可放着不管。
+        </p>
+        <Table<DeletedRow>
+          size="small"
+          rowKey={(t) => `${t.platform}/${t.problem_key}`}
+          dataSource={trash ?? []}
+          pagination={false}
+          scroll={{ y: 360 }}
+          columns={[
+            {
+              title: '题目',
+              render: (_v, t) => (
+                <Space size={6}>
+                  <PlatformTag id={t.platform as PlatformId} />
+                  <span className="mono">{t.problem_key}</span>
+                  <span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t.title ?? '（无快照）'}
+                  </span>
+                  {t.difficulty != null && (
+                    <span className="rating-pill mono" style={{ color: difficultyColor(t.difficulty) }}>
+                      {t.difficulty}
+                    </span>
+                  )}
+                </Space>
+              ),
+            },
+            {
+              title: '删除时间',
+              dataIndex: 'deleted_at',
+              width: 150,
+              render: (v: string) => <span style={{ fontSize: 12, color: '#8993a2' }}>{v}</span>,
+            },
+            {
+              title: '操作',
+              width: 80,
+              render: (_v, t) => (
+                <Button size="small" type="link" onClick={() => restoreProblem(t)}>
+                  恢复
+                </Button>
+              ),
+            },
+          ]}
         />
       </Modal>
     </div>

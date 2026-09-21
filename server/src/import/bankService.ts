@@ -19,6 +19,8 @@ export interface BankImportResult {
  * - 难度按来源优先级覆盖（见 problemWritePolicy.ts）：题库来源 bank(1) 优先级最低，
  *   不会覆盖同步(2)/回填(3)/手动(4)得到的难度，与 importService 共用同一段 SQL
  * - tags 写入即净化（噪声过滤 + 同义词归并），非空才覆盖
+ * - 命中 deleted_problems 墓碑（用户删过的题号，issue #27）的行整行跳过：
+ *   否则下次拉题库/内置题库版本播种会把删掉的题原样重建，删除入口永不生效
  * 注：SQLite ON CONFLICT DO UPDATE 的 changes 恒为 1，无法区分新增/更新，
  * 故先按平台统计库内已有 key 数，upsert 后用差值计算。
  */
@@ -37,8 +39,19 @@ export function upsertBankProblems(
     tags: string[];
   }>,
 ): BankImportResult[] {
+  const deletedKeys = new Set(
+    (
+      db.prepare('SELECT platform, problem_key FROM deleted_problems').all() as Array<{
+        platform: string;
+        problem_key: string;
+      }>
+    ).map((d) => `${d.platform}|${d.problem_key}`),
+  );
+  // 结果仍覆盖入参出现过的全部平台（全被墓碑跳过时如实报 0/0，而不是整平台消失）
+  const platforms = [...new Set(rows.map((r) => r.platform))];
+  const alive = deletedKeys.size === 0 ? rows : rows.filter((r) => !deletedKeys.has(`${r.platform}|${r.problemKey}`));
   const byPlatform = new Map<PlatformId, string[]>();
-  for (const r of rows) {
+  for (const r of alive) {
     const keys = byPlatform.get(r.platform) ?? [];
     keys.push(r.problemKey);
     byPlatform.set(r.platform, keys);
@@ -62,7 +75,7 @@ export function upsertBankProblems(
       existedByPlatform.set(platform, existed);
     }
     const newProblems: Array<{ platform: string; problemKey: string; title: string; tags: string }> = [];
-    for (const r of rows) {
+    for (const r of alive) {
       stmt.run(
         r.platform,
         r.problemKey,
@@ -91,10 +104,10 @@ export function upsertBankProblems(
     } catch (e) {
       console.error(`[knowledge] 题库入库后 L1 标注失败（不影响入库）: ${(e as Error).message}`);
     }
-    return [...byPlatform.entries()].map(([platform, keys]) => {
+    return platforms.map((platform) => {
       const existed = existedByPlatform.get(platform) ?? 0;
-      // 同批内重复 key 只算一次存在
-      const uniqueKeys = new Set(keys).size;
+      // 同批内重复 key 只算一次存在；该平台全部命中墓碑时 keys 为空 → 0/0
+      const uniqueKeys = new Set(byPlatform.get(platform) ?? []).size;
       const inserted = Math.max(0, uniqueKeys - existed);
       return { platform, inserted, updated: uniqueKeys - inserted };
     });
