@@ -2823,8 +2823,15 @@ body {
   cursor: pointer;
 }
 
-/* hidden 形态（复习库）：折叠时不露出笔记内容，只在卡片右下角留「展开」按钮 */
+/* hidden 形态（复习库）：折叠时不露出笔记内容，「展开/收起」按钮由操作列渲染 */
 .note-preview--hidden .note-preview-toggle {
+  display: block;
+  margin-left: auto;
+  margin-top: 2px;
+}
+
+/* 操作列里的笔记展开/收起按钮：右对齐，落在编辑/移除图标按钮的正下方 */
+.review-item-actions .note-preview-toggle {
   display: block;
   margin-left: auto;
   margin-top: 2px;

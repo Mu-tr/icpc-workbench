@@ -29,14 +29,28 @@ export default function Reviews() {
   const [filter, setFilter] = useState<'due' | 'all'>('due')
   const [editing, setEditing] = useState<ReviewItem | null>(null)
   const [noteDraft, setNoteDraft] = useState('')
+  // 展开的笔记条目 id：状态提升到页面持有，因为「展开/收起」按钮要放在右侧操作列（编辑按钮下方）
+  const [openNoteIds, setOpenNoteIds] = useState<ReadonlySet<number>>(new Set())
 
   const load = useCallback((f: 'due' | 'all') => {
     setLoading(true)
     get<ReviewItem[]>(`/api/reviews${f === 'due' ? '?due=1' : ''}`)
-      .then(setItems)
+      .then((r) => {
+        setItems(r)
+        // 每次重取列表后回到默认收起（列表重挂载，展开状态不跨刷新保留）
+        setOpenNoteIds(new Set())
+      })
       .catch((e: Error) => message.error(e.message))
       .finally(() => setLoading(false))
   }, [])
+
+  const toggleNoteOpen = (id: number) =>
+    setOpenNoteIds((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
 
   useEffect(() => {
     load(filter)
@@ -134,8 +148,15 @@ export default function Reviews() {
                       [{item.problemKey}] {item.title}
                     </span>
                   )}
-                  {/* issue #27：折叠时整段隐藏，只在右下角留「展开」，进入页面默认收起 */}
-                  {item.note && <NotePreview text={item.note} collapseMode="hidden" />}
+                  {/* issue #27：折叠时整段隐藏；展开按钮由操作列渲染（编辑按钮下方），进入页面默认收起 */}
+                  {item.note && (
+                    <NotePreview
+                      text={item.note}
+                      collapseMode="hidden"
+                      expanded={openNoteIds.has(item.id)}
+                      onToggleExpanded={() => toggleNoteOpen(item.id)}
+                    />
+                  )}
                 </div>
                 <div className="review-item-actions">
                   <Space size={6} wrap>
@@ -164,6 +185,16 @@ export default function Reviews() {
                       <Button size="small" type="text" danger icon={<DeleteOutlined />} title="移出队列" />
                     </Popconfirm>
                   </Space>
+                  {/* 笔记展开/收起：右对齐到图标按钮下方（编辑按钮正下方，issue #27） */}
+                  {item.note && (
+                    <button
+                      type="button"
+                      className="note-preview-toggle"
+                      onClick={() => toggleNoteOpen(item.id)}
+                    >
+                      {openNoteIds.has(item.id) ? '收起' : '展开'}
+                    </button>
+                  )}
                 </div>
               </Card>
             )

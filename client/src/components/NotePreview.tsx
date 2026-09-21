@@ -1,16 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import Markdown from './Markdown'
 
+interface NotePreviewProps {
+  text: string
+  /**
+   * 折叠形态：
+   * - `clip`（默认，模板库）：限高露出前 220px，渐隐 mask 暗示「下面还有内容」，
+   *   超高时给「展开 / 收起」—— 卡片列表里贴了大图或长文时不至于把整页撑爆。
+   * - `hidden`（复习库，issue #27 讨论定稿）：折叠时**整段隐藏**，点开才渲染笔记；
+   *   每次进入页面默认收起，列表保持紧凑一屏一题。
+   */
+  collapseMode?: 'clip' | 'hidden'
+  /**
+   * 受控展开态。hidden 形态下把「展开 / 收起」按钮放到卡片操作列（编辑按钮下方）时，
+   * 由父组件持有状态并自己渲染按钮，组件不再渲染内置按钮。
+   */
+  expanded?: boolean
+  /** 与受控 `expanded` 成对使用：父组件在此回调里翻转自己的状态 */
+  onToggleExpanded?: () => void
+}
+
 /**
- * 笔记预览（复习库 / 模板库卡片内）：完整 Markdown 渲染 + 折叠开关，两种折叠形态：
- *
- * - `clip`（默认，模板库）：限高露出前 220px，渐隐 mask 暗示「下面还有内容」，
- *   超高时给「展开 / 收起」—— 卡片列表里贴了大图或长文时不至于把整页撑爆。
- * - `hidden`（复习库，issue #27 讨论定稿）：折叠时**整段隐藏**，只在卡片右下角留
- *   「展开」按钮，点开才渲染笔记；每次进入页面默认收起，列表保持紧凑一屏一题。
+ * 笔记预览（复习库 / 模板库卡片内）：完整 Markdown 渲染 + 折叠开关。
  */
-export default function NotePreview({ text, collapseMode = 'clip' }: { text: string; collapseMode?: 'clip' | 'hidden' }) {
-  const [expanded, setExpanded] = useState(false)
+export default function NotePreview({ text, collapseMode = 'clip', expanded: expandedProp, onToggleExpanded }: NotePreviewProps) {
+  const [innerExpanded, setInnerExpanded] = useState(false)
+  // 传入 expanded 即受控：展开态由父组件持有，点击只回调 onToggleExpanded
+  const controlled = expandedProp !== undefined
+  const expanded = expandedProp ?? innerExpanded
+  const toggleExpanded = () => {
+    if (controlled) onToggleExpanded?.()
+    else setInnerExpanded((v) => !v)
+  }
   const [clippable, setClippable] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   // 测量回调里要读最新的 expanded：展开态下 max-height 被放开，
@@ -40,6 +61,8 @@ export default function NotePreview({ text, collapseMode = 'clip' }: { text: str
 
   // hidden 形态折叠时不渲染 Markdown（点开才渲染，也免掉图片异步加载的测量问题）
   const hideWhenCollapsed = collapseMode === 'hidden'
+  // hidden + 受控：按钮由调用方渲染在操作列，组件内不再出内置按钮
+  const showToggle = hideWhenCollapsed ? !controlled : clippable
   return (
     <div className={`note-preview${hideWhenCollapsed ? ' note-preview--hidden' : ''}`} data-expanded={expanded || undefined}>
       {(!hideWhenCollapsed || expanded) && (
@@ -51,8 +74,8 @@ export default function NotePreview({ text, collapseMode = 'clip' }: { text: str
           <Markdown text={text} />
         </div>
       )}
-      {(hideWhenCollapsed || clippable) && (
-        <button type="button" className="note-preview-toggle" onClick={() => setExpanded((v) => !v)}>
+      {showToggle && (
+        <button type="button" className="note-preview-toggle" onClick={toggleExpanded}>
           {expanded ? '收起' : '展开'}
         </button>
       )}
