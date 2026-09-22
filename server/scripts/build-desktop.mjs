@@ -25,6 +25,19 @@ if (!hostTriple) {
   console.error('无法确定 rustc host 三元组');
   process.exit(1);
 }
+// v0.5.1 事故：GNU/MinGW 工具链下 webview2-com-sys 动态链接 WebView2Loader.dll，
+// 打出的壳在无该 DLL 的用户机直接报「找不到 WebView2Loader.dll」。
+// MSVC 则静态链接 WebView2LoaderStatic.lib，无此依赖。正式发布必须走 CI（MSVC）。
+const isGnu = hostTriple.includes('-gnu');
+if (isGnu) {
+  console.warn(`
+======== 警告：当前 rustc host 为 ${hostTriple}（GNU/MinGW） ========
+本次打出的壳 exe 将静态导入 WebView2Loader.dll，分发给用户会启动报错。
+正式发布包请走 .github/workflows/release-desktop.yml（CI MSVC 环境），
+不要用本机的 GNU 产物打 tag。安装包（NSIS）无法自动附带该 DLL，仅限本机测试。
+================================================================
+`);
+}
 
 const coreExe = path.join(serverRoot, 'dist', 'icpc-core.exe');
 const shellExe = path.join(appTauriDir, 'target', 'release', 'icpc-workbench.exe');
@@ -91,6 +104,28 @@ try {
   fs.copyFileSync(shellExe, path.join(releaseDir, 'icpc-workbench.exe'));
   fs.copyFileSync(coreExe, path.join(releaseDir, 'icpc-core.exe'));
 
+  // GNU 构建的壳运行时需要 WebView2Loader.dll：从 cargo 构建目录找出来一起放进
+  // release/，便携版至少本机/自带该 DLL 的机器可跑（MSVC 构建无此依赖，跳过）。
+  let loaderDllNote = '';
+  if (isGnu) {
+    const buildDir = path.join(appTauriDir, 'target', 'release', 'build');
+    const loaderDll = fs
+      .readdirSync(buildDir)
+      .filter((d) => d.startsWith('webview2-com-sys-'))
+      .map((d) => path.join(buildDir, d, 'out', 'x64', 'WebView2Loader.dll'))
+      .find((p) => fs.existsSync(p));
+    if (!loaderDll) {
+      console.error('GNU 构建：未找到 webview2-com-sys 产出的 WebView2Loader.dll，便携版无法运行');
+      process.exit(1);
+    }
+    fs.copyFileSync(loaderDll, path.join(releaseDir, 'WebView2Loader.dll'));
+    loaderDllNote = `
+【便携版额外注意（GNU 构建包）】
+  本便携版由 GNU/MinGW 工具链构建，icpc-workbench.exe 必须与
+  WebView2Loader.dll 放在同一目录才能启动，请勿删除该 dll。
+`;
+  }
+
   const README_TXT = `
 ======================================
  ICPC 备赛工作台 · 使用说明
@@ -119,7 +154,7 @@ try {
   - 检查更新：设置页底部有「检查更新」按钮，支持一键更新（正式版与
     GitHub 最新提交构建）；也可手动下载新版安装包覆盖，
     或用新便携版的两个 exe 覆盖旧文件，data 文件夹不用动。
-`;
+${loaderDllNote}`;
 
   fs.writeFileSync(path.join(releaseDir, '使用说明.txt'), `\ufeff${README_TXT}`, 'utf8');
 } catch (e) {
@@ -175,3 +210,6 @@ console.log(`\n完成: ${releaseDir}`);
 console.log(`  ${setupExe}  ${sizeOf(path.join(releaseDir, setupExe))} MB（安装程序）`);
 console.log(`  icpc-workbench.exe  ${sizeOf(path.join(releaseDir, 'icpc-workbench.exe'))} MB（便携版壳）`);
 console.log(`  icpc-core.exe       ${sizeOf(path.join(releaseDir, 'icpc-core.exe'))} MB（便携版核心）`);
+if (isGnu) {
+  console.log(`  WebView2Loader.dll  ${sizeOf(path.join(releaseDir, 'WebView2Loader.dll'))} MB（GNU 构建壳的运行依赖）`);
+}

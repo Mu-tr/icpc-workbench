@@ -1,0 +1,213 @@
+# 正式版桌面构建：推送 v* tag 时在 CI 的 MSVC 环境构建全平台安装包，并创建/覆盖对应 Release 资产。
+# 背景（v0.5.1 事故）：本机默认工具链是 x86_64-pc-windows-gnu，手动打出的 Tauri 壳
+# 静态导入 WebView2Loader.dll（webview2-com-sys 在非 msvc 目标环境下动态链接该 DLL），
+# 用户机缺该 DLL 直接弹「由于找不到 WebView2Loader.dll，无法继续执行代码」。
+# CI 的 windows-latest + rust-toolchain@stable 默认 MSVC host，静态链接 WebView2LoaderStatic.lib，
+# 无外部 DLL 依赖。此后 tag 产物一律由本工作流产出，不再手动打包上传。
+# workflow_dispatch 支持指定历史 tag 重建资产（如修复已发布的 v0.5.1）。
+name: 正式版桌面构建（tag 发布）
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并发布的历史 tag（如 v0.5.1）'
+        required: true
+        type: string
+      windows_only:
+        description: '仅构建 Windows（修复旧版 tag 缺少 mac 构建脚本时勾选）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # 质量门禁：与 nightly-desktop.yml 的 gate 同源，防止在坏提交上发布正式版。
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: Typecheck (server + client)
+        run: npm run typecheck
+
+      - name: Lint (client)
+        run: npm run lint
+
+      - name: Test (server + client)
+        run: npm test
+
+  build-windows:
+    needs: [gate]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build-desktop.mjs 用 git describe 取 tag 注入版本
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable # windows-latest 默认 host = msvc，壳静态链接 WebView2Loader
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/app/src-tauri
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建桌面版（核心 SEA + Tauri 壳 + NSIS 安装程序）
+        run: node server/scripts/build-desktop.mjs
+
+      # 回归门禁（v0.5.1 事故）：壳 exe 的导入表不允许出现 WebView2Loader.dll。
+      # MSVC 构建静态链接 loader；一旦出现该导入说明构建滑向了 GNU 工具链，禁止发布。
+      - name: 校验壳不依赖 WebView2Loader.dll
+        shell: pwsh
+        run: |
+          $bytes = [IO.File]::ReadAllBytes("server/release/icpc-workbench.exe")
+          $text = [Text.Encoding]::ASCII.GetString($bytes)
+          if ($text -match 'WebView2Loader\.dll') {
+            Write-Error "壳 exe 导入表含 WebView2Loader.dll：这是 GNU/MinGW 构建产物（v0.5.1 事故），禁止发布"
+            exit 1
+          }
+          Write-Host "校验通过：壳不依赖外部 WebView2Loader.dll（MSVC 静态链接）"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: |
+            server/release/icpc-workbench.exe
+            server/release/icpc-core.exe
+            server/release/*-setup.exe
+          if-no-files-found: error
+
+  build-mac:
+    needs: [gate]
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.windows_only) }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/app/src-tauri
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建 macOS 桌面版（核心 SEA + Tauri 壳 + .app/.dmg，Apple Silicon）
+        run: node server/scripts/build-desktop-mac.mjs
+
+      - name: 校验 SEA 注入段与签名
+        run: |
+          set -e
+          APP="desktop/app/src-tauri/target/release/bundle/macos/icpc-workbench.app"
+          CORE="$APP/Contents/MacOS/icpc-core"
+          echo "== $CORE 的 segment/section =="
+          otool -l "$CORE" | grep -E 'segname|sectname' | sort -u
+          if ! otool -l "$CORE" | grep -q 'segname NODE_SEA'; then
+            echo "::error::SEA blob 不在 NODE_SEA 段：postject 少了 --macho-segment-name NODE_SEA，mac 版核心会启动即崩"
+            exit 1
+          fi
+          if otool -l "$CORE" | grep -q 'segname __POSTJECT'; then
+            echo "::error::SEA blob 落进了默认的 __POSTJECT 段，Node 找不到它"
+            exit 1
+          fi
+          echo "== codesign =="
+          codesign -dv --verbose=2 "$CORE" 2>&1 | grep -E 'Signature|Identifier' || true
+          codesign --verify --verbose=2 "$CORE"
+          codesign --verify --deep --verbose=2 "$APP"
+          echo "SEA 段与签名校验通过"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-mac
+          path: |
+            server/release/*.dmg
+            server/release/icpc-core-*
+            server/release/README-mac.txt
+          if-no-files-found: error
+
+  publish:
+    needs: [gate, build-windows, build-mac]
+    if: ${{ !failure() && !cancelled() && needs.gate.result == 'success' && needs.build-windows.result == 'success' && (needs.build-mac.result == 'success' || needs.build-mac.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: server/release
+          merge-multiple: true
+
+      - name: 生成 SHA256 校验文件
+        run: |
+          cd server/release
+          ls -la
+          find . -maxdepth 1 -type f ! -name checksums.sha256 -printf '%f\n' | sort | xargs sha256sum > checksums.sha256
+          cat checksums.sha256
+
+      - name: 发布/覆盖 Release 资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$RELEASE_TAG"
+          cd server/release
+          ASSETS=$(find . -maxdepth 1 -type f ! -name checksums.sha256 -printf '%f\n' | sort)
+          cd "$GITHUB_WORKSPACE"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重建历史 tag（如 v0.5.1 修复）：在位覆盖资产，checksums 最后传，
+            # 缩短应用内更新「新产物 + 旧校验文件」的不一致窗口。
+            gh release upload "$TAG" --clobber \
+              $(printf 'server/release/%s ' $ASSETS) \
+              server/release/checksums.sha256
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              $(printf 'server/release/%s ' $ASSETS) \
+              server/release/checksums.sha256
+          fi
+          echo "已发布 $TAG"
