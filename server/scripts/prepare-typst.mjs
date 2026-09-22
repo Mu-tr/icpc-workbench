@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 export const TYPST_VERSION = '0.15.1';
 
+const DEFAULT_MIRRORS = ['https://ghfast.top', 'https://gh-proxy.com'];
+const OFFICIAL_TIMEOUT_MS = 10_000;
+const MIRROR_TIMEOUT_MS = 120_000;
+
 const ASSETS = {
   'win32-x64': {
     file: `typst-x86_64-pc-windows-msvc.zip`,
@@ -60,6 +64,55 @@ function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
+export function mirrorPrefixes(env = process.env.ICPC_TYPST_MIRRORS) {
+  const raw = (env ?? '').trim();
+  const list = raw ? raw.split(',').map((value) => value.trim()).filter(Boolean) : DEFAULT_MIRRORS;
+  return list.map((value) => value.replace(/\/+$/, ''));
+}
+
+export function candidateUrls(url, mirrors = mirrorPrefixes()) {
+  return [
+    { label: 'GitHub 官方源', url, timeoutMs: OFFICIAL_TIMEOUT_MS },
+    ...mirrors.map((prefix) => ({
+      label: `镜像 ${new URL(prefix).hostname}`,
+      url: `${prefix}/${url}`,
+      timeoutMs: MIRROR_TIMEOUT_MS,
+    })),
+  ];
+}
+
+export async function downloadVerifiedArchive(url, expectedSha256, { quiet = false, fetchFn = fetch } = {}) {
+  const failures = [];
+
+  for (const candidate of candidateUrls(url)) {
+    if (!quiet) console.log(`[typst] 尝试 ${candidate.label} ...`);
+
+    try {
+      const response = await fetchFn(candidate.url, {
+        headers: { 'User-Agent': 'icpc-workbench-build' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(candidate.timeoutMs),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const archive = Buffer.from(await response.arrayBuffer());
+      const actual = sha256(archive);
+      if (actual !== expectedSha256) {
+        throw new Error(`SHA256 不匹配（期望 ${expectedSha256}，实际 ${actual}）`);
+      }
+
+      if (!quiet) console.log(`[typst] ${candidate.label} 下载并校验通过`);
+      return archive;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${candidate.label}: ${message}`);
+      if (!quiet) console.warn(`[typst] ${candidate.label} 失败：${message}`);
+    }
+  }
+
+  throw new Error(`下载 Typst 失败，所有候选源均不可用：\n- ${failures.join('\n- ')}`);
+}
+
 /** 下载并校验当前平台的官方 Typst CLI，返回可执行文件绝对路径。 */
 export async function ensureTypstBinary({ quiet = false } = {}) {
   const key = currentPlatformKey();
@@ -76,16 +129,7 @@ export async function ensureTypstBinary({ quiet = false } = {}) {
   fs.mkdirSync(archiveDir, { recursive: true });
 
   if (!quiet) console.log(`[typst] 下载 v${TYPST_VERSION} (${key}) ...`);
-  const response = await fetch(url, {
-    headers: { 'User-Agent': 'icpc-workbench-build' },
-    redirect: 'follow',
-  });
-  if (!response.ok) throw new Error(`下载 Typst 失败：HTTP ${response.status}`);
-  const archive = Buffer.from(await response.arrayBuffer());
-  const actual = sha256(archive);
-  if (actual !== asset.sha256) {
-    throw new Error(`Typst 下载校验失败：期望 ${asset.sha256}，实际 ${actual}`);
-  }
+  const archive = await downloadVerifiedArchive(url, asset.sha256, { quiet });
   fs.writeFileSync(archivePath, archive);
 
   const extractDir = fs.mkdtempSync(path.join(archiveDir, 'extract-'));
